@@ -13,28 +13,16 @@ BXZEX_HOME="${BXZEX_HOME:-$HOME/.bxzex-ai}"
 LOG="$BXZEX_HOME/install.log"
 
 R=$'\033[0m'; D=$'\033[2m'; B=$'\033[1m'
-A=$'\033[38;5;196m'   # accent, replaced once a color is picked
-COLORS="red orange gold green cyan blue purple pink white"
-code_for() { case "$1" in red) echo 196;; orange) echo 208;; gold) echo 220;; green) echo 46;; cyan) echo 51;;
-             blue) echo 39;; purple) echo 141;; pink) echo 205;; white) echo 255;; *) echo 196;; esac; }
+A=$'\033[38;5;39m'   # accent, replaced once a color is picked
+COLORS="blue red orange gold green cyan purple pink white"
+SKILLS="ui-design no-ai-slop human-writing frontend-build landing-page social-posts client-proposal accessibility web-research summarize data-analysis debugging code-review security-check python-scripting git-workflow mac-automation"
+code_for() { case "$1" in blue) echo 39;; red) echo 196;; orange) echo 208;; gold) echo 220;; green) echo 46;; cyan) echo 51;;
+             purple) echo 141;; pink) echo 205;; white) echo 255;; *) echo 39;; esac; }
 
 ok()   { printf '  %s✓%s %s\n' "$A" "$R" "$*"; }
 note() { printf '  %s%s%s\n' "$D" "$*" "$R"; }
 die()  { printf '\033[?25h\n  %s✗ %s%s\n' "$A" "$*" "$R" >&2; exit 1; }
 trap 'printf "\033[?25h"' EXIT
-
-logo() {
-  printf '\n'
-  while IFS= read -r line; do printf '   %s%s%s\n' "$A" "$line" "$R"; sleep 0.04; done <<'ART'
-██████   ██   ██  ███████  ██████   ██   ██
-██   ██   ██ ██      ██    ██        ██ ██
-██████     ███      ██     █████      ███
-██   ██   ██ ██    ██      ██        ██ ██
-██████   ██   ██  ███████  ██████   ██   ██
-ART
-  printf '\n   %sU N C E N S O R E D   ·   L O C A L   A I%s\n' "$B" "$R"
-  printf '   %sbxzex.com · instagram @bxzex%s\n\n' "$D" "$R"
-}
 
 # curl | bash leaves stdin as the script itself, so questions go to the terminal directly
 ask() {   # prompt -> reply on stdout, empty when there is no terminal or BXZEX_YES=1
@@ -53,11 +41,11 @@ pick_color() {
       printf '   %s%d%s  \033[38;5;%sm████  %s%s\n' "$D" "$i" "$R" "$(code_for "$name")" "$name" "$R"; i=$((i+1))
     done
     printf '\n'
-    choice="$(ask "  number or name (Enter for red): ")"
+    choice="$(ask "  number or name (Enter for blue): ")"
     case "$choice" in [1-9]) choice="$(echo $COLORS | cut -d' ' -f"$choice")";; esac
   fi
   [ -n "$choice" ] || return 0
-  case " $COLORS " in *" $choice "*) ;; *) choice=red;; esac
+  case " $COLORS " in *" $choice "*) ;; *) choice=blue;; esac
   A=$'\033[38;5;'"$(code_for "$choice")m"
   printf '{"color": "%s"}\n' "$choice" > "$BXZEX_HOME/config.json"
   ok "color set to $choice (change it any time with /color)"
@@ -112,11 +100,25 @@ download() {   # url, destination, label
 
 # ---- checks ----
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || die "This needs a Mac with Apple Silicon (M1 or newer)."
-mkdir -p "$BXZEX_HOME/bin" "$BXZEX_HOME/models"
+command -v python3 >/dev/null || die "python3 is required. Run: xcode-select --install"
+mkdir -p "$BXZEX_HOME/bin" "$BXZEX_HOME/models" "$BXZEX_HOME/skills"
 : > "$LOG"
 
-logo
+# ---- the app (first, so it can draw the logo) ----
+src="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
+[ -f "$src/install.sh" ] && [ -f "$src/bxzex-ai" ] || src=""
+fetch() {   # path inside the repo, destination
+  if [ -n "$src" ]; then cp "$src/$1" "$2"; else curl -fsSL -o "$2" "$REPO/$1"; fi
+}
+for f in bxzex-ai bxzex-server; do fetch "$f" "$BXZEX_HOME/bin/$f"; chmod +x "$BXZEX_HOME/bin/$f"; done
+for k in $SKILLS; do fetch "skills/$k.md" "$BXZEX_HOME/skills/$k.md"; done
+
+python3 "$BXZEX_HOME/bin/bxzex-ai" --logo || true
+printf '\n   %sU N C E N S O R E D   ·   L O C A L   A I%s\n' "$B" "$R"
+printf '   %shttps://bxzex.com · instagram.com/bxzex%s\n\n' "$D" "$R"
 pick_color
+python3 "$BXZEX_HOME/bin/bxzex-ai" --flyby || true
+ok "app and skills installed"
 
 ram=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 if [ "$ram" -lt 24 ]; then
@@ -124,17 +126,6 @@ if [ "$ram" -lt 24 ]; then
   case "$(ask "  Install anyway? [y/N] ")" in y|Y|yes) ;; *) [ "${BXZEX_YES:-}" = 1 ] || die "stopped";; esac
 fi
 command -v brew >/dev/null || die "Homebrew is required. Install it from https://brew.sh and run this again."
-command -v python3 >/dev/null || die "python3 is required. Run: xcode-select --install"
-
-# ---- the app ----
-src="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
-for f in bxzex-ai bxzex-server; do
-  if [ -f "$src/install.sh" ] && [ -f "$src/$f" ]; then cp "$src/$f" "$BXZEX_HOME/bin/$f"
-  else curl -fsSL -o "$BXZEX_HOME/bin/$f" "$REPO/$f"; fi
-  chmod +x "$BXZEX_HOME/bin/$f"
-done
-python3 "$BXZEX_HOME/bin/bxzex-ai" --flyby || true
-ok "app installed"
 
 # ---- engines ----
 for pkg in llama.cpp whisper-cpp ffmpeg; do
@@ -158,4 +149,4 @@ ok "command added"
 
 python3 "$BXZEX_HOME/bin/bxzex-ai" --flyby || true
 printf '\n  %s%sREADY.%s Open a new terminal window and type: %sbxzex-ai%s\n' "$B" "$A" "$R" "$B" "$R"
-printf '  %sbxzex.com · instagram @bxzex · © 2026 bxzex%s\n\n' "$D" "$R"
+printf '  %shttps://bxzex.com · instagram.com/bxzex · © 2026 bxzex%s\n\n' "$D" "$R"
