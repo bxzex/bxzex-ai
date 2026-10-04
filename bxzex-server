@@ -1,0 +1,42 @@
+#!/bin/bash
+# BXZEX Uncensored AI — Local Model
+# Copyright (c) 2026 bxzex · https://bxzex.com
+#
+# Starts the local model server that `bxzex-ai` talks to (127.0.0.1:8080).
+# `bxzex-ai` runs this for you when the server isn't up; run it by hand to watch the log.
+#
+# Tuned on a 24GB M4 MacBook Air, where the model is GPU-bound: about 2 tok/s plain and
+# 3.6-4.3 with MTP drafting, so drafting stays on. One slot and the cache caps keep a
+# long chat from pushing the Mac into swap.
+set -euo pipefail
+
+BXZEX_HOME="${BXZEX_HOME:-$HOME/.bxzex-ai}"
+
+BIN="${BXZEX_SERVER_BIN:-$(command -v llama-server || true)}"
+[ -n "$BIN" ] && [ -x "$BIN" ] || { echo "llama-server not found. Install it with: brew install llama.cpp" >&2; exit 1; }
+
+MODEL="${BXZEX_MODEL:-$BXZEX_HOME/models/bxzex-model.gguf}"
+[ -f "$MODEL" ] || { echo "model not found at $MODEL. Run install.sh, or set BXZEX_MODEL to a .gguf file." >&2; exit 1; }
+
+ARGS=(
+  --model "$MODEL"
+  --alias bxzex-uncensored
+  --host 127.0.0.1 --port "${BXZEX_PORT:-8080}"
+  --ctx-size "${BXZEX_CTX:-32768}"
+  --n-gpu-layers 99
+  --flash-attn on
+  --cache-type-k q8_0 --cache-type-v q4_0
+  --batch-size 2048 --ubatch-size 512
+  --threads 4 --threads-batch 4
+  --parallel 1
+  --ctx-checkpoints 8 --cache-ram 2048
+  --spec-type "${SPEC:-draft-mtp}" --spec-draft-n-max 3 --spec-draft-p-min 0.4
+  --temp 0.7 --top-k 20 --top-p 0.95 --min-p 0.0 --repeat-penalty 1.0
+  --jinja --no-warmup
+)
+
+# The vision half. Without it the model is text-only.
+VISION="$(dirname "$MODEL")/bxzex-vision.gguf"
+[ -f "$VISION" ] && ARGS+=(--mmproj "$VISION")
+
+exec "$BIN" "${ARGS[@]}"

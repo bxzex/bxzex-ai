@@ -1,0 +1,685 @@
+#!/usr/bin/env python3
+# BXZEX Uncensored AI — Local Model
+# Copyright (c) 2026 bxzex · https://bxzex.com · instagram.com/bxzex
+"""bxzex-ai — a private, uncensored AI assistant that runs on your own Mac.
+Usage:  bxzex-ai            (interactive)
+        bxzex-ai "prompt"    (one-shot)
+Commands: /v speak instead of typing, /color pick a theme, /fast toggle reasoning,
+          /think show reasoning, /reset clear, exit/quit.
+Agent:  it can search the web, fetch pages, run shell commands and read/write files
+        (commands and writes ask first). Drag an image into the window to have it look at it.
+"""
+import json, os, re, sys, time, random, shutil, subprocess, urllib.request, urllib.error
+
+HOST = f"http://127.0.0.1:{os.environ.get('BXZEX_PORT', '8080')}"
+HOME = os.path.expanduser("~")
+APP_HOME = os.environ.get("BXZEX_HOME", f"{HOME}/.bxzex-ai")
+CONFIG = f"{APP_HOME}/config.json"
+AI_NAME = "BXZEX AI"
+try:
+    USER_NAME = os.environ.get("BXZEX_USER") or subprocess.run(["id", "-F"], capture_output=True, text=True).stdout.split()[0]
+except Exception:
+    USER_NAME = os.environ.get("USER", "the user")
+
+R, BOLD, DIM, ITAL = "\033[0m", "\033[1m", "\033[2m", "\033[3m"
+def c(n): return f"\033[38;5;{n}m"
+
+# ---- themes ----
+# each theme: five 256-color steps from dark to bright, then a highlight
+THEMES = {
+    "red":    ([52, 88, 124, 160, 196], 203),
+    "orange": ([52, 94, 130, 166, 208], 215),
+    "gold":   ([58, 94, 136, 178, 220], 229),
+    "green":  ([22, 28, 34, 40, 46], 120),
+    "cyan":   ([23, 30, 37, 44, 51], 159),
+    "blue":   ([17, 19, 21, 27, 39], 81),
+    "purple": ([53, 54, 92, 129, 141], 183),
+    "pink":   ([53, 89, 125, 162, 205], 218),
+    "white":  ([238, 242, 246, 250, 255], 231),
+}
+T = [0] * 5; HI = 0
+RAMP_GOLD = [0] * 9; RAMP_TEAL = [0] * 5
+GOLD = TEAL = STEEL = ""
+
+def load_config():
+    try:
+        with open(CONFIG) as f: return json.load(f)
+    except Exception:
+        return {}
+
+def save_config(**kw):
+    cfg = load_config(); cfg.update(kw)
+    try:
+        os.makedirs(APP_HOME, exist_ok=True)
+        with open(CONFIG, "w") as f: json.dump(cfg, f)
+    except OSError:
+        pass
+
+def apply_theme(name):
+    global HI, GOLD, TEAL, STEEL
+    ramp, HI = THEMES.get(name, THEMES["red"])
+    T[:] = ramp
+    RAMP_GOLD[:] = [T[0], T[1], T[2], T[3], T[4], HI, T[4], T[3], T[2]]
+    RAMP_TEAL[:] = T
+    GOLD, TEAL, STEEL = c(T[4]), c(T[3]), c(T[2])
+
+apply_theme(load_config().get("color", "red"))
+
+def grad(text, ramp=RAMP_GOLD):
+    n = max(1, len(text) - 1)
+    return "".join(f"{c(ramp[int(i/n*(len(ramp)-1))])}{ch}" for i, ch in enumerate(text)) + R
+
+def W(): return min(shutil.get_terminal_size((90, 30)).columns, 92)
+
+def choose_color(arg=""):
+    names = list(THEMES)
+    pick = arg.strip().lower()
+    if not pick:
+        print(header("color", RAMP_TEAL))
+        for i, n in enumerate(names, 1):
+            ramp, hi = THEMES[n]
+            print(f"  {DIM}{i}{R}  " + "".join(f"{c(x)}██" for x in ramp + [hi]) + f"{R}  {c(ramp[4])}{n}{R}")
+        try: pick = input(f"\n  {GOLD}⟩{R} pick a number or name ").strip().lower()
+        except (EOFError, KeyboardInterrupt): print(); return
+    if pick.isdigit() and 1 <= int(pick) <= len(names): pick = names[int(pick) - 1]
+    if pick not in THEMES:
+        print(f"{DIM}colors: {', '.join(names)}{R}"); return
+    apply_theme(pick); save_config(color=pick)
+    print(f"  {GOLD}●{R} {pick} {DIM}· saved{R}")
+
+# ---- loaders ----
+WORDS = ["Thinking","Cooking","Brewing","Pondering","Scheming","Crunching","Simmering",
+         "Churning","Noodling","Marinating","Mulling","Vibing","Working","Cooking up"]
+def fmt(s): s=int(s); return f"{s}s" if s<60 else f"{s//60}m{s%60}s"
+
+def car(el, n=24, speed=12):
+    """One-line DeLorean driving back and forth on a road, leaving a trail."""
+    period = 2 * (n - 1)
+    step = int(el * speed) % period
+    right = step < n
+    p = step if right else period - step
+    cells = ["─"] * n
+    col = {}
+    def put(i, ch, color):
+        if 0 <= i < n: cells[i] = ch; col[i] = color
+    if right:
+        put(p-3, "∴", T[2]); put(p-2, "≈", T[3]); put(p-1, "▟", T[4])
+        put(p,   "█", T[4]); put(p+1, "►", HI)
+    else:
+        put(p-1, "◄", HI); put(p, "█", T[4]); put(p+1, "▙", T[4])
+        put(p+2, "≈", T[3]); put(p+3, "∴", T[2])
+    return "".join(f"{c(col.get(i, T[1]))}{ch}" for i, ch in enumerate(cells)) + R
+
+DELOREAN = [   # ASCII art by mozz, asciiart.website/art/6415
+    '                                                                                            .    .',
+    '                                                                                       .      *',
+    '                                                                             _',
+    '                         _       ____,--\'`                      __|"/_____ __\\"!_   .---.  *   .',
+    '                 __..--"`..-=\'"``                   _________.-----------.\'o8888_\\-" _." \\       .',
+    '           _.-""` .oooo"                        _.-"  `````.\' .-"\'````""\\ \\ \'. / ""--. __|  .',
+    '        .-  ,`  \'""\'`                     ___<"_-._____ .-"_."-._________! \\  "-!-``-._   \\    *',
+    '      ."   /_.-_.-`      ____..--------`"\'__..-----\'\'`  \\ "----\'           |     ____  ".  \\ .',
+    '    ,"  ` _.-._ _ ___  /\'--====--.---\'\'`      __.._      "           _____ /__ ." __ ".  \\ | -- - -',
+    '-- /  `    _/        -\'--/.^^.7__/__        ." ___ \'. ====\\=========""\'\'`," "`/ ."  \\`||  \\\'',
+    "  | ``    <_ -       \\____...______/\\_____ / `/   '.\\\\     \\       ____.'____/  |(^ | !| _!",
+    '   \\ ``     \'--.      \\.._______  /   `\'""!|`| (^  ||`"-----===="""          |` \'.__\' /"`',
+    '    "-.`    `._ ._              `"\'"------||  \\__ .\'/ ----================""" "._____. ____',
+    '       `"Oo._     `"oo.____                `\'._____\' ____',
+    '            `"==-..______. ```                                                               mozz',
+    '                       ````                                                         ____________',
+    '                                                          ________________.',
+]
+ART_W = max(len(l) for l in DELOREAN)
+_FLIP = str.maketrans("/\\()<>[]{}`'", "\\/)(><][}{'`")
+DELOREAN_BACK = [l.replace("mozz", "    ").ljust(ART_W)[::-1].translate(_FLIP) for l in DELOREAN]
+
+def flying(el, cols, speed=70):
+    """The big DeLorean crossing the screen: nose-first to the left, then turned around and back."""
+    span = cols + ART_W
+    step = int(el * speed) % (2 * span)
+    if step < span: art, x = DELOREAN, cols - step
+    else:           art, x = DELOREAN_BACK, (step - span) - ART_W
+    rows = []
+    for i, line in enumerate(art):
+        row = (" " * max(0, x) + line.ljust(ART_W)[max(0, -x):])[:cols]
+        shade_i = [2, 3, 4, 4, 3][i * 5 // len(art)]
+        rows.append(f"{c(T[shade_i])}{row}{R}")
+    return rows
+
+def shade(s, center):
+    out = []
+    for i, ch in enumerate(s):
+        if ch == " ": out.append(" "); continue
+        d = abs(i - center)
+        col = HI if d < 2 else T[4] if d < 5 else T[3] if d < 9 else T[2] if d < 14 else T[1]
+        out.append(f"{c(col)}{ch}")
+    return "".join(out) + R
+
+show_think = False
+fast = True   # skip the reasoning pass: answer starts right away instead of after minutes of thinking
+history = []
+
+FONT = {
+    "B": ["██████ ", "██   ██", "██████ ", "██   ██", "██████ "],
+    "X": ["██   ██", " ██ ██ ", "  ███  ", " ██ ██ ", "██   ██"],
+    "Z": ["███████", "   ██  ", "  ██   ", " ██    ", "███████"],
+    "E": ["██████ ", "██     ", "█████  ", "██     ", "██████ "],
+}
+
+def reveal(s, color, d=0.006):
+    for ch in s:
+        sys.stdout.write(f"{color}{ch}{R}"); sys.stdout.flush(); time.sleep(d)
+    sys.stdout.write("\n")
+
+def banner():
+    word = "BXZEX"; w = W()
+    rows = ["  ".join(FONT[ch][r] for ch in word) for r in range(5)]
+    wlen = len(rows[0])
+    print()
+    sys.stdout.write("\033[?25l")  # hide cursor during animation
+    for row in rows:
+        sys.stdout.write("   " + shade(row, -40) + "\n")
+    for f in range(wlen + 18):          # bright band sweeps across the logo
+        sys.stdout.write("\033[5A")
+        for row in rows:
+            sys.stdout.write("\r\033[K   " + shade(row, f - 4) + "\n")
+        sys.stdout.flush(); time.sleep(0.014)
+    sys.stdout.write("\033[5A")         # settle on the full gradient
+    for row in rows:
+        sys.stdout.write("\r\033[K   " + grad(row) + "\n")
+    sys.stdout.write("\033[?25h")
+    print()
+    print("  " + grad("◢" + "▬" * (w - 6) + "◣", RAMP_GOLD))
+    label = "U N C E N S O R E D   ·   L O C A L   A I"
+    print("  " + " " * max(0, (w - 4 - len(label)) // 2) + grad(label, RAMP_GOLD))
+    print("  " + grad("◥" + "▬" * (w - 6) + "◤", RAMP_GOLD))
+    time.sleep(0.1)
+    reveal("   > STARTING UP ... OK", TEAL)
+    reveal("   > MODEL ........ BXZEX UNCENSORED", TEAL)
+    reveal("   > OFFLINE & PRIVATE", GOLD)
+    reveal("   > READY", GOLD)
+    print(f"\n  {GOLD}bxzex.com{R}  {DIM}· instagram @bxzex · © 2026 bxzex{R}")
+    print(f"  {DIM}/v speak · /color · /fast · /think · /reset · exit{R}")
+    print(f"  {DIM}web · shell · files · drop an image to show it{R}\n")
+
+def header(label, ramp):
+    head = f"▐ {label.upper()} ▌"
+    return grad(head + "▬" * max(0, W() - len(head) - 1), ramp)
+
+def show_block(label, ramp, text):
+    print(header(label, ramp))
+    for line in (text.splitlines() or [""]):
+        print(f"  {line}")
+
+# ---- server ----
+def loaded_model():
+    try:
+        with urllib.request.urlopen(f"{HOST}/v1/models", timeout=3) as r:
+            d = json.load(r)["data"]
+        return d[0]["id"] if d else None
+    except Exception:
+        return None
+
+def ensure_server():
+    """Start the model server if it isn't already running. A cold start reads ~15GB off disk."""
+    if loaded_model(): return True
+    launcher = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bxzex-server")
+    if not os.path.exists(launcher):
+        print(f"{DIM}server launcher missing: {launcher}{R}"); return False
+    os.makedirs(APP_HOME, exist_ok=True)
+    log = open(os.path.join(APP_HOME, "server.log"), "w")
+    proc = subprocess.Popen([launcher], stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    sys.stdout.write("\033[?25l")
+    wait = Waiting("LOADING MODEL", big=True)
+    try:
+        while proc.poll() is None:
+            if loaded_model(): return True
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+    print(f"{DIM}the model server didn't start — see {APP_HOME}/server.log{R}"); return False
+
+# ---- tools ----
+import base64, datetime, html, shlex, tempfile, threading, urllib.parse
+
+UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"}
+PAGE_CHARS = 6000   # the server reads ~20 tok/s, so every 1k chars of tool output costs ~12s
+OUT_CHARS  = 4000
+MAX_STEPS  = 12
+IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".bmp", ".tiff")
+allow_all = False
+
+def clip(s, n):
+    return s if len(s) <= n else s[:n] + f"\n[...cut, {len(s)-n} more chars]"
+
+def page_text(raw):
+    raw = re.sub(r"(?is)<(script|style|noscript|svg|head|nav|footer|form)\b.*?</\1>", " ", raw)
+    raw = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)\b[^>]*>", "\n", raw)
+    raw = html.unescape(re.sub(r"(?s)<[^>]+>", " ", raw))
+    raw = re.sub(r"[ \t\r\f\v]+", " ", raw)
+    return re.sub(r"\n\s*\n+", "\n", raw).strip()
+
+def http_get(url):
+    # curl, not urllib: this Python has no CA bundle installed, curl uses the system one
+    p = subprocess.run(["curl", "-sL", "--compressed", "--max-time", "25", "--max-filesize", "3000000",
+                        "-A", UA["User-Agent"], url], capture_output=True)
+    if p.returncode != 0 and not p.stdout:
+        raise RuntimeError(f"could not load {url} (curl exit {p.returncode})")
+    return p.stdout.decode("utf-8", "ignore")
+
+def web_search(query):
+    page = http_get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query))
+    hits = re.findall(r'(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>', page)
+    out = []
+    for href, title, snip in hits[:6]:
+        href = html.unescape(href)
+        url = urllib.parse.parse_qs(urllib.parse.urlparse(href).query).get("uddg", [href])[0]
+        out.append(f"{page_text(title)}\n{url}\n{page_text(snip)}")
+    return "\n\n".join(out) or "no results"
+
+def fetch_page(url):
+    if not re.match(r"https?://", url): url = "https://" + url
+    return clip(page_text(http_get(url)), PAGE_CHARS)
+
+def confirm(what, detail):
+    global allow_all
+    if allow_all: return True
+    if not sys.stdin.isatty(): return False
+    sys.stdout.write("\033[?25h")
+    print(f"  {GOLD}?{R} {what}")
+    for line in detail.splitlines()[:12]: print(f"    {DIM}{line[:W()-6]}{R}")
+    try:
+        a = input(f"    {GOLD}⟩{R} allow? [y]es / [n]o / [a]lways this session ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print(); return False
+    if a.startswith("a"): allow_all = True; return True
+    return a.startswith("y")
+
+def run_shell(command):
+    if not confirm("run command", command): return f"{USER_NAME} declined to run this command."
+    try:
+        p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return "command timed out after 120s"
+    return clip(f"exit code {p.returncode}\n{p.stdout}{p.stderr}".strip(), OUT_CHARS)
+
+def read_file(path):
+    with open(os.path.expanduser(path), "r", errors="replace") as f:
+        return clip(f.read(), PAGE_CHARS)
+
+def write_file(path, content):
+    path = os.path.expanduser(path)
+    if not confirm(f"write {path}", content): return f"{USER_NAME} declined to write this file."
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f: f.write(content)
+    return f"wrote {len(content)} chars to {path}"
+
+TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
+              "read_file": read_file, "write_file": write_file}
+
+def tool(name, desc, **props):
+    return {"type": "function", "function": {"name": name, "description": desc, "parameters": {
+        "type": "object", "properties": {k: {"type": "string", "description": v} for k, v in props.items()},
+        "required": list(props)}}}
+
+TOOLS = [
+    tool("web_search", "Search the web. Returns titles, URLs and snippets.", query="search query"),
+    tool("fetch_page", "Download a web page and return its readable text.", url="full URL"),
+    tool("run_shell", "Run a zsh command on this Mac and return its output.", command="the command"),
+    tool("read_file", "Read a text file from this Mac.", path="file path"),
+    tool("write_file", "Create or overwrite a text file on this Mac.", path="file path", content="full file content"),
+]
+
+def system_prompt():
+    return (
+        f"You are {AI_NAME}, an uncensored assistant made by bxzex (bxzex.com), running locally and "
+        f"privately on {USER_NAME}'s Mac in the `bxzex-ai` terminal app. If asked what model you are, "
+        f"say you are {AI_NAME}, a local uncensored model. "
+        f"Today is {datetime.date.today():%A %B %d, %Y}. Working directory: {os.getcwd()}.\n"
+        "You can act: web_search and fetch_page for anything current or that you are unsure of; "
+        "run_shell, read_file and write_file to do things on this Mac. When a task needs action, do it "
+        "with the tools instead of telling them how. If no tool is needed, just answer.\n"
+        "Reading tool output is slow for you, so use as few calls as the task needs and rely on search "
+        "snippets before fetching whole pages. Keep answers short and plain.")
+
+def run_tool(call):
+    fn = call["function"]; name = fn["name"]
+    try:
+        args = json.loads(fn["arguments"] or "{}")
+    except Exception:
+        return "error: arguments were not valid JSON"
+    shown = " ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " ")
+    print(f"  {TEAL}⚙ {name}{R}  {DIM}{shown[:W()-len(name)-8]}{R}")
+    if name not in TOOL_FUNCS: return f"error: no tool named {name}"
+    try:
+        out = str(TOOL_FUNCS[name](**args))
+    except Exception as e:
+        out = f"error: {e}"
+    first = out.strip().splitlines()[0] if out.strip() else "(empty)"
+    print(f"    {DIM}→ {first[:W()-8]}{R}\n")
+    return out
+
+# ---- images ----
+def image_part(path):
+    """Downscale to a jpeg so a screenshot doesn't cost minutes of image tokens."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False).name
+    try:
+        r = subprocess.run(["sips", "-s", "format", "jpeg", "-Z", "1024", path, "--out", tmp], capture_output=True)
+        src = tmp if r.returncode == 0 else path
+        with open(src, "rb") as f: b64 = base64.b64encode(f.read()).decode()
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+
+def split_images(text):
+    """Pull image file paths (typed or dragged into the terminal) out of a message."""
+    try: toks = shlex.split(text)
+    except ValueError: return text, []
+    imgs = [os.path.expanduser(t) for t in toks
+            if t.lower().endswith(IMG_EXT) and os.path.isfile(os.path.expanduser(t))]
+    if not imgs: return text, []
+    rest = " ".join(t for t in toks if os.path.expanduser(t) not in imgs)
+    return rest, imgs
+
+def user_message(text):
+    text, imgs = split_images(text)
+    if not imgs: return {"role": "user", "content": text}
+    for p in imgs: print(f"  {TEAL}▣ image{R}  {DIM}{p}{R}")
+    print()
+    return {"role": "user", "content": [{"type": "text", "text": text or "What is in this image?"}]
+                                       + [image_part(p) for p in imgs]}
+
+# ---- streaming ----
+class Markdown:
+    """Renders the model's streamed markdown as terminal styling instead of raw ** ` and #."""
+    def __init__(self):
+        self.stars = self.ticks = self.hashes = 0          # pending runs, resolved by the next char
+        self.bold = self.ital = self.code = self.fence = self.head = False
+        self.bol = True       # only whitespace so far on this line
+        self.col0 = True      # nothing printed on this line yet
+        self.skip = False     # swallowing the rest of a ``` line
+        self.eat_space = False
+        self.bullet = False   # just printed a bullet: squeeze the spaces after it to one
+        self.prev = "\n"
+
+    def style(self):
+        s = R
+        if self.fence or self.code: s += TEAL
+        if self.bold or self.head: s += BOLD
+        if self.ital: s += ITAL
+        return s
+
+    def out(self, s):
+        if self.col0: sys.stdout.write("  " + self.style()); self.col0 = False
+        sys.stdout.write(s)
+        if s.strip(): self.bol = False
+        self.prev = s[-1]
+
+    def restyle(self):
+        if not self.col0: sys.stdout.write(self.style())
+
+    def resolve(self, run, nxt):
+        n = getattr(self, run); setattr(self, run, 0)
+        if run == "ticks":
+            if n >= 3: self.fence = not self.fence; self.skip = True
+            elif self.fence: self.out("`" * n)
+            else: self.code = not self.code
+        elif run == "stars":
+            if n >= 2: self.bold = not self.bold
+            elif self.bol and nxt == " ": self.out("•"); self.bullet = True
+            elif self.prev in " \n" and nxt in " \n": self.out("*")
+            else: self.ital = not self.ital
+        elif nxt == " ": self.head = True; self.eat_space = True
+        else: self.out("#" * n)
+        self.restyle()
+
+    def char(self, ch):
+        run = {"*": "stars", "`": "ticks", "#": "hashes"}.get(ch)
+        if run == "hashes" and not (self.bol and not self.fence and not self.code): run = None
+        if run == "stars" and (self.fence or self.code): run = None
+        for r in ("stars", "ticks", "hashes"):
+            if r != run and getattr(self, r): self.resolve(r, ch)
+        if self.skip:
+            if ch == "\n": self.skip = False; self.bol = self.col0 = True; self.prev = "\n"
+            return
+        if run: setattr(self, run, getattr(self, run) + 1); return
+        if self.eat_space and ch == " ": self.eat_space = False; return
+        self.eat_space = False
+        if self.bullet and ch == " " and self.prev == " ": return
+        if ch != " ": self.bullet = False
+        if ch == "\n":
+            self.bold = self.ital = self.code = self.head = False
+            sys.stdout.write(R + "\n"); self.bol = self.col0 = True; self.prev = "\n"
+            return
+        self.out(ch)
+
+    def feed(self, text):
+        for ch in text: self.char(ch)
+        sys.stdout.flush()
+
+    def close(self):
+        for r in ("stars", "ticks", "hashes"):
+            if getattr(self, r): self.resolve(r, "\n")
+        sys.stdout.write(R)
+
+class Waiting:
+    """Loader shown while the model loads, reads or thinks. Big = the DeLorean flies across."""
+    def __init__(self, label, big=False):
+        size = shutil.get_terminal_size((90, 30))
+        self.big = big and sys.stdout.isatty() and size.lines >= len(DELOREAN) + 8 and size.columns >= 70
+        self.cols = size.columns - 1
+        self.label = label; self.drawn = False
+        self.stop_ev = threading.Event(); self.t0 = time.time()
+        self.th = threading.Thread(target=self.run, daemon=True); self.th.start()
+    def run(self):
+        while not self.stop_ev.wait(0.06):
+            el = time.time() - self.t0
+            if self.big:
+                rows = flying(el, self.cols)
+                up = f"\033[{len(rows) + 1}A" if self.drawn else ""
+                status = f"  {GOLD}{self.label}{R} {DIM}· {fmt(el)}{R}"
+                sys.stdout.write(up + "".join(f"\r\033[K{r}\n" for r in rows) + f"\r\033[K{status}\n")
+                self.drawn = True
+            else:
+                sys.stdout.write(f"\r\033[K  {STEEL}▕{R}{car(el)}{STEEL}▏{R}  {GOLD}{self.label}{R} {DIM}· {fmt(el)}{R}")
+            sys.stdout.flush()
+    def stop(self):
+        if self.stop_ev.is_set(): return
+        self.stop_ev.set(); self.th.join()
+        if self.big and self.drawn: sys.stdout.write(f"\033[{len(DELOREAN) + 1}A\r\033[J")
+        else: sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
+def stream(messages, label="READING"):
+    """One model call. Returns (answer text, tool calls)."""
+    model = loaded_model()
+    if not model:
+        print(f"{DIM}the model server isn't running — relaunch bxzex-ai{R}"); return "", []
+    body = json.dumps({"model": model, "messages": [{"role": "system", "content": system_prompt()}] + messages,
+                       "tools": TOOLS, "max_tokens": 4096, "temperature": 0.7, "stream": True,
+                       "chat_template_kwargs": {"enable_thinking": not fast}}).encode()
+    req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type":"application/json"})
+    sys.stdout.write("\033[?25l")  # hide cursor while generating
+    wait = Waiting(label, big=True)
+    answer=[]; calls={}; phase=None; tn=0; at_start=True; off=random.randrange(len(WORDS)); t0=time.time()
+
+    md = Markdown()
+
+    try:
+        try:
+            resp = urllib.request.urlopen(req, timeout=1800)
+        except urllib.error.HTTPError as e:
+            wait.stop(); print(f"{DIM}[server error {e.code}: {e.read().decode('utf-8','ignore')[:300]}]{R}"); return "", []
+        except Exception as e:
+            wait.stop(); print(f"{DIM}[error: {e}]{R}"); return "", []
+
+        for raw in resp:
+            line = raw.decode("utf-8","ignore").strip()
+            if not line.startswith("data:"): continue
+            p = line[5:].strip()
+            if p=="[DONE]": break
+            try: delta = json.loads(p)["choices"][0]["delta"]
+            except Exception: continue
+
+            for tc in delta.get("tool_calls") or []:
+                slot = calls.setdefault(tc.get("index", 0), {"id": "", "type": "function",
+                                                             "function": {"name": "", "arguments": ""}})
+                if tc.get("id"): slot["id"] = tc["id"]
+                f = tc.get("function") or {}
+                if f.get("name") and not slot["function"]["name"]: slot["function"]["name"] = f["name"]
+                if f.get("arguments"): slot["function"]["arguments"] += f["arguments"]
+
+            think = delta.get("reasoning_content")
+            if think:
+                tn += 1
+                if show_think:
+                    wait.stop()
+                    if phase!="think":
+                        print(header("thinking", RAMP_TEAL)); phase="think"; at_start=True
+                    for ch in think:
+                        if at_start: sys.stdout.write(f"  {DIM}{ITAL}"); at_start=False
+                        sys.stdout.write(ch)
+                        if ch=="\n": sys.stdout.write(R); at_start=True
+                    sys.stdout.flush()
+                else:   # keep the loader running, just relabel it
+                    word = WORDS[(off + int((time.time()-t0)/1.8)) % len(WORDS)]
+                    wait.label = f"{word.upper()} · {tn} tok"
+
+            content = delta.get("content")
+            if content:
+                wait.stop()
+                if phase=="think":
+                    sys.stdout.write(f"{R}\n\n"); phase=None
+                if phase!="answer":
+                    print(header("bxzex", RAMP_GOLD)); phase="answer"; at_start=True
+                md.feed(content); answer.append(content)
+    finally:
+        wait.stop(); md.close()
+        if phase=="answer" and not md.col0: sys.stdout.write("\n")
+        elif phase!="answer": sys.stdout.write(f"{R}\r\033[K")
+        sys.stdout.write("\033[?25h")  # restore cursor
+        sys.stdout.flush()
+    return "".join(answer).strip(), [calls[i] for i in sorted(calls)]
+
+def run_turn(history):
+    """Agent loop: keep calling the model until it answers without asking for a tool."""
+    label = "READING"
+    for _ in range(MAX_STEPS):
+        text, calls = stream(history, label)
+        if not calls:
+            history.append({"role": "assistant", "content": text}); return
+        if text: print()
+        history.append({"role": "assistant", "content": text, "tool_calls": calls})
+        for i, call in enumerate(calls):
+            call["id"] = call["id"] or f"call_{len(history)}_{i}"
+            history.append({"role": "tool", "tool_call_id": call["id"], "content": run_tool(call)})
+        label = "READING RESULTS"
+    print(f"{DIM}stopped after {MAX_STEPS} tool steps{R}")
+
+# ---- voice ----
+import fcntl, termios
+WHISPER = shutil.which("whisper-cli")
+VOICE_MODEL = f"{APP_HOME}/models/bxzex-voice.bin"
+VOICE_LANG = os.environ.get("BXZEX_VOICE_LANG", "en")
+
+def listen():
+    """Record the mic until Enter, transcribe on-device with whisper.cpp, return the text."""
+    if not (WHISPER and shutil.which("ffmpeg") and os.path.exists(VOICE_MODEL)):
+        print(f"{DIM}voice needs whisper-cli, ffmpeg and {VOICE_MODEL}{R}"); return ""
+    wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+    rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-y", "-f", "avfoundation", "-i", ":default",
+                            "-ar", "16000", "-ac", "1", wav], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    sys.stdout.write("\033[?25l")
+    wait = Waiting("LISTENING · press enter when done")
+    try:
+        input()
+        sys.stdout.write("\033[1A")          # back onto the loader line the Enter moved us off
+    except (EOFError, KeyboardInterrupt):
+        wait.stop(); rec.kill(); os.unlink(wav); sys.stdout.write("\033[?25h"); print(f"{DIM}cancelled{R}"); return ""
+    wait.stop()
+    try: rec.communicate(b"q", timeout=5)    # 'q' lets ffmpeg finish the wav header
+    except subprocess.TimeoutExpired: rec.kill()
+    wait = Waiting("TRANSCRIBING")
+    try:
+        out = subprocess.run([WHISPER, "-m", VOICE_MODEL, "-f", wav, "-l", VOICE_LANG, "-nt", "-np"],
+                             capture_output=True, text=True, timeout=120).stdout
+    except Exception:
+        out = ""
+    finally:
+        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+        if os.path.exists(wav): os.unlink(wav)
+    text = re.sub(r"[\[(][^\])]*[\])]", " ", out)   # drop [BLANK_AUDIO], (music) and the like
+    text = " ".join(text.split())
+    if not text: print(f"{DIM}didn't catch anything — check the mic permission for Terminal{R}")
+    return text
+
+def ask(prefill=""):
+    """Prompt for a message. Prefill is typed into the terminal so it can be edited before sending."""
+    sys.stdout.write(f"\n{GOLD}►{R} "); sys.stdout.flush()
+    if prefill:
+        try:
+            for b in prefill.encode(): fcntl.ioctl(sys.stdin.fileno(), termios.TIOCSTI, bytes([b]))
+        except OSError:
+            print(prefill); return prefill
+    return input().strip()
+
+# ---- installer fly-by ----
+if sys.argv[1:2] == ["--flyby"]:
+    size = shutil.get_terminal_size((90, 30))
+    cols = size.columns - 1
+    if sys.stdout.isatty() and size.lines >= len(DELOREAN) + 4 and cols >= 70:
+        sys.stdout.write("\033[?25l" + "\n" * len(DELOREAN))
+        try:
+            for i in range((cols + ART_W) // 2):       # one pass, right to left
+                rows = flying(i / 35, cols)
+                sys.stdout.write(f"\033[{len(rows)}A" + "".join(f"\r\033[K{r}\n" for r in rows))
+                sys.stdout.flush(); time.sleep(0.014)
+        except KeyboardInterrupt:
+            pass
+        sys.stdout.write(f"\033[{len(DELOREAN)}A\r\033[J\033[?25h"); sys.stdout.flush()
+    sys.exit(0)
+
+# ---- one-shot ----
+if len(sys.argv) > 1:
+    if not ensure_server(): sys.exit(1)
+    print()
+    try: run_turn([user_message(" ".join(sys.argv[1:]))])
+    except KeyboardInterrupt: print(f"\n{DIM}stopped{R}")
+    print()
+    sys.exit(0)
+
+# ---- interactive ----
+os.system("")
+if not ensure_server(): sys.exit(1)
+banner()
+spoken = ""
+while True:
+    try:
+        user = ask(spoken); spoken = ""
+    except (EOFError, KeyboardInterrupt):
+        print(); break
+    if not user: continue
+    if user in ("exit","quit"): break
+    if user.startswith("/color"): choose_color(user[6:]); continue
+    if user=="/fast":
+        fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); continue
+    if user=="/think":
+        show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); continue
+    if user=="/reset":
+        history=[]; allow_all=False; print(f"{DIM}context cleared{R}"); continue
+    if user in ("/v", "/voice"):
+        spoken = listen(); continue
+    if user.startswith("/image"):
+        print(f"{DIM}drag an image into this window (or type its path) along with your question{R}"); continue
+    sys.stdout.write("\033[1A\033[2K")
+    show_block("you", RAMP_TEAL, user)
+    print()
+    mark = len(history)
+    history.append(user_message(user))
+    try:
+        run_turn(history)
+    except KeyboardInterrupt:
+        del history[mark:]   # drop the half-finished turn so tool calls never dangle
+        print(f"\n{DIM}stopped{R}")
