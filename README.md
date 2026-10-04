@@ -6,7 +6,7 @@ No account. No subscription. No filter deciding what you're allowed to ask. It r
 
 I built this for myself, liked it too much to keep it, and I'm giving it away free.
 
-— Brian · [bxzex.com](https://bxzex.com) · Instagram [@bxzex](https://www.instagram.com/bxzex/)
+— bxzex · [bxzex.com](https://bxzex.com) · Instagram [@bxzex](https://www.instagram.com/bxzex/)
 
 ## What it does
 
@@ -16,7 +16,7 @@ I built this for myself, liked it too much to keep it, and I'm giving it away fr
 - **Does things on your Mac.** It can run commands and read or write files. It shows you exactly what it wants to do and waits for your yes first.
 - **Listens.** Type `/v`, say what you want, and your words show up at the prompt ready to send.
 - **Remembers you.** Tell it something worth keeping and it's still there next week. It all sits in a plain text file you can read, edit or wipe.
-- **Comes with skills.** Seventeen of them: design, front-end, writing that doesn't sound like a robot, social posts, client proposals, research, debugging, security and more. It pulls the right one in when the job calls for it, and you can write your own.
+- **Comes with skills.** Twenty-nine of them: design, front-end, writing that doesn't sound like a robot, social posts, client proposals, research, debugging, security and more. It pulls the right one in when the job calls for it, and you can write your own.
 - **Looks how you want.** Nine color themes. It starts in white fading to blue, like the logo. Pick another during install or switch any time with `/color`.
 
 ## What you need
@@ -54,10 +54,14 @@ Type and press Enter. That's really it. For a quick one-off without opening the 
 | `/skills` | List what it's been taught. |
 | `/btw` | Add a note without waiting for an answer, like `/btw the client wants it in Spanish`. |
 | `/memory` | Show what it remembers about you. `/memory clear` wipes it. |
+| `/history` | Your past chats. Pick one and carry on where you left off. |
+| `/resume` | Jump straight back into the last chat. |
 | `/fast` | Switch fast mode. It's on by default and answers right away. Turn it off when you want it to think a hard question through first. |
 | `/think` | Show or hide its thinking when fast mode is off. |
 | `/reset` | Start a fresh conversation. |
 | `exit` | Quit. |
+
+Type `/` and it shows you the commands as you go. The whole thing redraws itself when you resize the window.
 
 To show it an image, drag the file into the terminal window and add your question.
 
@@ -67,10 +71,11 @@ Press Ctrl-C to stop a reply halfway.
 
 ## Make it yours
 
-Everything it knows about itself lives in three places inside `~/.bxzex-ai`, all plain text:
+Everything it knows about itself lives in four places inside `~/.bxzex-ai`, all plain text:
 
 - **`BXZEX.md`** is its guide. Add your own rules at the bottom ("always answer in Spanish", "I'm a mechanic, keep it practical") and it follows them in every conversation. Put a `BXZEX.md` in any folder and it reads that too when you launch it from there.
 - **`memory.md`** is what it has saved about you. One line per thing.
+- **`chats/`** keeps every conversation, so nothing is lost when you close the window.
 - **`skills/`** holds one file per skill. Copy one, change the name and description at the top, write what you want it to know, and it has a new skill.
 
 The skills it ships with:
@@ -94,6 +99,18 @@ The skills it ships with:
 | `python-scripting` | Scripts that automate a job and have actually been run |
 | `git-workflow` | Committing, branching and undoing without losing work |
 | `mac-automation` | Getting things done on your Mac without breaking it |
+| `email-writing` | Emails and messages that get an answer |
+| `sales-outreach` | First messages to a client that don't read like spam |
+| `video-script` | Scripts for Reels, TikTok and Shorts |
+| `brand-naming` | Names for a business, product or app |
+| `pricing-offers` | What to charge and how to package it |
+| `seo-basics` | Getting a page found on Google |
+| `plan-project` | Turning a vague goal into steps |
+| `explain-teach` | Explaining something hard so it sticks |
+| `react-components` | React components and small apps |
+| `api-design` | Endpoints that are clear and safe |
+| `sql-database` | Tables and queries that return the right rows |
+| `bash-scripting` | Shell scripts that don't break on a space |
 
 ## How fast it is
 
@@ -126,8 +143,10 @@ rm -rf ~/.bxzex-ai "$(brew --prefix)/bin/bxzex-ai"
 
 ## Credits
 
-The app, the installer and the terminal design are © 2026 bxzex (Brian Ochoa), released under the MIT license. Use it, share it, build on it. Just keep the copyright notice with it.
+The app, the installer, the skills and the terminal design are © 2026 bxzex. All rights reserved.
 
-It stands on good open source work: [llama.cpp](https://github.com/ggml-org/llama.cpp) runs the model and [whisper.cpp](https://github.com/ggerganov/whisper.cpp) does the listening. The model is open-weight and is downloaded during install under its own license. The DeLorean that flies past during install is ASCII art by mozz, and the logo is set in the TheDraw font Bio Hazard.
+It's free to install and use, for anything. What you can't do is copy it, repost it, rebrand it or put out your own version of it. If you want to share it, send people here. The full terms are in [LICENSE](LICENSE).
+
+It stands on good open source work: [llama.cpp](https://github.com/ggml-org/llama.cpp) runs the model and [whisper.cpp](https://github.com/ggerganov/whisper.cpp) does the listening. The model is open-weight and is downloaded during install under its own license. The DeLorean that flies past during install is ASCII art by mozz, the one on the start screen is braille art, and the logo is set in the TheDraw font Bio Hazard.
 
 More of what I build is at [bxzex.com](https://bxzex.com). Say hi on Instagram: [@bxzex](https://www.instagram.com/bxzex/).

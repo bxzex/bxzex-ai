@@ -1,6 +1,7 @@
 #!/bin/bash
 # BXZEX Uncensored AI — Local Model
-# Copyright (c) 2026 bxzex · https://bxzex.com · instagram.com/bxzex
+# Copyright (c) 2026 bxzex. All rights reserved. · https://bxzex.com
+# Free to use. Not to be copied, modified, rebranded or redistributed. See LICENSE.
 #
 #   curl -fsSL https://raw.githubusercontent.com/bxzex/bxzex-ai/main/install.sh | bash
 #
@@ -15,7 +16,7 @@ LOG="$BXZEX_HOME/install.log"
 R=$'\033[0m'; D=$'\033[2m'; B=$'\033[1m'
 A=$'\033[38;5;39m'   # accent, replaced once a color is picked
 COLORS="blue red orange gold green cyan purple pink white"
-SKILLS="ui-design no-ai-slop human-writing frontend-build landing-page social-posts client-proposal accessibility web-research summarize data-analysis debugging code-review security-check python-scripting git-workflow mac-automation"
+SKILLS="accessibility api-design bash-scripting brand-naming client-proposal code-review data-analysis debugging email-writing explain-teach frontend-build git-workflow human-writing landing-page mac-automation no-ai-slop plan-project pricing-offers python-scripting react-components sales-outreach security-check seo-basics social-posts sql-database summarize ui-design video-script web-research"
 code_for() { case "$1" in blue) echo 39;; red) echo 196;; orange) echo 208;; gold) echo 220;; green) echo 46;; cyan) echo 51;;
              purple) echo 141;; pink) echo 205;; white) echo 255;; *) echo 39;; esac; }
 
@@ -147,6 +148,6 @@ download "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.b
 ln -sf "$BXZEX_HOME/bin/bxzex-ai" "$(brew --prefix)/bin/bxzex-ai"
 ok "command added"
 
-python3 "$BXZEX_HOME/bin/bxzex-ai" --flyby || true
+python3 "$BXZEX_HOME/bin/bxzex-ai" --car || true
 printf '\n  %s%sREADY.%s Open a new terminal window and type: %sbxzex-ai%s\n' "$B" "$A" "$R" "$B" "$R"
 printf '  %shttps://bxzex.com · instagram.com/bxzex · © 2026 bxzex%s\n\n' "$D" "$R"

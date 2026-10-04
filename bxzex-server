@@ -1,6 +1,7 @@
 #!/bin/bash
 # BXZEX Uncensored AI — Local Model
-# Copyright (c) 2026 bxzex · https://bxzex.com
+# Copyright (c) 2026 bxzex. All rights reserved. · https://bxzex.com
+# Free to use. Not to be copied, modified, rebranded or redistributed. See LICENSE.
 #
 # Starts the local model server that `bxzex-ai` talks to (127.0.0.1:8080).
 # `bxzex-ai` runs this for you when the server isn't up; run it by hand to watch the log.
