@@ -188,51 +188,20 @@ LOGO = [   # "bxzex" in the TheDraw font Bio Hazard: (characters, one hex color 
     ('  ▀▀▀▀▀▀      ▀░    ▀░    ▀▀▀▀▀▀▀▀      ▀▀▀▀▀▀      ▀░    ▀░  ', '0707080808080808070700000707080807070707080800000707080808080808080807070000070708080808080807070000070708080707070708080000'),
 ]
 
-def rgb(i):
-    """A 256-color index as red, green, blue."""
-    if i >= 232: v = 8 + 10 * (i - 232); return (v, v, v)
-    i -= 16; lv = [0, 95, 135, 175, 215, 255]
-    return (lv[i // 36], lv[i // 6 % 6], lv[i % 6])
-
-def logo_rows(scale=0.75):
-    """The logo, kept exactly as drawn but shrunk: its white and grey stay, its blue becomes the theme color."""
-    fg = {15: 231, 7: 248, 8: 240, 1: T[2]}; bg = {1: T[2], 7: 248}
-    cover = {"█": (1, 1), "▀": (1, 0), "▄": (0, 1), "░": (.25, .25), "▒": (.5, .5), "▓": (.75, .75)}
-    sw, sh = len(LOGO[0][0]), len(LOGO) * 2
-    px = [[None] * sw for _ in range(sh)]                    # each cell is two pixels tall: (r, g, b, opacity)
-    for y, (chars, attrs) in enumerate(LOGO):
-        for x, ch in enumerate(chars):
-            a = int(attrs[2*x:2*x+2], 16)
-            f = rgb(fg.get(a & 15, 231)); b = rgb(bg[a >> 4]) if (a >> 4) in bg else None
-            for half, amount in enumerate(cover.get(ch, (0, 0))):
-                if b: px[2*y + half][x] = tuple(f[k] * amount + b[k] * (1 - amount) for k in range(3)) + (1.0,)
-                elif amount: px[2*y + half][x] = f + (amount,)
-    tw = round(sw * scale); th = round(sh * scale / 2) * 2
-    palette = sorted(set(fg.values()))
-    def sample(tx, ty):                                      # average the source pixels this smaller pixel covers
-        x0, x1, y0, y1 = tx * sw / tw, (tx + 1) * sw / tw, ty * sh / th, (ty + 1) * sh / th
-        tot = [0.0, 0.0, 0.0]; op = 0.0; area = 0.0
-        for y in range(int(y0), min(sh, int(y1) + 1)):
-            for x in range(int(x0), min(sw, int(x1) + 1)):
-                wgt = max(0, min(x + 1, x1) - max(x, x0)) * max(0, min(y + 1, y1) - max(y, y0))
-                area += wgt
-                if px[y][x] and wgt:
-                    o = px[y][x][3] * wgt; op += o
-                    for k in range(3): tot[k] += px[y][x][k] * o
-        if not area or op / area < 0.3: return None
-        mix = [tot[k] / op for k in range(3)]                # snap to the logo's own colors so it stays crisp
-        return min(palette, key=lambda i: sum((a - b) ** 2 for a, b in zip(rgb(i), mix)))
-    rows = []
-    for ty in range(0, th, 2):
-        row = []
-        for tx in range(tw):
-            top, bot = sample(tx, ty), sample(tx, ty + 1)
-            if top is None and bot is None: row.append(f"{R} ")
-            elif bot is None: row.append(f"{R}\033[38;5;{top}m▀")
-            elif top is None: row.append(f"{R}\033[38;5;{bot}m▄")
-            else: row.append(f"\033[38;5;{top};48;5;{bot}m▀")
-        rows.append("".join(row) + R)
-    return rows
+def logo_rows():
+    """The logo keeps its white and grey; its blue becomes the theme color."""
+    fg = {15: 231, 7: 248, 8: 240, 1: T[2]}
+    bg = {1: T[2], 7: 248}
+    out = []
+    for chars, attrs in LOGO:
+        row = []; last = None
+        for i, ch in enumerate(chars):
+            a = int(attrs[2*i:2*i+2], 16)
+            code = f"\033[0;38;5;{fg.get(a & 15, 231)}" + (f";48;5;{bg[a >> 4]}m" if (a >> 4) in bg else "m")
+            if code != last: row.append(code); last = code
+            row.append(ch)
+        out.append("".join(row) + R)
+    return out
 
 CAR = [   # the DeLorean, drawn in braille dots
     '⣀⣤⣀⣀⣀⡀⠀⠀⠀⠀⠀⢀⣀⣀⣰⣾⣿⣤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⠀⠀⠀⢀⣀⣀⣀⣀⣀⣀⣀',
