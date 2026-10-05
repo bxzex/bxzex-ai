@@ -20,6 +20,14 @@ I built this for myself, liked it too much to keep it to myself, and now it's fr
 - **Comes with skills.** Twenty-nine of them: design, front-end, writing that doesn't sound like a robot, social posts, client proposals, research, debugging, security and more. It pulls in the right one when the job calls for it, and you can write your own.
 - **Looks how you want.** Nine color themes. It starts in white fading to blue, like the logo. Pick another during install or switch any time with `/color`.
 
+## Check it before you run it
+
+You shouldn't paste a command from the internet into your terminal on trust, mine included. So here is how to check this one:
+
+- **Scan it.** [Open the installer's report on VirusTotal](https://www.virustotal.com/gui/url/51f215605807510d30794918f552843b22cea998909f6d2f40bc7a7542f0f07c), which runs it past dozens of antivirus engines. You can also go to [virustotal.com](https://www.virustotal.com/gui/home/url) and paste the install address yourself.
+- **Read it.** Nothing here is hidden or compiled. The [installer](install.sh) and the [app](bxzex-ai) are plain text files you can open and read top to bottom.
+- **Know what it touches.** Everything it installs goes into one folder, `~/.bxzex-ai`, plus a few standard tools from Homebrew. It never asks for your password and there's one command at the bottom of this page that removes all of it.
+
 ## What you need
 
 - A Mac with Apple Silicon (M1 or newer) and **24GB of memory or more**
