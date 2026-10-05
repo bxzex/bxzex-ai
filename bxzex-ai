@@ -21,7 +21,7 @@ HOME = os.path.expanduser("~")
 APP_HOME = os.environ.get("BXZEX_HOME", f"{HOME}/.bxzex-ai")
 CONFIG = f"{APP_HOME}/config.json"
 AI_NAME = "BXZEX AI"
-VERSION = "1.1.3"
+VERSION = "1.2.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -290,7 +290,8 @@ server_proc = None
 def ensure_server(block=True):
     """Start the model server if it isn't already running. A cold start reads ~15GB off disk.
     block=False starts it and returns straight away; the next call waits for it."""
-    global server_proc
+    global server_proc, ctx_size
+    ctx_size = 0                                   # a restarted model may hold a different amount
     try:
         if os.path.exists(PAINTING) and not painting(): os.remove(PAINTING)   # a leftover lock from a crash
     except OSError: pass
@@ -412,16 +413,27 @@ def read_key():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
-def confirm(what, detail):
+# Things that can destroy work or change the system. These ask every time, even after "always this session".
+RISKY = re.compile(r"""(?ix)
+      (^|[;&|`(\s]) (sudo|doas|rm|rmdir|shred|dd|mkfs\S*|fdisk|parted|diskutil|shutdown|reboot|halt|poweroff
+                     |killall|pkill|kill|chown|chmod|launchctl|systemctl|crontab|passwd|truncate) (\s|$)
+    | \bgit\s+(push\b.*(--force|\s-f\b)|reset\s+--hard|clean\b)
+    | \b(curl|wget)\b[^|;]*\|\s*(sudo\s+)?(ba|z|da)?sh\b
+    | \bfind\b.*\s-delete\b | >\s*/dev/(sd|disk|nvme|rdisk) | :\(\)\s*\{ """)
+SENSITIVE = re.compile(r"/(\.ssh|\.gnupg|\.aws|\.config|Library|\.zshrc|\.zprofile|\.bashrc|\.bash_profile|\.profile|\.gitconfig|\.netrc)(/|$)"
+                       r"|^/(etc|usr|bin|sbin|System|boot|var|mnt/[a-z]/Windows)/")
+
+def confirm(what, detail, always_ask=False):
     global allow_all
-    if allow_all: return True
+    if allow_all and not always_ask: return True
     if not sys.stdin.isatty(): return False
     busy = typed.th is not None
     typed.stop()                      # hand the keyboard back for the question
     sys.stdout.write("\033[?25h")
     print(f"{GOLD}?{R} {BOLD}Allow: {what}{R}")
     for line in detail.splitlines()[:12]: print(f"  {DIM}│ {line[:W()-6]}{R}")
-    sys.stdout.write(f"  {GOLD}❯{R} y yes · n no · a always this session  "); sys.stdout.flush()
+    choices = "y yes · n no  (this kind always asks)" if always_ask else "y yes · n no · a always this session"
+    sys.stdout.write(f"  {GOLD}❯{R} {choices}  "); sys.stdout.flush()
     try:
         a = read_key()
     except (EOFError, KeyboardInterrupt):
@@ -429,11 +441,11 @@ def confirm(what, detail):
     finally:
         if busy: typed.start()
     print(a if a in "yna" else "")
-    if a == "a": allow_all = True; return True
+    if a == "a" and not always_ask: allow_all = True; return True
     return a == "y"
 
 def run_shell(command):
-    if not confirm("run command", command): return "The user declined to run this command."
+    if not confirm("run command", command, always_ask=bool(RISKY.search(command))): return "The user declined to run this command."
     try:
         p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
@@ -446,7 +458,7 @@ def read_file(path):
 
 def write_file(path, content):
     path = os.path.expanduser(path)
-    if not confirm(f"write {path}", content): return "The user declined to write this file."
+    if not confirm(f"write {path}", content, always_ask=bool(SENSITIVE.search(os.path.abspath(path)))): return "The user declined to write this file."
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w") as f: f.write(content)
     return f"wrote {len(content)} chars to {path}"
@@ -1068,6 +1080,92 @@ class Waiting:
         self.stop_ev.set(); self.th.join()
         RAW.write("\r\033[K"); RAW.flush()
 
+# ---- long conversations ----
+# The model can only hold so much at once. Before a chat outgrows that, the older part is folded into a
+# short summary written by the model itself and the newest messages are kept word for word.
+ctx_size = 0          # what the running model can hold, asked from the server once
+tok_per_char = 0.3    # corrected from what the server reports after each reply
+
+def context_size():
+    global ctx_size
+    if not ctx_size:
+        try:
+            with urllib.request.urlopen(f"{HOST}/props", timeout=3) as r:
+                ctx_size = int(json.load(r)["default_generation_settings"]["n_ctx"])
+        except Exception:
+            return int(os.environ.get("BXZEX_CTX") or 32768)
+    return ctx_size
+
+def reply_room(): return min(4096, context_size() // 4)
+
+def chars_in(messages):
+    n = 0
+    for m in messages:
+        c = m.get("content") or ""
+        n += 12 + (len(c) if isinstance(c, str) else sum(len(p.get("text", "")) if p.get("type") == "text" else 3000 for p in c))
+        for call in m.get("tool_calls") or []: n += 30 + len(call["function"]["name"]) + len(call["function"]["arguments"])
+    return n
+
+FIXED_CHARS = 0
+def estimate(messages):
+    """Roughly how many tokens a request with these messages will be."""
+    global FIXED_CHARS
+    FIXED_CHARS = len(SYSTEM) + len(json.dumps(TOOLS))
+    return int((FIXED_CHARS + chars_in(messages)) * tok_per_char)
+
+def summarize(old):
+    """Have the model write up the older part of the conversation. Returns the summary, or '' if it could not."""
+    room = context_size() - 1000
+    msgs = [dict(m) for m in old]
+    for m in msgs:                                    # too big to even re-read: shorten long tool results first
+        if estimate(msgs) <= room: break
+        if m["role"] == "tool" and len(m["content"]) > 400: m["content"] = m["content"][:300] + "\n[...shortened]"
+    while len(msgs) > 2 and estimate(msgs) > room:    # then let go of the very oldest messages
+        del msgs[0]
+        while msgs and msgs[0]["role"] != "user": del msgs[0]
+    ask = ("Before we go on, write a summary of this conversation so far, for your own use later. Cover what I asked for "
+           "and why, what you did and found, what was decided, the exact names, numbers, file paths and links that matter, "
+           "and anything still unfinished. Plain text, under 300 words. Do not call a tool.")
+    body = json.dumps({"model": loaded_model(), "messages": [{"role": "system", "content": SYSTEM}] + msgs + [{"role": "user", "content": ask}],
+                       "tools": TOOLS, "max_tokens": min(700, reply_room()), "temperature": 0.3,
+                       "chat_template_kwargs": {"enable_thinking": False}}).encode()
+    try:
+        req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=1800) as r:
+            return (json.load(r)["choices"][0]["message"].get("content") or "").strip()
+    except KeyboardInterrupt: raise
+    except Exception:
+        return ""
+
+def fold(history, force=False):
+    """Make room when the conversation is close to what the model can hold. Changes history in place.
+    Returns True if anything was folded."""
+    size = context_size()
+    budget = size - reply_room() - min(2000, size // 8)
+    if force: budget = int(budget * 0.6)
+    if estimate(history) <= budget: return False
+    users = [i for i, m in enumerate(history) if m["role"] == "user"]
+    cut = users[-1] if users else 0                   # the current request and everything after it always stays
+    for i in reversed(users[:-1]):                    # plus as many earlier exchanges as fit in a tenth of the room
+        if chars_in(history[i:]) * tok_per_char > max(600, size // 10): break
+        cut = i
+    changed = False
+    if cut >= 2:
+        sys.stdout.write("\033[?25l")
+        wait = Waiting("Tidying up a long conversation")
+        try: summary = summarize(history[:cut])
+        finally: wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+        note = "Summary of our conversation so far (the older messages were folded into this to save room):\n" + \
+               (summary or "(it could not be summarized, so the earliest part was dropped)")
+        history[:] = [{"role": "user", "content": note}, {"role": "assistant", "content": "Understood. I have that."}] + history[cut:]
+        print(f"{DIM}this chat got long, so the older part was folded into a summary to make room{R}\n")
+        changed = True
+    for m in history:                                 # still too big: one request with many long results. Shorten the oldest
+        if estimate(history) <= budget: break
+        if m["role"] == "tool" and len(m["content"]) > 600:
+            m["content"] = m["content"][:500] + "\n[...shortened to save room]"; changed = True
+    return changed
+
 turn_tok = 0   # tokens generated in the current turn, for the summary line
 stream_error = ""   # set when the server reports a failure instead of an answer
 DOING = {"generate_image": "Writing the image prompt", "write_file": "Writing file", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
@@ -1079,13 +1177,16 @@ def stream(messages, label="Reading"):
     if not model:
         print(f"{DIM}the model server isn't running. Relaunch bxzex-ai{R}"); return "", []
     body = json.dumps({"model": model, "messages": [{"role": "system", "content": SYSTEM}] + messages,
-                       "tools": TOOLS, "max_tokens": 4096, "temperature": 0.7, "stream": True,
+                       "tools": TOOLS, "max_tokens": reply_room(), "temperature": 0.7, "stream": True,
+                       "stream_options": {"include_usage": True},
                        "chat_template_kwargs": {"enable_thinking": not fast}}).encode()
     req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type":"application/json"})
     sys.stdout.write("\033[?25l")  # hide cursor while generating
     wait = Waiting(label)
-    global turn_tok, stream_error
+    global turn_tok, stream_error, tok_per_char
     stream_error = ""
+    sent_chars = FIXED_CHARS + chars_in(messages) if estimate(messages) else 0
+    plain_text = all(isinstance(m.get("content") or "", str) for m in messages)
     answer=[]; calls={}; phase=None; tn=0; at_start=True; off=random.randrange(len(WORDS)); t0=time.time()
 
     md = Markdown(prefix=f"{GOLD}●{R} ")
@@ -1093,8 +1194,8 @@ def stream(messages, label="Reading"):
     try:
         try:
             resp = urllib.request.urlopen(req, timeout=1800)
-        except urllib.error.HTTPError as e:
-            wait.stop(); print(f"{DIM}[server error {e.code}: {e.read().decode('utf-8','ignore')[:300]}]{R}"); return "", []
+        except urllib.error.HTTPError as e:          # run_turn decides what to do: make room, restart, or give up
+            wait.stop(); stream_error = f"server error {e.code}: {e.read().decode('utf-8','ignore')[:300]}"; return "", []
         except Exception as e:
             wait.stop(); print(f"{DIM}[error: {e}]{R}"); return "", []
 
@@ -1109,6 +1210,8 @@ def stream(messages, label="Reading"):
                 err = event["error"]
                 stream_error = err.get("message", "error") if isinstance(err, dict) else str(err)
                 break
+            used = (event.get("usage") or {}).get("prompt_tokens")
+            if used and plain_text and sent_chars: tok_per_char = max(0.2, min(0.6, used / sent_chars))
             try: delta = event["choices"][0]["delta"]
             except Exception: continue
 
@@ -1163,11 +1266,15 @@ def run_turn(history):
     typed.start()
     try:
         global turn_tok
-        turn_tok = 0; began = time.time(); retried = False
+        turn_tok = 0; began = time.time(); retried = made_room = False
         label = "Reading"
         for _ in range(MAX_STEPS):
+            if fold(history): label = "Reading"
             text, calls = stream(history, label)
             if stream_error and not text and not calls:
+                if not made_room and re.search(r"context|exceed|too (long|large|many)", stream_error, re.I):
+                    made_room = True                 # it was fuller than estimated: fold harder and ask again
+                    if fold(history, force=True): continue
                 if retried:
                     print(f"{DIM}the model failed: {stream_error} Try again, or quit and relaunch.{R}"); return
                 retried = True                   # usually the graphics memory got into a bad state: a fresh start clears it
@@ -1415,6 +1522,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/device", "run on the graphics card or the processor · /device cpu"),
             ("/update", "get the newest version · /update full adds new downloads"), ("/reset", "start a new conversation"), ("/help", "this list"), ("exit", "quit")]
 past = []   # earlier inputs, for the up arrow
+LITE = load_config().get("size") == "lite"     # the lighter build of the model, for computers with less memory
 
 def status_text(buf, working=False):
     if buf.startswith("/"):
@@ -1422,7 +1530,8 @@ def status_text(buf, working=False):
         if hits: return "  " + "   ".join(hits)
     if working: return "  working · type and press Enter to add a note · ctrl-c to stop"
     if update_note: return f"  {update_note}"
-    return f"  bxzex-ai v{VERSION} · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')} · /help"
+    lite = " · lite" if LITE else ""
+    return f"  bxzex-ai v{VERSION}{lite} · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')} · /help"
 
 class Box:
     """Keeps the input box on the last four rows. Everything else scrolls in the area above it,
@@ -1672,12 +1781,13 @@ while True:
         print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
         continue
     print()
-    mark = len(history)
-    history.append(user_message(user))
+    asked = user_message(user)
+    history.append(asked)
     try:
         run_turn(history)
     except KeyboardInterrupt:
-        del history[mark:]   # drop the half-finished turn so tool calls never dangle
+        for i, m in enumerate(history):              # drop the half-finished turn so tool calls never dangle
+            if m is asked: del history[i:]; break
         print(f"\n{DIM}stopped{R}")
     save_chat()
 # ---- end of bxzex-ai ----

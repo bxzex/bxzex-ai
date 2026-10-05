@@ -31,13 +31,13 @@ You shouldn't paste a command from the internet into your terminal on trust, min
 ## What you need
 
 **Mac**
-- Apple Silicon (M1 or newer) and **24GB of memory or more**
-- About 23GB of free disk space
+- Apple Silicon (M1 or newer) and **16GB of memory or more**
+- About 23GB of free disk space, or 18GB on a 16GB Mac
 - [Homebrew](https://brew.sh). If you don't have it, their site gives you one line to paste.
 
 **Linux**
-- A 64-bit PC with an NVIDIA graphics card that has **16GB of video memory or more**. Without one it still runs on the processor if you have 24GB of RAM, but slowly.
-- About 25GB of free disk space
+- A 64-bit PC with a graphics card that has **12GB of video memory or more**, or **16GB of RAM** to run it on the processor, which is slower.
+- About 25GB of free disk space, or 20GB for the lighter build
 - `curl` and `python3`, which most systems already have
 - For voice, a recording tool. Most desktops have one. If yours doesn't, the installer tells you the one line to add it: `sudo apt install pulseaudio-utils`
 
@@ -46,7 +46,9 @@ You shouldn't paste a command from the internet into your terminal on trust, min
 - It knows it's on Windows. Pictures it makes land in your Windows Pictures folder, and you can drag an image in from Explorer like on a Mac.
 - For voice, switch the microphone on for desktop apps in Windows settings (Privacy, Microphone).
 
-It will not run on a computer with 8GB or 16GB of memory and no big graphics card. The installer checks and stops if there isn't enough.
+**It picks the build that fits your computer.** It's one model in two builds. With 24GB of memory, or a graphics card with 20GB or more, you get the full one. With 16GB of memory, or a 12GB or 16GB graphics card, you get the lighter one: the same model with the same skills, tools, vision, voice and images, packed smaller so it fits. It's a little less sharp on hard questions and remembers about half as much conversation at once. The bar at the bottom says `lite` when that's the one you have. To choose yourself, put `BXZEX_SIZE=full` or `BXZEX_SIZE=lite` in front of `bash` on the install line.
+
+It will not run on a computer with 8GB of memory. The same model can't be made that small and still be worth using. The installer checks and stops if there isn't enough. On a 16GB computer, close your other big apps while it's running.
 
 Everything works on all three: chat, web search, vision, image generation, voice input, skills, memory, chat history and the shell tools. Linux and Windows support is new, so tell me if something breaks. Image generation on Linux and Windows needs a recent system (Ubuntu 24.04 or similar) and a 64-bit Intel or AMD processor. It uses the graphics card on Linux. Inside Windows it runs on the processor for now, so a picture takes several minutes there.
 
@@ -107,6 +109,8 @@ To show it an image, drag the file into the terminal window and add your questio
 You don't have to wait for it to finish. While it's working, type what you forgot to say and press Enter. It gets passed along as a "by the way" and it adjusts.
 
 Press Ctrl-C to stop a reply halfway.
+
+**Long chats.** It can only hold so much conversation at once. When a chat gets close to that, it writes itself a summary of the older part and carries on, keeping your most recent messages word for word. You'll see a line saying so. It can take a few minutes on a laptop, and it's why a very long chat doesn't just stop working.
 
 ## Images
 
@@ -174,7 +178,7 @@ To set it up for the processor from the start, put `BXZEX_DEVICE=cpu` in front o
 
 ## How fast it is
 
-This is a big model running on a laptop. On a 24GB MacBook Air it writes around three words a second. Short answers land in under a minute. Jobs where it has to look several things up can take a few minutes. A Mac with a Pro or Max chip is quicker.
+This is a big model running on a laptop. On a 24GB MacBook Air it writes around three words a second, and the lighter build runs at about the same pace there. The lighter build is about fitting in less memory, not about speed. Short answers land in under a minute. Jobs where it has to look several things up can take a few minutes. A Mac with a Pro or Max chip is quicker.
 
 It's slower than the big online assistants. In exchange, it's private and it's yours.
 
@@ -187,6 +191,8 @@ You are responsible for everything you do with it: what you ask it, what it writ
 ## Be careful with it
 
 It's uncensored, and when it runs a command it runs it as you, with nothing fencing it in. Read what it's asking before you say yes. It offers an "always" option that stops it asking for the rest of the session. I'd leave that alone unless you're watching.
+
+Some things ask every time, even with "always" on: deleting files, `sudo`, killing programs, changing permissions, wiping a disk, force-pushing or resetting a git project, piping a download straight into a shell, and writing to system or settings files like `~/.ssh` and `~/.zshrc`.
 
 ## Settings
 

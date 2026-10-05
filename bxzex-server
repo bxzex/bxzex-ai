@@ -19,8 +19,18 @@ BIN="${BXZEX_SERVER_BIN:-$(find "$BXZEX_HOME/engine" -name llama-server -type f 
 [ -n "$BIN" ] && [ -x "$BIN" ] || { echo "The chat engine is missing. Run the installer again." >&2; exit 1; }
 export LD_LIBRARY_PATH="$(dirname "$BIN"):$BXZEX_HOME/engine:${LD_LIBRARY_PATH:-}"
 
-MODEL="${BXZEX_MODEL:-$BXZEX_HOME/models/bxzex-model.gguf}"
+setting() { sed -n "s/.*\"$1\": *\"\([a-z]*\)\".*/\1/p" "$BXZEX_HOME/config.json" 2>/dev/null || true; }
+
+# The same model comes in two builds: the full one, and a lighter one packed smaller for computers with less memory.
+SIZE="$(setting size)"
+MODEL="$BXZEX_HOME/models/bxzex-model.gguf"
+if [ "$SIZE" = lite ] || [ ! -f "$MODEL" ]; then
+  if [ -f "$BXZEX_HOME/models/bxzex-lite.gguf" ]; then MODEL="$BXZEX_HOME/models/bxzex-lite.gguf"; SIZE=lite; else SIZE=full; fi
+fi
+MODEL="${BXZEX_MODEL:-$MODEL}"
 [ -f "$MODEL" ] || { echo "model not found at $MODEL. Run install.sh, or set BXZEX_MODEL to a .gguf file." >&2; exit 1; }
+CTX=32768; KEEP=2048
+if [ "$SIZE" = lite ]; then CTX=16384; KEEP=512; fi      # less room and less kept in memory, for smaller computers
 
 # four fast cores on the Mac it was tuned on; elsewhere, the real cores (half of what the system counts)
 THREADS=4
@@ -28,7 +38,7 @@ if [ "$(uname -s)" != Darwin ]; then THREADS=$(( $(nproc 2>/dev/null || echo 8) 
 THREADS="${BXZEX_THREADS:-$THREADS}"
 
 # graphics card by default; "cpu" (set with /device in the app, or BXZEX_DEVICE=cpu) keeps everything on the processor
-DEVICE="${BXZEX_DEVICE:-$(sed -n 's/.*"device": *"\([a-z]*\)".*/\1/p' "$BXZEX_HOME/config.json" 2>/dev/null || true)}"
+DEVICE="${BXZEX_DEVICE:-$(setting device)}"
 LAYERS=99
 if [ "$DEVICE" = cpu ]; then LAYERS=0; fi
 
@@ -36,22 +46,31 @@ ARGS=(
   --model "$MODEL"
   --alias bxzex-uncensored
   --host 127.0.0.1 --port "${BXZEX_PORT:-8080}"
-  --ctx-size "${BXZEX_CTX:-32768}"
+  --ctx-size "${BXZEX_CTX:-$CTX}"
   --n-gpu-layers "$LAYERS"
   --flash-attn on
   --cache-type-k q8_0 --cache-type-v q4_0
   --batch-size 2048 --ubatch-size 512
   --threads "$THREADS" --threads-batch "$THREADS"
   --parallel 1
-  --ctx-checkpoints 8 --cache-ram 2048
+  --ctx-checkpoints 8 --cache-ram "$KEEP"
   --spec-type "${SPEC:-draft-mtp}" --spec-draft-n-max 3 --spec-draft-p-min 0.4
   --temp 0.7 --top-k 20 --top-p 0.95 --min-p 0.0 --repeat-penalty 1.0
   --jinja --no-warmup
 )
 
 # The vision half. Without it the model is text-only.
-VISION="$(dirname "$MODEL")/bxzex-vision.gguf"
-[ -f "$VISION" ] && ARGS+=(--mmproj "$VISION")
-if [ "$DEVICE" = cpu ] && [ -f "$VISION" ]; then ARGS+=(--no-mmproj-offload); fi
+VISION="$BXZEX_HOME/models/bxzex-vision.gguf"
+[ -n "${BXZEX_MODEL:-}" ] && VISION="$(dirname "$MODEL")/bxzex-vision.gguf"
+if [ -f "$VISION" ]; then
+  ARGS+=(--mmproj "$VISION")
+  # on the processor, or with the lighter build on a graphics card under 14GB, the vision half stays in normal memory
+  small_card=""
+  if [ "$SIZE" = lite ] && command -v nvidia-smi >/dev/null 2>&1; then
+    v="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1 || true)"
+    if [ -n "$v" ] && [ "$v" -lt 14000 ] 2>/dev/null; then small_card=1; fi
+  fi
+  if [ "$DEVICE" = cpu ] || [ -n "$small_card" ]; then ARGS+=(--no-mmproj-offload); fi
+fi
 
 exec "$BIN" "${ARGS[@]}"

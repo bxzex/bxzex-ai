@@ -139,12 +139,34 @@ if [ "$OS" = Linux ] && command -v nvidia-smi >/dev/null 2>&1; then
   vram=$(( $(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1 || echo 0) / 1024 ))
 fi
 [ "${BXZEX_DEVICE:-}" = cpu ] && vram=0      # processor only: the graphics card's memory does not count
-if [ "$ram" -lt 15 ] && [ "$vram" -lt 15 ] && [ "${BXZEX_YES:-}" != 1 ]; then
-  die "This computer has ${ram}GB of memory. The model needs about 17GB, so it can't run here. Loading it anyway could freeze the computer."
+
+# The same model in two builds. Full wants about 17GB to itself; lite is packed smaller and wants about 12GB.
+# A graphics card needs the whole model in its own memory, so it decides first. Set BXZEX_SIZE=full or lite to choose.
+size="${BXZEX_SIZE:-}"
+if [ -z "$size" ]; then
+  if   [ -f "$BXZEX_HOME/models/bxzex-model.gguf" ]; then size=full      # already installed: keep what they have
+  elif [ -f "$BXZEX_HOME/models/bxzex-lite.gguf" ];  then size=lite
+  elif [ "$vram" -ge 20 ]; then size=full
+  elif [ "$vram" -ge 11 ]; then size=lite
+  elif [ "$ram" -ge 23 ];  then size=full
+  elif [ "$ram" -ge 15 ];  then size=lite
+  elif [ "${BXZEX_YES:-}" = 1 ]; then size=lite
+  else die "This computer has ${ram}GB of memory. Even the lighter build of the model needs about 12GB to itself, so it can't run here. Loading it anyway could freeze the computer."
+  fi
 fi
-if [ "$ram" -lt 23 ] && [ "$vram" -lt 15 ]; then
-  note "This computer has ${ram}GB of memory. The model wants about 17GB, so it may be very slow, freeze the computer or fail to load."
-  case "$(ask "  Install anyway? [y/N] ")" in y|Y|yes) ;; *) [ "${BXZEX_YES:-}" = 1 ] || die "stopped";; esac
+case "$size" in full|lite) ;; *) die "BXZEX_SIZE is full or lite." ;; esac
+# a graphics card too small to hold the whole model would fail to load it, so those run on the processor
+auto_device=""
+fits=20; [ "$size" = lite ] && fits=11
+if [ "$vram" -gt 0 ] && [ "$vram" -lt "$fits" ]; then
+  auto_device=cpu
+  note "The graphics card has ${vram}GB, which is not enough to hold the model, so it will run on the processor."
+fi
+if [ "$size" = lite ]; then
+  note "This computer gets the lighter build: the same model, packed smaller so it fits. A little less sharp, everything else the same."
+elif [ "$ram" -lt 23 ] && [ "$vram" -lt 20 ] && [ ! -f "$BXZEX_HOME/models/bxzex-model.gguf" ]; then
+  note "The full model wants about 17GB to itself and this computer has ${ram}GB, so it may be very slow, freeze the computer or fail to load."
+  case "$(ask "  Install the full model anyway? [y/N] ")" in y|Y|yes) ;; *) [ "${BXZEX_YES:-}" = 1 ] || die "stopped. Run it again without BXZEX_SIZE to get the lighter build.";; esac
 fi
 
 # ---- engines ----
@@ -191,13 +213,15 @@ fi
 
 # ---- the model ----
 m="$BXZEX_HOME/models"
-if [ ! -f "$m/bxzex-model.gguf" ]; then
+if [ "$size" = lite ]; then file="$m/bxzex-lite.gguf";  pack=IQ2_XS; gb=10; need=19
+else                         file="$m/bxzex-model.gguf"; pack=Q3_K_M; gb=15; need=24; fi
+[ "$OS" = Darwin ] || need=$((need + 1))
+if [ ! -f "$file" ]; then
   free="$(df -Pk "$HOME" | awk 'NR==2 {print int($4 / 1048576)}')"
-  need=24; [ "$OS" = Darwin ] || need=25
   [ "$free" -ge "$need" ] || [ -n "${BXZEX_MODEL_URL:-}" ] || die "Not enough disk space: the downloads need about $((need - 1))GB and ${free}GB is free."
-  note "Downloading the AI model. It is about 15GB, so this is the long part."
+  note "Downloading the AI model. It is about ${gb}GB, so this is the long part."
 fi
-download "${BXZEX_MODEL_URL:-$WEIGHTS/orcarouter_Qwen3.8-27B-Uncensored-Q3_K_M.gguf}" "$m/bxzex-model.gguf"  "AI model"
+download "${BXZEX_MODEL_URL:-$WEIGHTS/orcarouter_Qwen3.8-27B-Uncensored-$pack.gguf}" "$file"  "AI model"
 [ -n "${BXZEX_MODEL_URL:-}" ] || download "$WEIGHTS/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf"  "$m/bxzex-vision.gguf" "vision"
 if [ "$OS" = Darwin ]; then
   download "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" "$m/bxzex-voice.bin" "voice"
@@ -280,13 +304,15 @@ case ":$PATH:" in *":$bindir:"*) ;; *)
 esac
 
 # remember which optional parts are installed, so the app can tell when an update adds more
-python3 - "$BXZEX_HOME/config.json" "$OS" "${BXZEX_DEVICE:-}" <<'PART'
+python3 - "$BXZEX_HOME/config.json" "$OS" "${BXZEX_DEVICE:-}" "$size" "$auto_device" <<'PART'
 import json, os, sys
 p = sys.argv[1]
 try: d = json.load(open(p))
 except Exception: d = {}
 d["parts"] = 2 if sys.argv[2] == "Darwin" else 3
-if sys.argv[3] in ("cpu", "gpu"): d["device"] = sys.argv[3]      # installed with BXZEX_DEVICE=cpu: keep it on the processor
+d["size"] = sys.argv[4]
+if sys.argv[3] in ("cpu", "gpu"): d["device"] = sys.argv[3]
+elif sys.argv[5] and "device" not in d: d["device"] = sys.argv[5]   # card too small for the model; /device can still change it      # installed with BXZEX_DEVICE=cpu: keep it on the processor
 json.dump(d, open(p, "w"))
 PART
 
