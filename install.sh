@@ -138,12 +138,26 @@ done
 m="$BXZEX_HOME/models"
 if [ ! -f "$m/bxzex-model.gguf" ]; then
   free="$(df -g "$HOME" | awk 'NR==2 {print $4}')"
-  [ "$free" -ge 18 ] || die "Not enough disk space: the downloads need about 17GB and ${free}GB is free."
+  [ "$free" -ge 24 ] || die "Not enough disk space: the downloads need about 23GB and ${free}GB is free."
   note "Downloading the model. It is about 15GB, so this is the long part."
 fi
 download "$WEIGHTS/orcarouter_Qwen3.8-27B-Uncensored-Q3_K_M.gguf"      "$m/bxzex-model.gguf"  "model"
 download "$WEIGHTS/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf"  "$m/bxzex-vision.gguf" "vision"
 download "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" "$m/bxzex-voice.bin" "voice"
+
+# ---- image generation (set BXZEX_IMAGES=0 to skip) ----
+if [ "${BXZEX_IMAGES:-1}" != 0 ]; then
+  brew list uv >/dev/null 2>&1 || command -v uv >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 drive "installing uv" brew install uv
+  if [ -x "$HOME/.local/bin/mflux-generate-z-image-turbo" ] || command -v mflux-generate-z-image-turbo >/dev/null; then ok "image engine"
+  else drive "installing the image engine" uv tool install --python 3.12 mflux; fi
+  if [ -f "$m/bxzex-image/.done" ]; then ok "image model"
+  else
+    note "Downloading the image model, about 5.5GB."
+    drive "image model" uvx --from huggingface_hub hf download mflux-community/z-image-turbo-mflux-q4 --local-dir "$m/bxzex-image"
+    touch "$m/bxzex-image/.done"
+  fi
+  mkdir -p "$BXZEX_HOME/loras"
+fi
 
 ln -sf "$BXZEX_HOME/bin/bxzex-ai" "$(brew --prefix)/bin/bxzex-ai"
 ok "command added"

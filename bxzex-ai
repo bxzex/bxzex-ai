@@ -343,9 +343,66 @@ def write_file(path, content):
     with open(path, "w") as f: f.write(content)
     return f"wrote {len(content)} chars to {path}"
 
+# ---- making images ----
+IMAGE_MODEL = f"{APP_HOME}/models/bxzex-image"
+IMAGE_BIN = shutil.which("mflux-generate-z-image-turbo") or f"{HOME}/.local/bin/mflux-generate-z-image-turbo"
+LORAS = f"{APP_HOME}/loras"            # drop .safetensors style files here and they are applied to every image
+PICTURES = f"{HOME}/Pictures/BXZEX AI"
+SHAPES = {"square": (768, 768), "portrait": (640, 960), "landscape": (960, 640)}
+
+def stop_server():
+    """Free the chat model's memory. The image model needs it: both do not fit in 24GB together."""
+    port = HOST.rsplit(":", 1)[1]
+    pids = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
+    for pid in pids:
+        try: os.kill(int(pid), 15)
+        except (OSError, ValueError): pass
+    for _ in range(40):
+        if not loaded_model(): return
+        time.sleep(0.25)
+
+def generate_image(prompt, shape="square"):
+    if not (os.path.isdir(IMAGE_MODEL) and os.path.exists(IMAGE_BIN)):
+        return "Image generation is not installed. Run the installer again to add it."
+    w, h = SHAPES.get(shape.strip().lower(), SHAPES["square"])
+    os.makedirs(PICTURES, exist_ok=True)
+    out = f"{PICTURES}/{time.strftime('%Y-%m-%d %H-%M-%S')}.png"
+    cmd = [IMAGE_BIN, "--model", IMAGE_MODEL, "--low-ram", "--prompt", " ".join(prompt.split()),
+           "--width", str(w), "--height", str(h), "--steps", "8", "--output", out]
+    try: loras = sorted(os.path.join(LORAS, f) for f in os.listdir(LORAS) if f.endswith(".safetensors"))
+    except OSError: loras = []
+    if loras:
+        scale = os.environ.get("BXZEX_LORA_SCALE", "0.8")
+        cmd += ["--lora-paths", *loras, "--lora-scales", *[scale] * len(loras)]
+    sys.stdout.write("\033[?25l")
+    wait = Waiting("Making room")
+    err = ""
+    try:
+        stop_server()
+        wait.label = "Painting"
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        while True:                                   # the generator reports its steps on stderr
+            chunk = proc.stderr.read1(256).decode("utf-8", "ignore")
+            if not chunk: break
+            err = (err + chunk)[-2000:]
+            step = re.findall(r"(\d+)/(\d+)", chunk)
+            if step: wait.label = f"Painting, step {step[-1][0]} of {step[-1][1]}"
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.kill(); wait.stop(); ensure_server(); raise
+    finally:
+        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+    ensure_server()                                   # bring the chat model back
+    if proc.returncode != 0 or not os.path.exists(out):
+        last = [l for l in err.splitlines() if l.strip()]
+        return f"error: the image could not be made ({last[-1][:200] if last else 'no details'})"
+    subprocess.run(["open", out], capture_output=True)
+    return f"saved to {out.replace(HOME, '~')} and opened ({w}x{h}" + (f", {len(loras)} style file(s) applied)" if loras else ")")
+
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file,
-              "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name)}
+              "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
+              "generate_image": lambda prompt, shape="square": generate_image(prompt, shape)}
 
 def tool(tool_name, desc, **props):
     return {"type": "function", "function": {"name": tool_name, "description": desc, "parameters": {
@@ -360,6 +417,11 @@ TOOLS = [
     tool("write_file", "Create or overwrite a text file on this Mac.", path="file path", content="full file content"),
     tool("remember", "Save a lasting note about the user for future conversations.", note="one short sentence"),
     tool("use_skill", "Load the full instructions for one of your skills.", name="skill name"),
+    {"type": "function", "function": {"name": "generate_image",
+        "description": "Create a picture from a description and save it. Takes a few minutes.",
+        "parameters": {"type": "object", "required": ["prompt"], "properties": {
+            "prompt": {"type": "string", "description": "detailed description: subject, setting, lighting, style, camera"},
+            "shape": {"type": "string", "enum": ["square", "portrait", "landscape"]}}}}},
 ]
 
 GUIDE = f"{APP_HOME}/BXZEX.md"      # what the assistant knows about itself; edit it to add your own instructions
@@ -376,6 +438,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own Mac
 - /memory: show what you remember. /memory clear wipes it.
 - /history: list earlier chats and continue one. /resume: continue the most recent.
 - /skills: list your skills.
+- /image <description>: make a picture straight from their words, without you. If they ask you for a picture in conversation, use generate_image.
 - /reset: start a new conversation. exit: quit.
 - Dragging an image file into the window lets you see it.
 - Ctrl-C stops your reply.
@@ -386,6 +449,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own Mac
 - run_shell, read_file, write_file: act on this Mac. Commands and file writes ask the user first.
 - remember: save a short note that you will still have in future conversations.
 - use_skill: load one of your skills (listed below) before a task it covers.
+- generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes a few minutes and you are reloaded afterwards. Make one image per request unless asked for more.
 
 ## Memory
 When the user tells you something lasting about themselves, their work or how they like things done,
@@ -728,7 +792,7 @@ class Waiting:
         sys.stdout.write("\r\033[K"); sys.stdout.flush()
 
 turn_tok = 0   # tokens generated in the current turn, for the summary line
-DOING = {"write_file": "Writing file", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
+DOING = {"generate_image": "Writing the image prompt", "write_file": "Writing file", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
          "read_file": "Opening file", "use_skill": "Loading skill", "remember": "Saving to memory"}
 
 def stream(messages, label="Reading"):
@@ -942,7 +1006,7 @@ def _on_resize(*_):
 signal.signal(signal.SIGWINCH, _on_resize)
 
 COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"), ("/skills", "list skills"),
-            ("/memory", "what it remembers · /memory clear"), ("/btw", "add a note, no reply"),
+            ("/memory", "what it remembers · /memory clear"), ("/image", "make a picture · /image portrait a red fox"), ("/btw", "add a note, no reply"),
             ("/history", "past chats, pick one to continue"), ("/resume", "continue the last chat"),
             ("/fast", "toggle answering without thinking first"), ("/think", "show or hide its thinking"),
             ("/reset", "start a new conversation"), ("/help", "this list"), ("exit", "quit")]
@@ -1184,7 +1248,15 @@ while True:
     if user in ("/v", "/voice"):
         spoken = listen(); continue
     if user.startswith("/image"):
-        print(f"{DIM}drag an image into this window (or type its path) along with your question{R}"); continue
+        want = user[6:].strip()
+        if not want:
+            print(f"{DIM}/image <description> makes a picture · to show it one, drag the file into this window{R}"); continue
+        shape = next((k for k in SHAPES if want.lower().startswith(k + " ")), "square")
+        if shape != "square" or want.lower().startswith("square "): want = want[len(shape):].strip()
+        try: result = generate_image(want, shape)
+        except KeyboardInterrupt: result = "stopped"
+        print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
+        continue
     print()
     mark = len(history)
     history.append(user_message(user))

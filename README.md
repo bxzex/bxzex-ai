@@ -14,6 +14,7 @@ I built this for myself, liked it too much to keep it, and I'm giving it away fr
 - **Goes online when it needs to.** It searches the web and reads pages to get you current answers.
 - **Sees images.** Drag a photo or screenshot into the window and ask about it.
 - **Does things on your Mac.** It can run commands and read or write files. It shows you exactly what it wants to do and waits for your yes first.
+- **Makes images.** Ask for a picture or type `/image` and it paints one on your Mac, with no filter in the way. It lands in your Pictures folder and opens when it's done.
 - **Listens.** Type `/v`, say what you want, and your words show up at the prompt ready to send.
 - **Remembers you.** Tell it something worth keeping and it's still there next week. It all sits in a plain text file you can read, edit or wipe.
 - **Comes with skills.** Twenty-nine of them: design, front-end, writing that doesn't sound like a robot, social posts, client proposals, research, debugging, security and more. It pulls the right one in when the job calls for it, and you can write your own.
@@ -22,7 +23,7 @@ I built this for myself, liked it too much to keep it, and I'm giving it away fr
 ## What you need
 
 - A Mac with Apple Silicon (M1 or newer) and **24GB of memory or more**
-- About 17GB of free disk space
+- About 23GB of free disk space
 - [Homebrew](https://brew.sh). If you don't have it, their site gives you one line to paste.
 
 ## Install
@@ -33,7 +34,7 @@ Open the Terminal app and paste this:
 curl -fsSL https://raw.githubusercontent.com/bxzex/bxzex-ai/main/install.sh | bash
 ```
 
-Pick your color, then let it work. It sets up everything it needs and downloads the model, which is about 15GB, so give it a while on slower internet. If your connection drops, paste the same line again and it picks up where it stopped.
+Pick your color, then let it work. It sets up everything it needs and downloads the models, which come to about 21GB, so give it a while on slower internet. If your connection drops, paste the same line again and it picks up where it stopped.
 
 When it says READY, open a new terminal window and type:
 
@@ -51,6 +52,7 @@ Type and press Enter. That's really it. For a quick one-off without opening the 
 |---|---|
 | `/v` | Listen. Talk, press Enter when you're done, then edit or send what it heard. |
 | `/color` | Show the color themes and let you pick one. `/color blue` jumps straight to it. |
+| `/image` | Make a picture. `/image a red fox in snow`, or start with `portrait` or `landscape` to change the shape. |
 | `/skills` | List what it's been taught. |
 | `/btw` | Add a note without waiting for an answer, like `/btw the client wants it in Spanish`. |
 | `/memory` | Show what it remembers about you. `/memory clear` wipes it. |
@@ -68,6 +70,16 @@ To show it an image, drag the file into the terminal window and add your questio
 You don't have to wait for it to finish. While it's working, just type what you forgot to say and press Enter. It gets passed along as a "by the way" and it adjusts.
 
 Press Ctrl-C to stop a reply halfway.
+
+## Images
+
+Type `/image` and describe what you want, or just ask in conversation and it writes a detailed prompt for you first. Pictures are saved to `Pictures/BXZEX AI`.
+
+An image takes a few minutes. Your Mac can't hold the chat model and the image model at once, so it swaps them: you'll see "Making room", then "Painting", then the chat model loads back in.
+
+To change the look, drop LoRA style files (`.safetensors`, made for Z-Image Turbo) into `~/.bxzex-ai/loras`. Every image uses whatever is in that folder.
+
+To leave image generation out and save 5.5GB, install with `BXZEX_IMAGES=0` in front of `bash`.
 
 ## Make it yours
 
@@ -147,6 +159,6 @@ The app, the installer, the skills and the terminal design are © 2026 bxzex. Al
 
 It's free to install and use, for anything. What you can't do is copy it, repost it, rebrand it or put out your own version of it. If you want to share it, send people here. The full terms are in [LICENSE](LICENSE).
 
-It stands on good open source work: [llama.cpp](https://github.com/ggml-org/llama.cpp) runs the model and [whisper.cpp](https://github.com/ggerganov/whisper.cpp) does the listening. The model is open-weight and is downloaded during install under its own license. The DeLorean that flies past during install is ASCII art by mozz, the one on the start screen is braille art, and the logo is set in the TheDraw font Bio Hazard.
+It stands on good open source work: [llama.cpp](https://github.com/ggml-org/llama.cpp) runs the model and [whisper.cpp](https://github.com/ggerganov/whisper.cpp) does the listening and [mflux](https://github.com/filipstrand/mflux) paints the images. The model is open-weight and is downloaded during install under its own license. The DeLorean that flies past during install is ASCII art by mozz, the one on the start screen is braille art, and the logo is set in the TheDraw font Bio Hazard.
 
 More of what I build is at [bxzex.com](https://bxzex.com). Say hi on Instagram: [@bxzex](https://www.instagram.com/bxzex/).
