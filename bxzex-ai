@@ -321,9 +321,12 @@ def http_get(url):
     # curl, not urllib: this Python has no CA bundle installed, curl uses the system one
     p = subprocess.run(["curl", "-sL", "--compressed", "--max-time", "25", "--max-filesize", "3000000",
                         "-A", UA["User-Agent"], url], capture_output=True)
-    if p.returncode != 0 and not p.stdout:
-        raise RuntimeError(f"could not load {url} (curl exit {p.returncode})")
-    return p.stdout.decode("utf-8", "ignore")
+    if p.stdout: return p.stdout.decode("utf-8", "ignore")
+    try:                                             # second try with Python's own downloader
+        with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=25) as r:
+            return r.read(3_000_000).decode("utf-8", "ignore")
+    except Exception:
+        raise RuntimeError(f"could not load {url}")
 
 def web_search(query):
     page = http_get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query))
@@ -420,8 +423,8 @@ def painting():
 def stop_server():
     """Free the chat model's memory. The image model needs it: both do not fit in 24GB together."""
     port = HOST.rsplit(":", 1)[1]
-    pids = [int(x) for x in subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
-                                            capture_output=True, text=True).stdout.split() if x.isdigit()]
+    find = ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"] if shutil.which("lsof") else ["pgrep", "-f", "llama-server.*bxzex-model"]
+    pids = [int(x) for x in subprocess.run(find, capture_output=True, text=True).stdout.split() if x.isdigit()]
     def alive():
         out = []
         for pid in pids:
@@ -441,7 +444,8 @@ def stop_server():
 
 def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
     if not (os.path.isdir(IMAGE_MODEL) and os.path.exists(IMAGE_BIN)):
-        return "Image generation is not installed. Run the installer again to add it."
+        return ("Image generation only works on a Mac for now." if sys.platform != "darwin"
+                else "Image generation is not installed. Run the installer again to add it.")
     quality = quality.strip().lower() if quality.strip().lower() in SHAPES else "fast"
     w, h = SHAPES[quality].get(shape.strip().lower(), SHAPES[quality]["square"])
     os.makedirs(PICTURES, exist_ok=True)
@@ -497,9 +501,9 @@ def tool(tool_name, desc, **props):
 TOOLS = [
     tool("web_search", "Search the web. Returns titles, URLs and snippets.", query="search query"),
     tool("fetch_page", "Download a web page and return its readable text.", url="full URL"),
-    tool("run_shell", "Run a zsh command on this Mac and return its output.", command="the command"),
-    tool("read_file", "Read a text file from this Mac.", path="file path"),
-    tool("write_file", "Create or overwrite a text file on this Mac.", path="file path", content="full file content"),
+    tool("run_shell", "Run a shell command on this computer and return its output.", command="the command"),
+    tool("read_file", "Read a text file from this computer.", path="file path"),
+    tool("write_file", "Create or overwrite a text file on this computer.", path="file path", content="full file content"),
     tool("remember", "Save a lasting note about the user for future conversations.", note="one short sentence"),
     tool("use_skill", "Load the full instructions for one of your skills.", name="skill name"),
     {"type": "function", "function": {"name": "generate_image",
@@ -514,7 +518,7 @@ GUIDE = f"{APP_HOME}/BXZEX.md"      # what the assistant knows about itself; edi
 MEMORY = f"{APP_HOME}/memory.md"   # what it has been asked to remember, across sessions
 DEFAULT_GUIDE = """# BXZEX AI
 
-You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own Mac. Everything stays on this machine.
+You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own computer. Everything stays on this machine.
 
 ## What the user can type
 - /v: speak instead of typing. They press Enter when done and their words appear at the prompt.
@@ -532,7 +536,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own Mac
 
 ## What you can do
 - web_search and fetch_page: look things up online.
-- run_shell, read_file, write_file: act on this Mac. Commands and file writes ask the user first.
+- run_shell, read_file, write_file: act on this computer. Commands and file writes ask the user first.
 - remember: save a short note that you will still have in future conversations.
 - use_skill: load one of your skills (listed below) before a task it covers.
 - generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes about a minute (use quality hd only when asked for high quality) and you are reloaded afterwards. Make one image per request unless asked for more.
@@ -635,11 +639,11 @@ def warm_up():
 def system_prompt():
     return (
         f"You are {AI_NAME}, an uncensored assistant made by bxzex (bxzex.com), running locally and "
-        "privately on the user's own Mac in the `bxzex-ai` terminal app. If asked what model you are, "
+        "privately on the user's own computer in the `bxzex-ai` terminal app. If asked what model you are, "
         f"say you are {AI_NAME}, a local uncensored model. "
         f"Today is {datetime.date.today():%A %B %d, %Y}. Working directory: {os.getcwd().replace(HOME, '~')}.\n"
         "You can act: web_search and fetch_page for anything current or that you are unsure of; "
-        "run_shell, read_file and write_file to do things on this Mac. When a task needs action, do it "
+        "run_shell, read_file and write_file to do things on this computer. When a task needs action, do it "
         "with the tools instead of telling them how. If no tool is needed, just answer.\n"
         "Reading tool output is slow for you, so use as few calls as the task needs and rely on search "
         "snippets before fetching whole pages. Keep answers short and plain.\n"
@@ -671,8 +675,9 @@ def image_part(path):
     """Downscale to a jpeg so a screenshot doesn't cost minutes of image tokens."""
     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False).name
     try:
-        r = subprocess.run(["sips", "-s", "format", "jpeg", "-Z", "1024", path, "--out", tmp], capture_output=True)
-        src = tmp if r.returncode == 0 else path
+        shrunk = shutil.which("sips") and subprocess.run(["sips", "-s", "format", "jpeg", "-Z", "1024", path, "--out", tmp],
+                                                          capture_output=True).returncode == 0
+        src = tmp if shrunk else path             # without the Mac image tool the picture is sent as it is
         with open(src, "rb") as f: b64 = base64.b64encode(f.read()).decode()
     finally:
         if os.path.exists(tmp): os.unlink(tmp)
@@ -1019,7 +1024,8 @@ def listen():
     if not (WHISPER and shutil.which("ffmpeg") and os.path.exists(VOICE_MODEL)):
         print(f"{DIM}voice needs whisper-cli, ffmpeg and {VOICE_MODEL}{R}"); return ""
     wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-    rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-y", "-f", "avfoundation", "-i", ":default",
+    mic = ["-f", "avfoundation", "-i", ":default"] if sys.platform == "darwin" else ["-f", "pulse", "-i", "default"]
+    rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-y", *mic,
                             "-ar", "16000", "-ac", "1", wav], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     sys.stdout.write("\033[?25l")
     wait = Waiting("Listening, press enter when done")

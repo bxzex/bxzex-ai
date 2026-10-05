@@ -1,6 +1,6 @@
 # BXZEX Uncensored AI
 
-A local AI model that lives on your Mac and answers to nobody but you.
+A local AI model that lives on your own computer and answers to nobody but you. Mac, Linux, and Windows through WSL.
 
 No account. No subscription. No filter deciding what you're allowed to ask. It runs on your own machine, in the terminal, and nothing you type, say or show it leaves your laptop. Turn the wifi off and it still works.
 
@@ -30,19 +30,30 @@ You shouldn't paste a command from the internet into your terminal on trust, min
 
 ## What you need
 
-- A Mac with Apple Silicon (M1 or newer) and **24GB of memory or more**
+**Mac**
+- Apple Silicon (M1 or newer) and **24GB of memory or more**
 - About 23GB of free disk space
 - [Homebrew](https://brew.sh). If you don't have it, their site gives you one line to paste.
 
+**Linux**
+- A 64-bit PC with an NVIDIA graphics card that has **16GB of video memory or more**. Without one it still runs on the processor if you have 24GB of RAM, but slowly.
+- About 17GB of free disk space
+- `curl` and `python3`, which most systems already have
+
+**Windows**
+- Install WSL first: open PowerShell as administrator, run `wsl --install`, restart, and open Ubuntu. Then follow the Linux steps inside it.
+
+Chat, web search, vision, skills, memory, chat history and the shell tools work everywhere. Image generation and voice input are Mac-only for now. Linux support is new, so tell me if something breaks.
+
 ## Install
 
-Open the Terminal app and paste this:
+Open a terminal and paste this:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/bxzex/bxzex-ai/main/install.sh | bash
 ```
 
-Pick your color, then let it work. It sets up everything and downloads the AI model, vision, voice, image generation and skills. That's about 21GB, so give it a while on slower internet. If your connection drops, paste the same line again and it picks up where it stopped.
+Pick your color, then let it work. It sets up everything and downloads the AI model, vision and skills, plus voice and image generation on a Mac. That's about 21GB on a Mac and 16GB on Linux, so give it a while on slower internet. If your connection drops, paste the same line again and it picks up where it stopped.
 
 When it says READY, open a new terminal window and type:
 
@@ -167,7 +178,8 @@ The model stays in memory after you quit so the next launch is instant. To shut 
 
 ```sh
 pkill llama-server
-rm -rf ~/.bxzex-ai "$(brew --prefix)/bin/bxzex-ai"
+rm -rf ~/.bxzex-ai "$(brew --prefix)/bin/bxzex-ai"    # Mac
+rm -rf ~/.bxzex-ai ~/.local/bin/bxzex-ai              # Linux
 ```
 
 ## Credits and license
