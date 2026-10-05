@@ -43,6 +43,8 @@ You shouldn't paste a command from the internet into your terminal on trust, min
 **Windows**
 - Install WSL first: open PowerShell as administrator, run `wsl --install`, restart, and open Ubuntu. Then follow the Linux steps inside it.
 
+It will not run on a computer with 8GB or 16GB of memory and no big graphics card. The installer checks and stops if there isn't enough.
+
 Chat, web search, vision, skills, memory, chat history and the shell tools work everywhere. Image generation and voice input are Mac-only for now. Linux support is new, so tell me if something breaks.
 
 ## Install

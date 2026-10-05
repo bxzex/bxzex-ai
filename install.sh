@@ -134,8 +134,11 @@ vram=0
 if [ "$OS" = Linux ] && command -v nvidia-smi >/dev/null 2>&1; then
   vram=$(( $(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1 || echo 0) / 1024 ))
 fi
+if [ "$ram" -lt 15 ] && [ "$vram" -lt 15 ] && [ "${BXZEX_YES:-}" != 1 ]; then
+  die "This computer has ${ram}GB of memory. The model needs about 17GB, so it can't run here. Loading it anyway could freeze the computer."
+fi
 if [ "$ram" -lt 23 ] && [ "$vram" -lt 15 ]; then
-  note "This computer has ${ram}GB of memory. The model wants about 17GB, so it may be very slow or fail to load."
+  note "This computer has ${ram}GB of memory. The model wants about 17GB, so it may be very slow, freeze the computer or fail to load."
   case "$(ask "  Install anyway? [y/N] ")" in y|Y|yes) ;; *) [ "${BXZEX_YES:-}" = 1 ] || die "stopped";; esac
 fi
 
