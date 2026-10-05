@@ -6,7 +6,20 @@ No account. No subscription. No filter deciding what you're allowed to ask. It r
 
 I built this for myself, liked it too much to keep it to myself, and now it's free for anyone.
 
-[bxzex.com](https://bxzex.com) · Instagram [@bxzex](https://www.instagram.com/bxzex/)
+[bxzex.com](https://bxzex.com) · Web version [app.bxzex.com](https://app.bxzex.com) · Instagram [@bxzex](https://www.instagram.com/bxzex/)
+
+## New: the web version
+
+BXZEX AI now also runs in the browser at **[app.bxzex.com](https://app.bxzex.com)**, for when your computer can't run the model or you just want to try it first. It works on a phone too, and you can add it to your home screen like an app.
+
+It is the same model with the same image generation, vision, voice, memory and skills. There's a free plan with a small amount of usage, and Pro for $11 a month if you want more. An account is a username and a password, with no email.
+
+Two things are different from this app, and you should know them before you pick:
+
+- **It isn't private the way this is.** On the web your messages go to a server to be answered. They aren't saved there, but they do leave your device. Here, nothing does.
+- **It can't touch your computer.** Running commands and working with your files only happens in this app.
+
+If your machine can run it, this app is still the one with no limits and no bill.
 
 ## What it does
 
