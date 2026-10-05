@@ -14,7 +14,7 @@ Files:  ~/.bxzex-ai/BXZEX.md is its guide (add your own instructions there),
 Agent:  it can search the web, fetch pages, run shell commands and read/write files
         (commands and writes ask first). Drag an image into the window to have it look at it.
 """
-import json, os, re, sys, time, random, shutil, subprocess, urllib.request, urllib.error
+import json, math, os, re, sys, time, random, shutil, subprocess, urllib.request, urllib.error
 
 HOST = f"http://127.0.0.1:{os.environ.get('BXZEX_PORT', '8080')}"
 HOME = os.path.expanduser("~")
@@ -98,19 +98,19 @@ WORDS = ["Thinking","Cooking","Brewing","Pondering","Scheming","Crunching","Simm
          "Churning","Noodling","Marinating","Mulling","Vibing","Working","Cooking up"]
 def fmt(s): s=int(s); return f"{s}s" if s<60 else f"{s//60}m{s%60}s"
 
-def car(el, n=18, speed=12):
-    """A one-line DeLorean driving back and forth, leaving a trail."""
-    body_r = [("∴", 1), ("≈", 2), ("▄", 3), ("▟", 4), ("█", 4), ("█", 4), ("▙", 4), ("▃", 5)]   # nose on the right
-    body_l = [("▃", 5), ("▟", 4), ("█", 4), ("█", 4), ("▙", 4), ("▄", 3), ("≈", 2), ("∴", 1)]   # nose on the left
-    span = n - len(body_r)
-    step = int(el * speed) % (2 * span)
-    right = step < span
-    p = step if right else 2 * span - step
-    tone = {1: T[2], 2: T[3], 3: T[3], 4: T[4], 5: HI}
-    cells = [f"{DIM}─{R}"] * n
-    for i, (ch, t) in enumerate(body_r if right else body_l):
-        cells[p + i] = f"{c(tone[t])}{ch}"
-    return "".join(cells) + R
+FLAME = [0.0] * 12
+def flame(el, n=12):
+    """A row of flickering flames: hot and bright at the tips, the theme color at the base."""
+    bars = " ▁▂▃▄▅▆▇█"
+    out = []
+    for i in range(n):
+        # a slow wave moving along the row, plus flicker, eased so it licks instead of jumping
+        want = 0.55 + 0.3 * math.sin(el * 5 + i * 0.9) + 0.25 * math.sin(el * 9.5 - i * 1.7) + random.uniform(-0.25, 0.25)
+        FLAME[i] += (max(0.05, min(1.0, want)) - FLAME[i]) * 0.5
+        h = FLAME[i]
+        tone = HI if h > 0.85 else T[4] if h > 0.65 else T[3] if h > 0.4 else T[2]
+        out.append(f"{c(tone)}{bars[max(1, round(h * 8))]}")
+    return "".join(out) + R
 
 DELOREAN = [   # ASCII art by mozz, asciiart.website/art/6415
     '                                                                                            .    .',
@@ -764,7 +764,7 @@ class Markdown:
         sys.stdout.write(R)
 
 class Waiting:
-    """One-line status shown while it loads, reads or thinks: the car, what it's doing, how long, how many tokens."""
+    """One-line status shown while it loads, reads or thinks: flames, what it's doing, how long, how many tokens."""
     def __init__(self, label):
         self.label = label; self.tok = 0
         self.preview = ""     # tail of what is being written right now, e.g. the file a tool call is producing
@@ -776,8 +776,8 @@ class Waiting:
             tok = f" · ↓ {self.tok} tok" if self.tok else ""
             info = f"({fmt(el)}{tok} · ctrl-c to stop)"
             used = 2 + len(self.label) + 2 + len(info)
-            ride = car(el) + " " if w > used + 22 else ""
-            if ride: used += 19
+            ride = flame(el) + " " if w > used + 16 else ""
+            if ride: used += 13
             room = w - used - 6
             if self.preview and room > 12:
                 tail = re.sub(r"\\[nt]|\s+", " ", self.preview).replace('\\"', '"')[-room:]

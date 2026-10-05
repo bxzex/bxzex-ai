@@ -56,16 +56,13 @@ pick_color() {
 drive() {   # label, command...
   local label="$1"; shift
   "$@" >>"$LOG" 2>&1 &
-  local pid=$! i=0 n=22 pos road k
+  local pid=$! i=0 k bars="▁▂▃▅▆▇▆▅▃▂" row
   printf '\033[?25l'
   while kill -0 "$pid" 2>/dev/null; do
-    pos=$(( i % (2 * (n - 1)) )); [ "$pos" -ge "$n" ] && pos=$(( 2 * (n - 1) - pos ))
-    road=""
-    for ((k = 0; k < n; k++)); do
-      if [ "$k" -eq "$pos" ]; then road+="${A}▟█►${R}${D}"; else road+="─"; fi
-    done
-    printf '\r\033[K  %s%s%s  %s' "$D" "$road" "$R" "$label"
-    i=$((i + 1)); sleep 0.07
+    row=""
+    for ((k = 0; k < 12; k++)); do row+="${bars:$(( (i + k * 3 + RANDOM % 2) % 10 )):1}"; done
+    printf '\r\033[K  %s%s%s  %s' "$A" "$row" "$R" "$label"
+    i=$((i + 1)); sleep 0.08
   done
   printf '\r\033[K\033[?25h'
   if wait "$pid"; then ok "$label"; else tail -15 "$LOG" >&2; die "$label failed. Full log: $LOG"; fi
@@ -119,7 +116,8 @@ printf '\n   %sU N C E N S O R E D   ·   L O C A L   A I%s\n' "$B" "$R"
 printf '   %shttps://bxzex.com · instagram.com/bxzex%s\n\n' "$D" "$R"
 pick_color
 python3 "$BXZEX_HOME/bin/bxzex-ai" --flyby || true
-ok "app and skills installed"
+ok "app"
+ok "skills"
 
 ram=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 if [ "$ram" -lt 24 ]; then
@@ -129,9 +127,10 @@ fi
 command -v brew >/dev/null || die "Homebrew is required. Install it from https://brew.sh and run this again."
 
 # ---- engines ----
-for pkg in llama.cpp whisper-cpp ffmpeg; do
-  if brew list "$pkg" >/dev/null 2>&1; then ok "$pkg"
-  else HOMEBREW_NO_AUTO_UPDATE=1 drive "installing $pkg" brew install "$pkg"; fi
+for pair in "llama.cpp:chat engine" "whisper-cpp:voice engine" "ffmpeg:audio tools"; do
+  pkg="${pair%%:*}"; label="${pair#*:}"
+  if brew list "$pkg" >/dev/null 2>&1; then ok "$label"
+  else HOMEBREW_NO_AUTO_UPDATE=1 drive "$label" brew install "$pkg"; fi
 done
 
 # ---- the model ----
@@ -139,24 +138,25 @@ m="$BXZEX_HOME/models"
 if [ ! -f "$m/bxzex-model.gguf" ]; then
   free="$(df -g "$HOME" | awk 'NR==2 {print $4}')"
   [ "$free" -ge 24 ] || die "Not enough disk space: the downloads need about 23GB and ${free}GB is free."
-  note "Downloading the model. It is about 15GB, so this is the long part."
+  note "Downloading the AI model. It is about 15GB, so this is the long part."
 fi
-download "$WEIGHTS/orcarouter_Qwen3.8-27B-Uncensored-Q3_K_M.gguf"      "$m/bxzex-model.gguf"  "model"
+download "$WEIGHTS/orcarouter_Qwen3.8-27B-Uncensored-Q3_K_M.gguf"      "$m/bxzex-model.gguf"  "AI model"
 download "$WEIGHTS/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf"  "$m/bxzex-vision.gguf" "vision"
 download "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" "$m/bxzex-voice.bin" "voice"
 
 # ---- image generation (set BXZEX_IMAGES=0 to skip) ----
 if [ "${BXZEX_IMAGES:-1}" != 0 ]; then
-  brew list uv >/dev/null 2>&1 || command -v uv >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 drive "installing uv" brew install uv
+  brew list uv >/dev/null 2>&1 || command -v uv >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 drive "image tools" brew install uv
   if [ -x "$HOME/.local/bin/mflux-generate-z-image-turbo" ] || command -v mflux-generate-z-image-turbo >/dev/null; then ok "image engine"
-  else drive "installing the image engine" uv tool install --python 3.12 mflux; fi
-  if [ -f "$m/bxzex-image/.done" ]; then ok "image model"
+  else drive "image engine" uv tool install --python 3.12 mflux; fi
+  if [ -f "$m/bxzex-image/.done" ]; then ok "image generation"
   else
-    note "Downloading the image model, about 5.5GB."
-    drive "image model" uvx --from huggingface_hub hf download mflux-community/z-image-turbo-mflux-q4 --local-dir "$m/bxzex-image"
+    note "Downloading image generation, about 5.5GB."
+    drive "image generation" uvx --from huggingface_hub hf download mflux-community/z-image-turbo-mflux-q4 --local-dir "$m/bxzex-image"
     touch "$m/bxzex-image/.done"
   fi
   mkdir -p "$BXZEX_HOME/loras"
+  download "https://github.com/bxzex/bxzex-ai/releases/download/assets/bxzex-image-style.safetensors" "$BXZEX_HOME/loras/bxzex-image-style.safetensors" "image style"
 fi
 
 ln -sf "$BXZEX_HOME/bin/bxzex-ai" "$(brew --prefix)/bin/bxzex-ai"
