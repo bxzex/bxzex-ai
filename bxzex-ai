@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# BXZEX Uncensored AI — Local Model
+# BXZEX Uncensored AI
 # Copyright (c) 2026 bxzex. All rights reserved. · https://bxzex.com · instagram.com/bxzex
 # Free to use. Not to be copied, modified, rebranded or redistributed. See LICENSE.
-"""bxzex-ai — a private, uncensored AI assistant that runs on your own Mac.
+"""bxzex-ai: a private, uncensored AI assistant that runs on your own Mac.
 Usage:  bxzex-ai            (interactive)
         bxzex-ai "prompt"    (one-shot)
 Commands: /v speak instead of typing, /color pick a theme, /fast toggle reasoning,
@@ -14,13 +14,34 @@ Files:  ~/.bxzex-ai/BXZEX.md is its guide (add your own instructions there),
 Agent:  it can search the web, fetch pages, run shell commands and read/write files
         (commands and writes ask first). Drag an image into the window to have it look at it.
 """
-import json, math, os, re, sys, time, random, shutil, subprocess, urllib.request, urllib.error
+import json, math, os, re, sys, time, random, shutil, subprocess, threading, urllib.request, urllib.error
 
 HOST = f"http://127.0.0.1:{os.environ.get('BXZEX_PORT', '8080')}"
 HOME = os.path.expanduser("~")
 APP_HOME = os.environ.get("BXZEX_HOME", f"{HOME}/.bxzex-ai")
 CONFIG = f"{APP_HOME}/config.json"
 AI_NAME = "BXZEX AI"
+VERSION = "1.0"
+
+class Screen:
+    """Everything printed goes through here and is remembered, so the conversation can be redrawn
+    cleanly when the window is resized. Spinner frames and the input box bypass it via RAW."""
+    def __init__(self, real):
+        self.real = real; self.log = []; self.size = 0; self.lock = threading.RLock()
+    def write(self, text):
+        with self.lock:
+            self.real.write(text)
+            self.log.append(text); self.size += len(text)
+            while self.size > 300000 and len(self.log) > 1: self.size -= len(self.log.pop(0))
+    def replay(self): return "".join(self.log)
+    def flush(self): self.real.flush()
+    def isatty(self): return self.real.isatty()
+    def fileno(self): return self.real.fileno()
+    def __getattr__(self, name): return getattr(self.real, name)
+
+RAW = sys.stdout
+if RAW.isatty(): sys.stdout = Screen(RAW)
+
 R, BOLD, DIM, ITAL = "\033[0m", "\033[1m", "\033[2m", "\033[3m"
 def c(n): return f"\033[38;5;{n}m"
 
@@ -167,20 +188,51 @@ LOGO = [   # "bxzex" in the TheDraw font Bio Hazard: (characters, one hex color 
     ('  ▀▀▀▀▀▀      ▀░    ▀░    ▀▀▀▀▀▀▀▀      ▀▀▀▀▀▀      ▀░    ▀░  ', '0707080808080808070700000707080807070707080800000707080808080808080807070000070708080808080807070000070708080707070708080000'),
 ]
 
-def logo_rows():
-    """The logo keeps its white and grey; its blue becomes the theme color."""
-    fg = {15: 231, 7: 248, 8: 240, 1: T[2]}
-    bg = {1: T[2], 7: 248}
-    out = []
-    for chars, attrs in LOGO:
-        row = []; last = None
-        for i, ch in enumerate(chars):
-            a = int(attrs[2*i:2*i+2], 16)
-            code = f"\033[0;38;5;{fg.get(a & 15, 231)}" + (f";48;5;{bg[a >> 4]}m" if (a >> 4) in bg else "m")
-            if code != last: row.append(code); last = code
-            row.append(ch)
-        out.append("".join(row) + R)
-    return out
+def rgb(i):
+    """A 256-color index as red, green, blue."""
+    if i >= 232: v = 8 + 10 * (i - 232); return (v, v, v)
+    i -= 16; lv = [0, 95, 135, 175, 215, 255]
+    return (lv[i // 36], lv[i // 6 % 6], lv[i % 6])
+
+def logo_rows(scale=0.75):
+    """The logo, kept exactly as drawn but shrunk: its white and grey stay, its blue becomes the theme color."""
+    fg = {15: 231, 7: 248, 8: 240, 1: T[2]}; bg = {1: T[2], 7: 248}
+    cover = {"█": (1, 1), "▀": (1, 0), "▄": (0, 1), "░": (.25, .25), "▒": (.5, .5), "▓": (.75, .75)}
+    sw, sh = len(LOGO[0][0]), len(LOGO) * 2
+    px = [[None] * sw for _ in range(sh)]                    # each cell is two pixels tall: (r, g, b, opacity)
+    for y, (chars, attrs) in enumerate(LOGO):
+        for x, ch in enumerate(chars):
+            a = int(attrs[2*x:2*x+2], 16)
+            f = rgb(fg.get(a & 15, 231)); b = rgb(bg[a >> 4]) if (a >> 4) in bg else None
+            for half, amount in enumerate(cover.get(ch, (0, 0))):
+                if b: px[2*y + half][x] = tuple(f[k] * amount + b[k] * (1 - amount) for k in range(3)) + (1.0,)
+                elif amount: px[2*y + half][x] = f + (amount,)
+    tw = round(sw * scale); th = round(sh * scale / 2) * 2
+    palette = sorted(set(fg.values()))
+    def sample(tx, ty):                                      # average the source pixels this smaller pixel covers
+        x0, x1, y0, y1 = tx * sw / tw, (tx + 1) * sw / tw, ty * sh / th, (ty + 1) * sh / th
+        tot = [0.0, 0.0, 0.0]; op = 0.0; area = 0.0
+        for y in range(int(y0), min(sh, int(y1) + 1)):
+            for x in range(int(x0), min(sw, int(x1) + 1)):
+                wgt = max(0, min(x + 1, x1) - max(x, x0)) * max(0, min(y + 1, y1) - max(y, y0))
+                area += wgt
+                if px[y][x] and wgt:
+                    o = px[y][x][3] * wgt; op += o
+                    for k in range(3): tot[k] += px[y][x][k] * o
+        if not area or op / area < 0.3: return None
+        mix = [tot[k] / op for k in range(3)]                # snap to the logo's own colors so it stays crisp
+        return min(palette, key=lambda i: sum((a - b) ** 2 for a, b in zip(rgb(i), mix)))
+    rows = []
+    for ty in range(0, th, 2):
+        row = []
+        for tx in range(tw):
+            top, bot = sample(tx, ty), sample(tx, ty + 1)
+            if top is None and bot is None: row.append(f"{R} ")
+            elif bot is None: row.append(f"{R}\033[38;5;{top}m▀")
+            elif top is None: row.append(f"{R}\033[38;5;{bot}m▄")
+            else: row.append(f"\033[38;5;{top};48;5;{bot}m▀")
+        rows.append("".join(row) + R)
+    return rows
 
 CAR = [   # the DeLorean, drawn in braille dots
     '⣀⣤⣀⣀⣀⡀⠀⠀⠀⠀⠀⢀⣀⣀⣰⣾⣿⣤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⠀⠀⠀⢀⣀⣀⣀⣀⣀⣀⣀',
@@ -207,6 +259,26 @@ CAR = [   # the DeLorean, drawn in braille dots
     '⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿',
 ]
 
+def shrink_braille(art, scale=0.75):
+    """Redraw a braille picture smaller by resampling its dots."""
+    bits = {(0, 0): 1, (0, 1): 2, (0, 2): 4, (1, 0): 8, (1, 1): 16, (1, 2): 32, (0, 3): 64, (1, 3): 128}
+    sw, sh = len(art[0]) * 2, len(art) * 4
+    dot = [[0] * sw for _ in range(sh)]
+    for cy, line in enumerate(art):
+        for cx, ch in enumerate(line):
+            v = ord(ch) - 0x2800
+            for (dx, dy), b in bits.items():
+                if v & b: dot[cy * 4 + dy][cx * 2 + dx] = 1
+    tw = round(sw * scale / 2) * 2; th = round(sh * scale / 4) * 4
+    def on(tx, ty):
+        ys = range(int(ty * sh / th), max(int(ty * sh / th) + 1, int((ty + 1) * sh / th)))
+        xs = range(int(tx * sw / tw), max(int(tx * sw / tw) + 1, int((tx + 1) * sw / tw)))
+        return sum(dot[y][x] for y in ys for x in xs) * 2 >= len(ys) * len(xs)
+    return ["".join(chr(0x2800 + sum(b for (dx, dy), b in bits.items() if on(cx * 2 + dx, cy * 4 + dy)))
+                    for cx in range(tw // 2)) for cy in range(th // 4)]
+
+CAR = shrink_braille(CAR)
+
 def car_rows():
     """The car picture, white at the top fading down into the theme color."""
     tones = [231, 231, 255, 252, T[4] if T[4] != 231 else 153, T[3], T[3], T[2]]
@@ -227,7 +299,7 @@ def banner():
     site = link("https://bxzex.com", "https://bxzex.com")
     insta = link("https://instagram.com/bxzex", "instagram.com/bxzex")
     print(f"\n  {BOLD}BXZEX AI{R} {DIM}· uncensored · local · private{R}")
-    print(f"  {GOLD}{site}{R} {DIM}· {insta} · © 2026 bxzex{R}")
+    print(f"  {GOLD}{site}{R} {DIM}· {insta} · © 2026 bxzex · v{VERSION}{R}")
     print(f"  {DIM}{os.getcwd().replace(HOME, '~')}{R}")
     print(f"\n  {DIM}/help for commands · drop an image to show it · keep typing while it works{R}")
 
@@ -243,26 +315,38 @@ def loaded_model():
     except Exception:
         return None
 
-def ensure_server():
-    """Start the model server if it isn't already running. A cold start reads ~15GB off disk."""
+server_proc = None
+
+def ensure_server(block=True):
+    """Start the model server if it isn't already running. A cold start reads ~15GB off disk.
+    block=False starts it and returns straight away; the next call waits for it."""
+    global server_proc
     if loaded_model(): return True
-    launcher = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bxzex-server")
-    if not os.path.exists(launcher):
-        print(f"{DIM}server launcher missing: {launcher}{R}"); return False
-    os.makedirs(APP_HOME, exist_ok=True)
-    log = open(os.path.join(APP_HOME, "server.log"), "w")
-    proc = subprocess.Popen([launcher], stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    if os.path.exists(f"{APP_HOME}/painting.lock") and painting():     # another window is making an image
+        wait = Waiting("Waiting for an image to finish")
+        try:
+            while painting(): time.sleep(1)
+        finally:
+            wait.stop()
+    if not (server_proc and server_proc.poll() is None):       # not already on its way up
+        launcher = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bxzex-server")
+        if not os.path.exists(launcher):
+            print(f"{DIM}server launcher missing: {launcher}{R}"); return False
+        os.makedirs(APP_HOME, exist_ok=True)
+        log = open(os.path.join(APP_HOME, "server.log"), "w")
+        server_proc = subprocess.Popen([launcher], stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    if not block: return True
     sys.stdout.write("\033[?25l")
     wait = Waiting("Loading model")
     try:
-        while proc.poll() is None:
+        while server_proc.poll() is None:
             if loaded_model(): return True
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
         wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
-    print(f"{DIM}the model server didn't start — see {APP_HOME}/server.log{R}"); return False
+    print(f"{DIM}the model server didn't start. See {APP_HOME.replace(HOME, '~')}/server.log{R}"); return False
 
 # ---- tools ----
 import base64, datetime, html, shlex, tempfile, threading, urllib.parse
@@ -347,28 +431,74 @@ def write_file(path, content):
 IMAGE_MODEL = f"{APP_HOME}/models/bxzex-image"
 IMAGE_BIN = shutil.which("mflux-generate-z-image-turbo") or f"{HOME}/.local/bin/mflux-generate-z-image-turbo"
 LORAS = f"{APP_HOME}/loras"            # drop .safetensors style files here and they are applied to every image
-PICTURES = f"{HOME}/Pictures/BXZEX AI"
-SHAPES = {"square": (768, 768), "portrait": (640, 960), "landscape": (960, 640)}
+PICTURES = f"{HOME}/Pictures/BXZEX"
+# measured on a 24GB M4 Air: fast is about a minute, hd about two and a half
+SHAPES = {"fast": {"square": (640, 640), "portrait": (512, 768), "landscape": (768, 512)},
+          "hd":   {"square": (768, 768), "portrait": (640, 960), "landscape": (960, 640)}}
+STEPS = {"fast": 6, "hd": 8}
+
+def preview(path, cols=44):
+    """A small picture of the image drawn with half-block characters, so it shows up right in the chat."""
+    if not shutil.which("sips"): return []
+    tmp = tempfile.NamedTemporaryFile(suffix=".bmp", delete=False).name
+    try:
+        info = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path], capture_output=True, text=True).stdout
+        m = re.findall(r"pixel(?:Width|Height): (\d+)", info)
+        if len(m) != 2: return []
+        w = min(cols, W() - 4); h = max(2, round(w * int(m[1]) / int(m[0])) // 2 * 2)
+        if subprocess.run(["sips", "-s", "format", "bmp", "-z", str(h), str(w), path, "--out", tmp], capture_output=True).returncode: return []
+        with open(tmp, "rb") as f: d = f.read()
+        off = int.from_bytes(d[10:14], "little"); bw = int.from_bytes(d[18:22], "little", signed=True)
+        bh = int.from_bytes(d[22:26], "little", signed=True); bpp = int.from_bytes(d[28:30], "little") // 8
+        stride = (bw * bpp + 3) // 4 * 4
+        def px(x, y):
+            row = (abs(bh) - 1 - y) if bh > 0 else y            # most bitmaps are stored bottom row first
+            i = off + row * stride + x * bpp
+            b, g, r = d[i], d[i + 1], d[i + 2]
+            return 16 + 36 * round(r / 51) + 6 * round(g / 51) + round(b / 51)
+        return ["".join(f"\033[38;5;{px(x, y)};48;5;{px(x, y + 1)}m▀" for x in range(bw)) + R for y in range(0, abs(bh) - 1, 2)]
+    except Exception:
+        return []
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+
+PAINTING = f"{APP_HOME}/painting.lock"   # exists while an image is being made, so nothing reloads the chat model under it
+
+def painting():
+    try: return time.time() - os.path.getmtime(PAINTING) < 1200
+    except OSError: return False
 
 def stop_server():
     """Free the chat model's memory. The image model needs it: both do not fit in 24GB together."""
     port = HOST.rsplit(":", 1)[1]
-    pids = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
+    pids = [int(x) for x in subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                                            capture_output=True, text=True).stdout.split() if x.isdigit()]
+    def alive():
+        out = []
+        for pid in pids:
+            try: os.kill(pid, 0); out.append(pid)
+            except OSError: pass
+        return out
     for pid in pids:
-        try: os.kill(int(pid), 15)
-        except (OSError, ValueError): pass
-    for _ in range(40):
-        if not loaded_model(): return
+        try: os.kill(pid, 15)
+        except OSError: pass
+    for _ in range(60):                       # wait until the memory is really given back
+        if not alive(): return
         time.sleep(0.25)
+    for pid in alive():
+        try: os.kill(pid, 9)
+        except OSError: pass
+    time.sleep(0.5)
 
-def generate_image(prompt, shape="square"):
+def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
     if not (os.path.isdir(IMAGE_MODEL) and os.path.exists(IMAGE_BIN)):
         return "Image generation is not installed. Run the installer again to add it."
-    w, h = SHAPES.get(shape.strip().lower(), SHAPES["square"])
+    quality = quality.strip().lower() if quality.strip().lower() in SHAPES else "fast"
+    w, h = SHAPES[quality].get(shape.strip().lower(), SHAPES[quality]["square"])
     os.makedirs(PICTURES, exist_ok=True)
     out = f"{PICTURES}/{time.strftime('%Y-%m-%d %H-%M-%S')}.png"
     cmd = [IMAGE_BIN, "--model", IMAGE_MODEL, "--low-ram", "--prompt", " ".join(prompt.split()),
-           "--width", str(w), "--height", str(h), "--steps", "8", "--output", out]
+           "--width", str(w), "--height", str(h), "--steps", str(STEPS[quality]), "--output", out]
     try: loras = sorted(os.path.join(LORAS, f) for f in os.listdir(LORAS) if f.endswith(".safetensors"))
     except OSError: loras = []
     if loras:
@@ -378,6 +508,8 @@ def generate_image(prompt, shape="square"):
     wait = Waiting("Making room")
     err = ""
     try:
+        while painting(): wait.label = "Waiting for another image to finish"; time.sleep(1)
+        open(PAINTING, "w").close()
         stop_server()
         wait.label = "Painting"
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -389,20 +521,24 @@ def generate_image(prompt, shape="square"):
             if step: wait.label = f"Painting, step {step[-1][0]} of {step[-1][1]}"
         proc.wait()
     except KeyboardInterrupt:
-        proc.kill(); wait.stop(); ensure_server(); raise
+        proc.kill(); wait.stop()
+        if os.path.exists(PAINTING): os.remove(PAINTING)
+        ensure_server(block=False); raise
     finally:
         wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
-    ensure_server()                                   # bring the chat model back
+        if os.path.exists(PAINTING): os.remove(PAINTING)
+    ensure_server(block=wait_for_chat)                # bring the chat model back
     if proc.returncode != 0 or not os.path.exists(out):
         last = [l for l in err.splitlines() if l.strip()]
         return f"error: the image could not be made ({last[-1][:200] if last else 'no details'})"
-    subprocess.run(["open", out], capture_output=True)
-    return f"saved to {out.replace(HOME, '~')} and opened ({w}x{h}" + (f", {len(loras)} style file(s) applied)" if loras else ")")
+    for row in preview(out): print("  " + row)
+    print(f"  {GOLD}{link('file://' + urllib.parse.quote(out), out.replace(HOME, '~'))}{R} {DIM}· cmd-click to open{R}")
+    return f"saved to {out.replace(HOME, '~')} ({w}x{h}" + (f", {len(loras)} style file(s) applied)" if loras else ")")
 
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
-              "generate_image": lambda prompt, shape="square": generate_image(prompt, shape)}
+              "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
 
 def tool(tool_name, desc, **props):
     return {"type": "function", "function": {"name": tool_name, "description": desc, "parameters": {
@@ -418,10 +554,11 @@ TOOLS = [
     tool("remember", "Save a lasting note about the user for future conversations.", note="one short sentence"),
     tool("use_skill", "Load the full instructions for one of your skills.", name="skill name"),
     {"type": "function", "function": {"name": "generate_image",
-        "description": "Create a picture from a description and save it. Takes a few minutes.",
+        "description": "Create a picture from a description and save it. About a minute, or a few for hd.",
         "parameters": {"type": "object", "required": ["prompt"], "properties": {
             "prompt": {"type": "string", "description": "detailed description: subject, setting, lighting, style, camera"},
-            "shape": {"type": "string", "enum": ["square", "portrait", "landscape"]}}}}},
+            "shape": {"type": "string", "enum": ["square", "portrait", "landscape"]},
+            "quality": {"type": "string", "enum": ["fast", "hd"], "description": "fast unless they ask for high quality"}}}}},
 ]
 
 GUIDE = f"{APP_HOME}/BXZEX.md"      # what the assistant knows about itself; edit it to add your own instructions
@@ -449,7 +586,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own Mac
 - run_shell, read_file, write_file: act on this Mac. Commands and file writes ask the user first.
 - remember: save a short note that you will still have in future conversations.
 - use_skill: load one of your skills (listed below) before a task it covers.
-- generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes a few minutes and you are reloaded afterwards. Make one image per request unless asked for more.
+- generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes about a minute (use quality hd only when asked for high quality) and you are reloaded afterwards. Make one image per request unless asked for more.
 
 ## Memory
 When the user tells you something lasting about themselves, their work or how they like things done,
@@ -630,7 +767,7 @@ class TypeAhead:
         while not self.stop_ev.is_set():
             global resized
             ready, _, _ = select.select([self.fd], [], [], 0.1)
-            if resized: resized = False; box.resize(); box.draw(self.buf, len(self.buf))
+            if resized: resized = False; box.draw(self.buf, len(self.buf))
             if not ready: continue
             for ch in os.read(self.fd, 64).decode("utf-8", "ignore"):
                 if ch in "\r\n":
@@ -784,14 +921,15 @@ class Waiting:
                 note = f"   {DIM}{tail}{R}"
             else: note = ""
             line = f"\r\033[K{ride}{GOLD}{self.label}…{R} {DIM}{info}{R}{note}"
-            sys.stdout.write(line if w > used else f"\r\033[K{GOLD}{self.label[:max(4, w - 4)]}…{R}")
-            sys.stdout.flush()
+            RAW.write(line if w > used else f"\r\033[K{GOLD}{self.label[:max(4, w - 4)]}…{R}")
+            RAW.flush()
     def stop(self):
         if self.stop_ev.is_set(): return
         self.stop_ev.set(); self.th.join()
-        sys.stdout.write("\r\033[K"); sys.stdout.flush()
+        RAW.write("\r\033[K"); RAW.flush()
 
 turn_tok = 0   # tokens generated in the current turn, for the summary line
+stream_error = ""   # set when the server reports a failure instead of an answer
 DOING = {"generate_image": "Writing the image prompt", "write_file": "Writing file", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
          "read_file": "Opening file", "use_skill": "Loading skill", "remember": "Saving to memory"}
 
@@ -799,14 +937,15 @@ def stream(messages, label="Reading"):
     """One model call. Returns (answer text, tool calls)."""
     model = loaded_model()
     if not model:
-        print(f"{DIM}the model server isn't running — relaunch bxzex-ai{R}"); return "", []
+        print(f"{DIM}the model server isn't running. Relaunch bxzex-ai{R}"); return "", []
     body = json.dumps({"model": model, "messages": [{"role": "system", "content": SYSTEM}] + messages,
                        "tools": TOOLS, "max_tokens": 4096, "temperature": 0.7, "stream": True,
                        "chat_template_kwargs": {"enable_thinking": not fast}}).encode()
     req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type":"application/json"})
     sys.stdout.write("\033[?25l")  # hide cursor while generating
     wait = Waiting(label)
-    global turn_tok
+    global turn_tok, stream_error
+    stream_error = ""
     answer=[]; calls={}; phase=None; tn=0; at_start=True; off=random.randrange(len(WORDS)); t0=time.time()
 
     md = Markdown(prefix=f"{GOLD}●{R} ")
@@ -824,7 +963,13 @@ def stream(messages, label="Reading"):
             if not line.startswith("data:"): continue
             p = line[5:].strip()
             if p=="[DONE]": break
-            try: delta = json.loads(p)["choices"][0]["delta"]
+            try: event = json.loads(p)
+            except Exception: continue
+            if "error" in event:                       # the server gave up on this request
+                err = event["error"]
+                stream_error = err.get("message", "error") if isinstance(err, dict) else str(err)
+                break
+            try: delta = event["choices"][0]["delta"]
             except Exception: continue
 
             if delta.get("tool_calls") or delta.get("content") or delta.get("reasoning_content"): turn_tok += 1
@@ -874,13 +1019,22 @@ def stream(messages, label="Reading"):
 def run_turn(history):
     """Agent loop: keep calling the model until it answers without asking for a tool.
     Anything typed and sent while it works is passed to it as a "by the way" note."""
+    if not ensure_server(): return      # e.g. still reloading after an image
     typed.start()
     try:
         global turn_tok
-        turn_tok = 0; began = time.time()
+        turn_tok = 0; began = time.time(); retried = False
         label = "Reading"
         for _ in range(MAX_STEPS):
             text, calls = stream(history, label)
+            if stream_error and not text and not calls:
+                if retried:
+                    print(f"{DIM}the model failed: {stream_error} Try again, or quit and relaunch.{R}"); return
+                retried = True                   # usually the graphics memory got into a bad state: a fresh start clears it
+                print(f"{DIM}the model hit an error ({stream_error.rstrip('.')}), restarting it{R}")
+                stop_server()
+                if not ensure_server(): return
+                continue
             if calls:
                 if text: print()
                 history.append({"role": "assistant", "content": text, "tool_calls": calls})
@@ -939,7 +1093,7 @@ def listen():
         if os.path.exists(wav): os.unlink(wav)
     text = re.sub(r"[\[(][^\])]*[\])]", " ", out)   # drop [BLANK_AUDIO], (music) and the like
     text = " ".join(text.split())
-    if not text: print(f"{DIM}didn't catch anything — check the mic permission for Terminal{R}")
+    if not text: print(f"{DIM}didn't catch anything. Check the mic permission for Terminal{R}")
     return text
 
 # ---- chat history ----
@@ -1006,7 +1160,7 @@ def _on_resize(*_):
 signal.signal(signal.SIGWINCH, _on_resize)
 
 COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"), ("/skills", "list skills"),
-            ("/memory", "what it remembers · /memory clear"), ("/image", "make a picture · /image portrait a red fox"), ("/btw", "add a note, no reply"),
+            ("/memory", "what it remembers · /memory clear"), ("/image", "make a picture · /image hd portrait a red fox"), ("/btw", "add a note, no reply"),
             ("/history", "past chats, pick one to continue"), ("/resume", "continue the last chat"),
             ("/fast", "toggle answering without thinking first"), ("/think", "show or hide its thinking"),
             ("/reset", "start a new conversation"), ("/help", "this list"), ("exit", "quit")]
@@ -1023,14 +1177,28 @@ class Box:
     """Keeps the input box on the last four rows. Everything else scrolls in the area above it,
     so the box stays put while a reply streams."""
     ROWS = 4
-    def __init__(self): self.on = False; self.h = 0
+    def __init__(self): self.on = False; self.h = 0; self.size = None
     def pin(self):
-        if self.on or not (sys.stdout.isatty() and sys.stdin.isatty()): return
-        self.h = shutil.get_terminal_size((90, 30)).lines
+        if self.on or not (RAW.isatty() and sys.stdin.isatty()): return
+        size = shutil.get_terminal_size((90, 30)); self.h = size.lines
         if self.h < 12: return
         # make room, then limit scrolling to the rows above the box (setting the region moves the cursor, so save it)
-        sys.stdout.write("\n" * self.ROWS + f"\033[{self.ROWS}A\0337\033[1;{self.h - self.ROWS}r\0338")
-        self.on = True; self.draw()
+        RAW.write("\n" * self.ROWS + f"\033[{self.ROWS}A\0337\033[1;{self.h - self.ROWS}r\0338")
+        self.on = True; self.size = (size.columns, size.lines); self.draw()
+    def fit(self):
+        """If the window changed size, wipe the screen and print the conversation again for the new size.
+        Guessing where things moved to is not reliable, redrawing is."""
+        size = shutil.get_terminal_size((90, 30))
+        if (size.columns, size.lines) == self.size or size.lines < 12: return False
+        self.size = (size.columns, size.lines); self.h = size.lines
+        lock = getattr(sys.stdout, "lock", None)
+        if lock: lock.acquire()
+        try:
+            past_output = sys.stdout.replay() if hasattr(sys.stdout, "replay") else ""
+            RAW.write(f"\033[r\033[H\033[2J\033[3J\033[1;{self.h - self.ROWS}r\033[H{past_output}\0337"); RAW.flush()
+        finally:
+            if lock: lock.release()
+        return True
     def frame(self, text, pos, working):
         w = W(); top = self.h - self.ROWS + 1; room = max(4, w - 3)
         start = max(0, pos - room)
@@ -1042,36 +1210,21 @@ class Box:
     def draw(self, text="", pos=0, working=True):
         """Redraw while output is streaming: the cursor goes back to where the output was."""
         if not self.on: return
+        self.fit()
         s, _ = self.frame(text, pos, working)
-        sys.stdout.write("\0337" + s + "\0338"); sys.stdout.flush()
+        RAW.write("\0337" + s + "\0338"); RAW.flush()
     def focus(self, text, pos):
         """Redraw at the prompt: the cursor stays in the box."""
+        self.fit()
         s, col = self.frame(text, pos, False)
-        sys.stdout.write(f"{s}\033[{self.h - self.ROWS + 2};{col}H"); sys.stdout.flush()
-    def resize(self):
-        if not self.on: return
-        old = self.h; self.h = max(12, shutil.get_terminal_size((90, 30)).lines)
-        s = "\0337\033[r"
-        for r in range(old - self.ROWS + 1, min(old, self.h - self.ROWS) + 1):   # old box now inside the scrolling area
-            s += f"\033[{r};1H\033[2K"
-        sys.stdout.write(s + f"\033[1;{self.h - self.ROWS}r\0338"); sys.stdout.flush()
+        RAW.write(f"{s}\033[{self.h - self.ROWS + 2};{col}H"); RAW.flush()
     def unpin(self):
         if not self.on: return
         self.on = False
-        sys.stdout.write(f"\0337\033[r\033[{self.h - self.ROWS + 1};1H\033[J\0338\033[?25h"); sys.stdout.flush()
+        RAW.write(f"\0337\033[r\033[{self.h - self.ROWS + 1};1H\033[J\0338\033[?25h"); RAW.flush()
 
 box = Box()
 atexit.register(box.unpin)
-
-def cursor_row(fd):
-    """Ask the terminal which row the cursor is on."""
-    sys.stdout.write("\033[6n"); sys.stdout.flush()
-    got = b""
-    while select.select([fd], [], [], 0.3)[0]:
-        got += os.read(fd, 32)
-        m = re.search(rb"\x1b\[(\d+);\d+R", got)
-        if m: return int(m.group(1))
-    return None
 
 def ask(prefill=""):
     """Read a message in the pinned box. Typing, arrows, history and paste are handled here,
@@ -1084,18 +1237,16 @@ def ask(prefill=""):
     box.pin()
     if not box.on:                       # window too small for the box: plain prompt
         return input(f"\n{GOLD}❯{R} ").strip()
+    box.fit()                            # the window may have been resized while it was busy
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
     buf = list(prefill); pos = len(buf); at = len(past); draft = ""; pasting = False
     dec = codecs.getincrementaldecoder("utf-8")("ignore")
     print()
     tty.setcbreak(fd)
-    sys.stdout.write("\0337")            # where the conversation left off, to come back to
-    home = cursor_row(fd); moved = False  # the row number is the fallback if a resize disturbs the saved spot
-    sys.stdout.write("\033[?2004h\033[?25h")   # bracketed paste: a pasted newline must not send the message
+    RAW.write("\0337\033[?2004h\033[?25h")   # remember where the conversation left off; bracketed paste on
 
     def leave():
-        back = f"\033[{min(home, box.h - box.ROWS)};1H" if (moved and home) else "\0338"
-        sys.stdout.write("\033[?2004l" + back); sys.stdout.flush()
+        RAW.write("\033[?2004l\0338"); RAW.flush()      # back to where the conversation left off
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         box.draw("", 0, working=True)
 
@@ -1109,7 +1260,7 @@ def ask(prefill=""):
             except KeyboardInterrupt:
                 if buf: buf = []; pos = 0; box.focus("", 0); continue    # first ctrl-c clears the line
                 raise
-            if resized: resized = False; moved = True; box.resize(); box.focus("".join(buf), pos)
+            if resized: resized = False; box.focus("".join(buf), pos)
             if not ready: continue
             data = dec.decode(os.read(fd, 4096)); i = 0; done = False
             while i < len(data):
@@ -1168,6 +1319,8 @@ def show_help():
     print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note.{R}")
 
 # ---- installer helpers ----
+if sys.argv[1:2] in (["--version"], ["-v"]):
+    print(f"bxzex-ai {VERSION} · © 2026 bxzex · https://bxzex.com"); sys.exit(0)
 if sys.argv[1:2] == ["--car"]:
     if splash_fits():
         print()
@@ -1251,9 +1404,12 @@ while True:
         want = user[6:].strip()
         if not want:
             print(f"{DIM}/image <description> makes a picture · to show it one, drag the file into this window{R}"); continue
-        shape = next((k for k in SHAPES if want.lower().startswith(k + " ")), "square")
-        if shape != "square" or want.lower().startswith("square "): want = want[len(shape):].strip()
-        try: result = generate_image(want, shape)
+        shape, quality = "square", "fast"
+        while want.split(" ", 1)[0].lower() in ("hd", "fast", "square", "portrait", "landscape") and " " in want:
+            word, want = want.split(" ", 1)
+            if word.lower() in ("hd", "fast"): quality = word.lower()
+            else: shape = word.lower()
+        try: result = generate_image(want, shape, quality, wait_for_chat=False)   # the chat model reloads while you look
         except KeyboardInterrupt: result = "stopped"
         print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
         continue

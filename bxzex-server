@@ -1,5 +1,5 @@
 #!/bin/bash
-# BXZEX Uncensored AI — Local Model
+# BXZEX Uncensored AI
 # Copyright (c) 2026 bxzex. All rights reserved. · https://bxzex.com
 # Free to use. Not to be copied, modified, rebranded or redistributed. See LICENSE.
 #
