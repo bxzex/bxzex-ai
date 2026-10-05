@@ -32,11 +32,29 @@ design, the logo treatment and the documentation.
    installer downloads are not part of the Software. They belong to their
    authors and are covered by their own licenses.
 
-5. No warranty
+5. Use at your own risk
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   IMPLIED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR
-   OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE. You are responsible
-   for what you ask it to do and for the commands you approve.
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. YOU USE IT ENTIRELY
+   AT YOUR OWN RISK.
+
+   You alone are responsible for how you use the Software and for everything
+   that comes out of it. That includes what you ask it, the text and images
+   it produces, the commands and file changes you approve, and anything you
+   do with the results. You are responsible for following the laws that apply
+   to you.
+
+   The Software runs AI models that are not filtered. Their output can be
+   wrong, offensive or unsafe. It is not advice of any kind, and it is not
+   reviewed, endorsed or controlled by bxzex.
+
+   TO THE FULLEST EXTENT ALLOWED BY LAW, IN NO EVENT SHALL BXZEX BE LIABLE
+   FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR
+   OTHERWISE, ARISING FROM THE SOFTWARE, ITS OUTPUT OR ITS USE, INCLUDING
+   LOSS OF DATA, DAMAGE TO A COMPUTER, OR ANYTHING A USER DOES WITH IT.
+
+   By installing or using the Software you accept these terms. If you do not
+   accept them, do not install or use it.
 
 6. Ending
    These permissions end automatically if you break the terms above.

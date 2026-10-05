@@ -140,6 +140,12 @@ This is a big model running on a laptop. On a 24GB MacBook Air it writes around 
 
 It's slower than the big online assistants. In exchange, it's private and it's yours.
 
+## Use at your own risk
+
+BXZEX AI is provided as is, with no warranty of any kind. You use it entirely at your own risk.
+
+You are responsible for everything you do with it: what you ask it, what it writes, the images it makes, the commands you approve and anything you do with the results. bxzex is not responsible or liable for any of that, or for any loss, damage or legal trouble that comes from using it. Follow the laws where you live. If you don't agree, don't install it.
+
 ## Be careful with it
 
 It's uncensored, and when it runs a command it runs it as you, with nothing fencing it in. Read what it's asking before you say yes. It offers an "always" option that stops it asking for the rest of the session. I'd leave that alone unless you're watching.

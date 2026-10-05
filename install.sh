@@ -114,6 +114,8 @@ for k in $SKILLS; do fetch "skills/$k.md" "$BXZEX_HOME/skills/$k.md"; done
 python3 "$BXZEX_HOME/bin/bxzex-ai" --logo || true
 printf '\n   %sU N C E N S O R E D   ·   L O C A L   A I%s\n' "$B" "$R"
 printf '   %shttps://bxzex.com · instagram.com/bxzex%s\n\n' "$D" "$R"
+note "Free to use, at your own risk. You are responsible for what you do with it. Terms: github.com/bxzex/bxzex-ai"
+printf '\n'
 pick_color
 python3 "$BXZEX_HOME/bin/bxzex-ai" --flyby || true
 ok "app"
