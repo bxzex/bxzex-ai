@@ -138,6 +138,7 @@ vram=0
 if [ "$OS" = Linux ] && command -v nvidia-smi >/dev/null 2>&1; then
   vram=$(( $(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1 || echo 0) / 1024 ))
 fi
+[ "${BXZEX_DEVICE:-}" = cpu ] && vram=0      # processor only: the graphics card's memory does not count
 if [ "$ram" -lt 15 ] && [ "$vram" -lt 15 ] && [ "${BXZEX_YES:-}" != 1 ]; then
   die "This computer has ${ram}GB of memory. The model needs about 17GB, so it can't run here. Loading it anyway could freeze the computer."
 fi
@@ -161,6 +162,7 @@ else
   if [ "$vram" -gt 0 ] && [ "$cpu" = x64 ]; then kind="cuda-12.8-$cpu"
   elif has_vulkan; then kind="vulkan-$cpu"
   else kind="$cpu"; fi
+  [ "${BXZEX_DEVICE:-}" = cpu ] && kind="$cpu"      # asked for the processor only
   kind="${BXZEX_ENGINE:-$kind}"
   if [ -f "$eng/.$tag-$kind" ]; then ok "chat engine"
   else
@@ -278,12 +280,13 @@ case ":$PATH:" in *":$bindir:"*) ;; *)
 esac
 
 # remember which optional parts are installed, so the app can tell when an update adds more
-python3 - "$BXZEX_HOME/config.json" "$OS" <<'PART'
+python3 - "$BXZEX_HOME/config.json" "$OS" "${BXZEX_DEVICE:-}" <<'PART'
 import json, os, sys
 p = sys.argv[1]
 try: d = json.load(open(p))
 except Exception: d = {}
 d["parts"] = 2 if sys.argv[2] == "Darwin" else 3
+if sys.argv[3] in ("cpu", "gpu"): d["device"] = sys.argv[3]      # installed with BXZEX_DEVICE=cpu: keep it on the processor
 json.dump(d, open(p, "w"))
 PART
 

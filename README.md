@@ -95,6 +95,7 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/btw` | Add a note without waiting for an answer, like `/btw the client wants it in Spanish`. |
 | `/fast` | Switch fast mode. It's on by default and answers right away. Turn it off when you want it to think a hard question through first. |
 | `/think` | Show or hide its thinking when fast mode is off. |
+| `/device` | Show whether it runs on your graphics card (GPU) or your processor (CPU). `/device cpu` or `/device gpu` switches and it remembers. |
 | `/update` | Get the newest version. |
 | `/reset` | Start a fresh conversation. |
 | `exit` | Quit. |
@@ -163,6 +164,14 @@ The skills it ships with:
 | `mac-automation` | Getting things done on your Mac without breaking it |
 | `linux-automation` | The same for Linux and Windows. You get whichever one matches your computer. |
 
+## Graphics card or processor
+
+You can run it on either. It uses the graphics card when there is one, because that is much faster: the Mac's own chip, an NVIDIA card, or an AMD or Intel card on Linux. With no card it runs on the processor, which works on any machine with enough memory, only slower.
+
+Type `/device` to see which one it is on. `/device cpu` moves it to the processor, say when a game or a render needs the card, and `/device gpu` moves it back. It reloads the model and remembers your choice.
+
+To set it up for the processor from the start, put `BXZEX_DEVICE=cpu` in front of `bash` on the install line. That works on Mac, Linux and Windows.
+
 ## How fast it is
 
 This is a big model running on a laptop. On a 24GB MacBook Air it writes around three words a second. Short answers land in under a minute. Jobs where it has to look several things up can take a few minutes. A Mac with a Pro or Max chip is quicker.
@@ -188,6 +197,7 @@ Optional. Set any of these before launching.
 | `BXZEX_VOICE_LANG` | `en` | The language you speak in, like `es`. Use `auto` to let it figure it out. |
 | `BXZEX_CTX` | `32768` | How much conversation it can hold at once. |
 | `BXZEX_PORT` | `8080` | The local port it uses. |
+| `BXZEX_DEVICE` | graphics card | Set to `cpu` to run on the processor for one launch. `/device` saves the choice for good. |
 | `BXZEX_LORA_SCALE` | `0.8` | How strongly image styles are applied. |
 
 The model stays in memory after you quit so the next launch is instant. To shut it down and get that memory back: `pkill llama-server`.

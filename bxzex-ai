@@ -21,7 +21,7 @@ HOME = os.path.expanduser("~")
 APP_HOME = os.environ.get("BXZEX_HOME", f"{HOME}/.bxzex-ai")
 CONFIG = f"{APP_HOME}/config.json"
 AI_NAME = "BXZEX AI"
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -321,6 +321,36 @@ def ensure_server(block=True):
         wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
     print(f"{DIM}the model server didn't start. See {APP_HOME.replace(HOME, '~')}/server.log{R}"); return False
 
+# ---- processor or graphics card ----
+def graphics():
+    """What the installed chat engine can run on besides the processor. Empty when it is processor-only."""
+    if MAC: return "the Mac's graphics chip"
+    try: marks = [f for f in os.listdir(f"{APP_HOME}/engine") if f.startswith(".b")]
+    except OSError: marks = []
+    if any("cuda" in f for f in marks): return "the NVIDIA graphics card"
+    if any("vulkan" in f or "rocm" in f for f in marks): return "the graphics card"
+    return ""
+
+def choose_device(arg=""):
+    """/device shows where the model runs; /device cpu or /device gpu switches and reloads it."""
+    now = "cpu" if os.environ.get("BXZEX_DEVICE", load_config().get("device", "gpu")) == "cpu" else "gpu"
+    want = {"cpu": "cpu", "processor": "cpu", "gpu": "gpu", "graphics": "gpu"}.get(arg.strip().lower())
+    card = graphics()
+    if not want:
+        if arg.strip(): print(f"{DIM}/device cpu or /device gpu{R}"); return
+        where = "the processor (CPU)" if now == "cpu" or not card else f"{card} (GPU)"
+        print(f"{GOLD}●{R} {BOLD}Running on {where}{R}")
+        if card: print(f"  {DIM}/device {'gpu' if now == 'cpu' else 'cpu'} switches to {card if now == 'cpu' else 'the processor, which is slower but leaves the graphics card free'}{R}")
+        else: print(f"  {DIM}no supported graphics card was found when this was installed. If you add one, run /update full and it is picked up{R}")
+        return
+    if want == "gpu" and not card:
+        print(f"{DIM}no supported graphics card was found when this was installed. If you add one, run /update full and it is picked up{R}"); return
+    if os.environ.get("BXZEX_DEVICE"): print(f"{DIM}BXZEX_DEVICE is set for this window and wins over this setting{R}")
+    save_config(device=want)
+    if want == now: print(f"{DIM}already on the {'processor' if want == 'cpu' else 'graphics card'}{R}"); return
+    print(f"  {GOLD}●{R} {'processor (CPU)' if want == 'cpu' else card + ' (GPU)'} {DIM}· saved · reloading the model{R}")
+    stop_server(); ensure_server()
+
 # ---- tools ----
 import base64, datetime, html, shlex, tempfile, threading, urllib.parse
 
@@ -547,6 +577,11 @@ def stop_server():
     def alive():
         out = []
         for pid in pids:
+            if server_proc and server_proc.pid == pid and server_proc.poll() is not None: continue   # ours, and finished
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    if f.read().rsplit(")", 1)[-1].split()[0] == "Z": continue                         # finished, only its record is left
+            except (OSError, IndexError): pass
             try: os.kill(pid, 0); out.append(pid)
             except OSError: pass
         return out
@@ -664,6 +699,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - /memory: show what you remember. /memory clear wipes it.
 - /history: list earlier chats and continue one. /resume: continue the most recent.
 - /skills: list your skills.
+- /device: show whether you run on the graphics card (GPU) or the processor (CPU). /device cpu or /device gpu switches.
 - /update: get the newest version of the app. It also checks by itself each time it starts.
 - /image <description>: make a picture straight from their words, without you. If they ask you for a picture in conversation, use generate_image.
 - /reset: start a new conversation. exit: quit.
@@ -1275,7 +1311,9 @@ def check_update(quiet=True):
         here = os.path.dirname(os.path.realpath(__file__))
         app = fetch("bxzex-ai")
         compile(app, "bxzex-ai", "exec")                       # never install something that doesn't even parse
-        if f'VERSION = "{latest[0]}"' not in app or not app.rstrip().endswith(END_MARK): return False   # wrong or cut-off download
+        if f'VERSION = "{latest[0]}"' not in app or not app.rstrip().endswith(END_MARK):   # cut off, or the download servers still hold the old copy
+            if not quiet: print(f"{DIM}v{latest[0]} is on its way but hasn't reached the download servers yet. Try /update again in a few minutes{R}")
+            return False
         server = fetch("bxzex-server")
         names = re.search(r'SKILLS="([^"]*)"', fetch("install.sh"))
         skills = {n: fetch(f"skills/{n}.md") for n in (names.group(1).split() if names else [])}
@@ -1374,6 +1412,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/memory", "what it remembers · /memory clear"), ("/image", "make a picture · /image hd portrait a red fox"), ("/btw", "add a note, no reply"),
             ("/history", "past chats, pick one to continue"), ("/resume", "continue the last chat"),
             ("/fast", "toggle answering without thinking first"), ("/think", "show or hide its thinking"),
+            ("/device", "run on the graphics card or the processor · /device cpu"),
             ("/update", "get the newest version · /update full adds new downloads"), ("/reset", "start a new conversation"), ("/help", "this list"), ("exit", "quit")]
 past = []   # earlier inputs, for the up arrow
 
@@ -1599,6 +1638,7 @@ while True:
     if user == "/update": check_update(quiet=False); continue
     if user == "/update full": full_update(); continue
     if user.startswith("/color"): choose_color(user[6:]); continue
+    if user.startswith("/device"): choose_device(user[7:]); continue
     if user=="/fast":
         fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); continue
     if user=="/think":

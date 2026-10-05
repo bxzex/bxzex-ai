@@ -27,12 +27,17 @@ THREADS=4
 if [ "$(uname -s)" != Darwin ]; then THREADS=$(( $(nproc 2>/dev/null || echo 8) / 2 )); [ "$THREADS" -ge 4 ] || THREADS=4; fi
 THREADS="${BXZEX_THREADS:-$THREADS}"
 
+# graphics card by default; "cpu" (set with /device in the app, or BXZEX_DEVICE=cpu) keeps everything on the processor
+DEVICE="${BXZEX_DEVICE:-$(sed -n 's/.*"device": *"\([a-z]*\)".*/\1/p' "$BXZEX_HOME/config.json" 2>/dev/null || true)}"
+LAYERS=99
+if [ "$DEVICE" = cpu ]; then LAYERS=0; fi
+
 ARGS=(
   --model "$MODEL"
   --alias bxzex-uncensored
   --host 127.0.0.1 --port "${BXZEX_PORT:-8080}"
   --ctx-size "${BXZEX_CTX:-32768}"
-  --n-gpu-layers 99
+  --n-gpu-layers "$LAYERS"
   --flash-attn on
   --cache-type-k q8_0 --cache-type-v q4_0
   --batch-size 2048 --ubatch-size 512
@@ -47,5 +52,6 @@ ARGS=(
 # The vision half. Without it the model is text-only.
 VISION="$(dirname "$MODEL")/bxzex-vision.gguf"
 [ -f "$VISION" ] && ARGS+=(--mmproj "$VISION")
+if [ "$DEVICE" = cpu ] && [ -f "$VISION" ]; then ARGS+=(--no-mmproj-offload); fi
 
 exec "$BIN" "${ARGS[@]}"
