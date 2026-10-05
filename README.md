@@ -13,8 +13,8 @@ I built this for myself, liked it too much to keep it to myself, and now it's fr
 - **Talks to you.** Ask it anything. It doesn't lecture and it doesn't refuse.
 - **Goes online when it needs to.** It searches the web and reads pages to get you current answers.
 - **Sees images.** Drag a photo or screenshot into the window and ask about it.
-- **Makes images.** Ask for a picture, or type `/image`, and it paints one on your Mac in about a minute with no filter in the way. It shows up in the chat and is saved to your Pictures folder.
-- **Does things on your Mac.** It can run commands and read or write files. It shows you exactly what it wants to do and waits for your yes first.
+- **Makes images.** Ask for a picture, or type `/image`, and it paints one on your own machine with no filter in the way, in about a minute on a Mac. It shows up in the chat and is saved to your Pictures folder.
+- **Does things on your computer.** It can run commands and read or write files. It shows you exactly what it wants to do and waits for your yes first.
 - **Listens.** Type `/v`, say what you want, and your words show up at the prompt ready to send.
 - **Remembers you.** Tell it something worth keeping and it's still there next week. It all sits in a plain text file you can read, edit or wipe.
 - **Comes with skills.** Twenty-nine of them: design, front-end, writing that doesn't sound like a robot, social posts, client proposals, research, debugging, security and more. It pulls in the right one when the job calls for it, and you can write your own.
@@ -39,13 +39,16 @@ You shouldn't paste a command from the internet into your terminal on trust, min
 - A 64-bit PC with an NVIDIA graphics card that has **16GB of video memory or more**. Without one it still runs on the processor if you have 24GB of RAM, but slowly.
 - About 25GB of free disk space
 - `curl` and `python3`, which most systems already have
+- For voice, a recording tool. Most desktops have one. If yours doesn't, the installer tells you the one line to add it: `sudo apt install pulseaudio-utils`
 
 **Windows**
 - Install WSL first: open PowerShell as administrator, run `wsl --install`, restart, and open Ubuntu. Then follow the Linux steps inside it.
+- It knows it's on Windows. Pictures it makes land in your Windows Pictures folder, and you can drag an image in from Explorer like on a Mac.
+- For voice, switch the microphone on for desktop apps in Windows settings (Privacy, Microphone).
 
 It will not run on a computer with 8GB or 16GB of memory and no big graphics card. The installer checks and stops if there isn't enough.
 
-Everything works on all three: chat, web search, vision, image generation, voice input, skills, memory, chat history and the shell tools. Linux and Windows support is new, so tell me if something breaks. Image generation on Linux needs a recent system (Ubuntu 24.04 or similar) and a 64-bit Intel or AMD processor.
+Everything works on all three: chat, web search, vision, image generation, voice input, skills, memory, chat history and the shell tools. Linux and Windows support is new, so tell me if something breaks. Image generation on Linux and Windows needs a recent system (Ubuntu 24.04 or similar) and a 64-bit Intel or AMD processor. It uses the graphics card on Linux. Inside Windows it runs on the processor for now, so a picture takes several minutes there.
 
 ## Install
 
@@ -73,6 +76,8 @@ It checks for a new version each time you open it and installs it quietly in the
 - `/update full` runs the installer again when a new version adds something to download. It skips everything you already have.
 - Your version is in the bar at the bottom and in `bxzex-ai --version`.
 - To turn the automatic check off, launch with `BXZEX_NO_UPDATE=1`.
+
+**If you installed before updates existed.** Version 1.0 has no way to update itself, so nothing I release can reach it. You can tell because there's no version number in the bar at the bottom and `/update` does nothing. Paste the install line from above one more time. It keeps your model, chats and memory, skips everything already downloaded and takes about a minute. From then on it updates by itself.
 
 ## Using it
 
@@ -104,11 +109,11 @@ Press Ctrl-C to stop a reply halfway.
 
 ## Images
 
-Type `/image` and describe what you want, or ask in conversation and it writes a detailed prompt for you first. The picture appears in the chat and is saved to `Pictures/BXZEX`. Cmd-click the path to open the full size.
+Type `/image` and describe what you want, or ask in conversation and it writes a detailed prompt for you first. The picture appears in the chat and is saved to `Pictures/BXZEX`. Cmd-click the path to open the full size (Ctrl-click on Linux and Windows).
 
 A normal image takes about a minute on a 24GB MacBook Air. Add `hd` for a bigger, sharper one, which takes two to three minutes.
 
-Your Mac can't hold the chat model and the image model at the same time, so it swaps them. You'll see "Making room", then "Painting", and the chat model loads back in while you look at the result.
+Most computers can't hold the chat model and the image model at the same time, so it swaps them. You'll see "Making room", then "Painting", and the chat model loads back in while you look at the result.
 
 It comes with a realistic photo style built in. To change the look, put your own LoRA style files (`.safetensors`) in `~/.bxzex-ai/loras`. Every image uses whatever is in that folder.
 
@@ -156,6 +161,7 @@ The skills it ships with:
 | `bash-scripting` | Shell scripts that don't break on a space |
 | `git-workflow` | Committing, branching and undoing without losing work |
 | `mac-automation` | Getting things done on your Mac without breaking it |
+| `linux-automation` | The same for Linux and Windows. You get whichever one matches your computer. |
 
 ## How fast it is
 

@@ -8,7 +8,7 @@
 # Safe to run again: finished downloads are skipped and interrupted ones resume.
 set -euo pipefail
 
-REPO="https://raw.githubusercontent.com/bxzex/bxzex-ai/main"
+REPO="${BXZEX_REPO:-https://raw.githubusercontent.com/bxzex/bxzex-ai/main}"
 WEIGHTS="https://huggingface.co/bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/resolve/main"
 BXZEX_HOME="${BXZEX_HOME:-$HOME/.bxzex-ai}"
 LOG="$BXZEX_HOME/install.log"
@@ -16,7 +16,7 @@ LOG="$BXZEX_HOME/install.log"
 R=$'\033[0m'; D=$'\033[2m'; B=$'\033[1m'
 A=$'\033[38;5;39m'   # accent, replaced once a color is picked
 COLORS="blue red orange gold green cyan purple pink white"
-SKILLS="accessibility api-design bash-scripting brand-naming client-proposal code-review data-analysis debugging email-writing explain-teach frontend-build git-workflow human-writing landing-page mac-automation no-ai-slop plan-project pricing-offers python-scripting react-components sales-outreach security-check seo-basics social-posts sql-database summarize ui-design video-script web-research"
+SKILLS="accessibility api-design bash-scripting brand-naming client-proposal code-review data-analysis debugging email-writing explain-teach frontend-build git-workflow human-writing landing-page linux-automation mac-automation no-ai-slop plan-project pricing-offers python-scripting react-components sales-outreach security-check seo-basics social-posts sql-database summarize ui-design video-script web-research"
 code_for() { case "$1" in blue) echo 39;; red) echo 196;; orange) echo 208;; gold) echo 220;; green) echo 46;; cyan) echo 51;;
              purple) echo 141;; pink) echo 205;; white) echo 255;; *) echo 39;; esac; }
 
@@ -68,6 +68,9 @@ drive() {   # label, command...
   if wait "$pid"; then ok "$label"; else tail -15 "$LOG" >&2; die "$label failed. Full log: $LOG"; fi
 }
 
+# a real graphics card driver for Vulkan; the software and Windows-bridge ones are slower than the plain processor build
+has_vulkan() { ls /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json 2>/dev/null | grep -v -e lvp_ -e dzn_ | grep -q .; }
+
 size_of() { stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0; }
 
 download() {   # url, destination, label
@@ -103,6 +106,7 @@ case "$OS" in
   Linux)  case "$ARCH" in x86_64|aarch64|arm64) ;; *) die "This needs a 64-bit Intel, AMD or ARM computer." ;; esac ;;
   *)      die "This runs on macOS and Linux. On Windows, install WSL first (wsl --install), open Ubuntu, and run this there." ;;
 esac
+WSL=""; [ "$OS" = Linux ] && grep -qi microsoft /proc/version 2>/dev/null && WSL=1
 command -v curl >/dev/null || die "curl is required."
 command -v python3 >/dev/null || die "python3 is required. On a Mac run: xcode-select --install. On Linux: sudo apt install python3"
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die "python3 3.9 or newer is required."
@@ -155,7 +159,7 @@ else
   eng="$BXZEX_HOME/engine"; tag="${BXZEX_ENGINE_TAG:-b11401}"
   case "$ARCH" in x86_64) cpu=x64 ;; *) cpu=arm64 ;; esac
   if [ "$vram" -gt 0 ] && [ "$cpu" = x64 ]; then kind="cuda-12.8-$cpu"
-  elif ls /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json >/dev/null 2>&1; then kind="vulkan-$cpu"
+  elif has_vulkan; then kind="vulkan-$cpu"
   else kind="$cpu"; fi
   kind="${BXZEX_ENGINE:-$kind}"
   if [ -f "$eng/.$tag-$kind" ]; then ok "chat engine"
@@ -202,18 +206,31 @@ if [ "$OS" = Linux ] && [ -z "${BXZEX_SKIP_EXTRAS:-}" ]; then
   if [ "${BXZEX_VOICE:-1}" != 0 ]; then
     command -v uv >/dev/null || [ -x "$HOME/.local/bin/uv" ] || drive "voice tools" sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
     UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
-    if [ -x "$HOME/.local/bin/whisper-ctranslate2" ]; then ok "voice engine"
-    else drive "voice engine" "$UV" tool install --python 3.12 whisper-ctranslate2; fi
+    # versions are pinned: a newer audio library broke this engine once already
+    if [ -f "$m/.voice-engine-2" ] && [ -x "$HOME/.local/bin/whisper-ctranslate2" ]; then ok "voice engine"
+    else drive "voice engine" "$UV" tool install --force --python 3.12 "whisper-ctranslate2==0.5.7" --with "faster-whisper==1.2.1" --with "av<17"
+         touch "$m/.voice-engine-2"; rm -f "$m/.voice-ready"; fi
     if [ -f "$m/.voice-ready" ]; then ok "voice"
-    else   # one second of silence makes it fetch its speech model now instead of on first use
+    else   # one second of silence makes it fetch its speech model now instead of on first use, and proves it runs
       python3 -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\\0'*32000); w.close()" "$m/.silence.wav"
-      drive "voice" "$HOME/.local/bin/whisper-ctranslate2" "$m/.silence.wav" --model small --device cpu --compute_type int8 --output_format txt --output_dir "$m/.voice-tmp"
-      rm -rf "$m/.silence.wav" "$m/.voice-tmp"; touch "$m/.voice-ready"
+      drive "voice" "$HOME/.local/bin/whisper-ctranslate2" "$m/.silence.wav" --model small --device cpu --compute_type int8 --language en --output_format txt --output_dir "$m/.voice-tmp"
+      if [ -f "$m/.voice-tmp/.silence.txt" ]; then touch "$m/.voice-ready"
+      else note "Voice could not be set up on this system, so /v will not work. Details: $LOG"; fi
+      rm -rf "$m/.silence.wav" "$m/.voice-tmp"
+    fi
+    # /v records with the system's own sound tools; say so now if there are none
+    if ! command -v parecord >/dev/null && ! command -v pw-record >/dev/null && ! command -v arecord >/dev/null; then
+      if command -v apt-get >/dev/null && { [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; }; then
+        if [ "$(id -u)" = 0 ]; then drive "microphone tool" apt-get install -y pulseaudio-utils
+        else drive "microphone tool" sudo -n apt-get install -y pulseaudio-utils; fi
+      else note "To talk to it with /v, add the microphone tool once:  sudo apt install pulseaudio-utils"; fi
+    fi
+    if [ -n "$WSL" ]; then note "On Windows, /v also needs the microphone switched on for desktop apps (Settings, Privacy, Microphone)."
     fi
   fi
   if [ "${BXZEX_IMAGES:-1}" != 0 ] && [ "$cpu" = x64 ]; then
     img="$BXZEX_HOME/imgengine"; itag="master-929-3f8527a"; ibuild="sd-master-3f8527a-bin-Linux-Ubuntu-24.04-x86_64"
-    if ls /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json >/dev/null 2>&1; then ibuild="$ibuild-vulkan"; fi
+    if has_vulkan; then ibuild="$ibuild-vulkan"; fi
     if [ -f "$img/.$ibuild" ]; then ok "image engine"
     else
       rm -rf "$img"; mkdir -p "$img"
@@ -223,6 +240,7 @@ if [ "$OS" = Linux ] && [ -z "${BXZEX_SKIP_EXTRAS:-}" ]; then
       if [ -n "$sd" ] && LD_LIBRARY_PATH="$(dirname "$sd")" "$sd" --help >/dev/null 2>&1; then touch "$img/.$ibuild"
       else rm -rf "$img"; note "Image generation needs a newer system than this one (Ubuntu 24.04 or similar), so it was skipped."; fi
     fi
+    case "$ibuild" in *-vulkan) ;; *) [ -d "$img" ] && note "Images will be made on the processor here, which takes several minutes each." ;; esac
     if [ -d "$img" ]; then
       mkdir -p "$m/bxzex-paint" "$BXZEX_HOME/loras"
       download "https://huggingface.co/leejet/Z-Image-Turbo-GGUF/resolve/main/z_image_turbo-Q4_K.gguf" "$m/bxzex-paint/model.gguf" "image generation"
@@ -260,12 +278,12 @@ case ":$PATH:" in *":$bindir:"*) ;; *)
 esac
 
 # remember which optional parts are installed, so the app can tell when an update adds more
-python3 - "$BXZEX_HOME/config.json" <<'PART'
+python3 - "$BXZEX_HOME/config.json" "$OS" <<'PART'
 import json, os, sys
 p = sys.argv[1]
 try: d = json.load(open(p))
 except Exception: d = {}
-d["parts"] = 2
+d["parts"] = 2 if sys.argv[2] == "Darwin" else 3
 json.dump(d, open(p, "w"))
 PART
 

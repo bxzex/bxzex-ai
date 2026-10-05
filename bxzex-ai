@@ -2,7 +2,7 @@
 # BXZEX Uncensored AI
 # Copyright (c) 2026 bxzex. All rights reserved. · https://bxzex.com · instagram.com/bxzex
 # Free to use. Not to be copied, modified, rebranded or redistributed. See LICENSE.
-"""bxzex-ai: a private, uncensored AI assistant that runs on your own Mac.
+"""bxzex-ai: a private, uncensored AI assistant that runs on your own computer (Mac, Linux, Windows through WSL).
 Usage:  bxzex-ai            (interactive)
         bxzex-ai "prompt"    (one-shot)
 Commands: /v speak instead of typing, /color pick a theme, /fast toggle reasoning,
@@ -21,7 +21,28 @@ HOME = os.path.expanduser("~")
 APP_HOME = os.environ.get("BXZEX_HOME", f"{HOME}/.bxzex-ai")
 CONFIG = f"{APP_HOME}/config.json"
 AI_NAME = "BXZEX AI"
-VERSION = "1.1.1"
+VERSION = "1.1.2"
+
+MAC = sys.platform == "darwin"
+WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
+
+def system_name():
+    """What this computer runs, in a few words, so the assistant uses the right commands."""
+    if MAC: return "macOS"
+    name = "Linux"
+    try:
+        with open("/etc/os-release") as f:
+            m = re.search(r'(?m)^PRETTY_NAME="?([^"\n]+)', f.read())
+        if m: name = m.group(1).strip()
+    except OSError: pass
+    return f"Windows, inside WSL ({name}). Windows drives are under /mnt, like /mnt/c" if WSL else name
+
+def windows_path(p):
+    """A Windows path such as C:\\Users\\me\\a.png as the path WSL sees it."""
+    m = re.match(r"\\\\wsl(?:\.localhost|\$)\\[^\\]+(\\.*)", p)
+    if m: return m.group(1).replace("\\", "/")
+    m = re.match(r"([A-Za-z]):[\\/](.*)", p)
+    return f"/mnt/{m.group(1).lower()}/" + m.group(2).replace("\\", "/") if m else p
 
 class Screen:
     """Everything printed goes through here and is remembered, so the conversation can be redrawn
@@ -405,14 +426,83 @@ IMAGE_MODEL = f"{APP_HOME}/models/bxzex-image"
 IMAGE_BIN = shutil.which("mflux-generate-z-image-turbo") or f"{HOME}/.local/bin/mflux-generate-z-image-turbo"
 LORAS = f"{APP_HOME}/loras"            # drop .safetensors style files here and they are applied to every image
 PICTURES = f"{HOME}/Pictures/BXZEX"
+pictures_found = False
+
+def pictures_dir():
+    """Where pictures are saved. Inside WSL that is the Windows Pictures folder, so they show up in Explorer."""
+    global PICTURES, pictures_found
+    if WSL and not pictures_found:
+        pictures_found = True
+        try:
+            who = subprocess.run(["cmd.exe", "/c", "echo %USERPROFILE%"], capture_output=True, text=True, timeout=8,
+                                 cwd="/mnt/c", stdin=subprocess.DEVNULL).stdout.strip().splitlines()
+            home = windows_path(who[-1].strip()) if who else ""
+            for sub_dir in ("Pictures", "OneDrive/Pictures"):
+                if home.startswith("/mnt/") and os.path.isdir(f"{home}/{sub_dir}"):
+                    os.makedirs(f"{home}/{sub_dir}/BXZEX", exist_ok=True)
+                    PICTURES = f"{home}/{sub_dir}/BXZEX"; break
+        except Exception:
+            pass                                   # no Windows folder reachable: keep the one in the home folder
+    os.makedirs(PICTURES, exist_ok=True)
+    return PICTURES
+
+def file_link(path):
+    """A clickable link to a saved file. Windows Terminal needs the Windows form of the path."""
+    m = re.match(r"/mnt/([a-z])/(.*)", path) if WSL else None
+    if m: return f"file:///{m.group(1).upper()}:/" + urllib.parse.quote(m.group(2))
+    if WSL: return "file://wsl.localhost/" + urllib.parse.quote(os.environ.get("WSL_DISTRO_NAME", "Ubuntu") + path)
+    return "file://" + urllib.parse.quote(path)
 # measured on a 24GB M4 Air: fast is about a minute, hd about two and a half
 SHAPES = {"fast": {"square": (640, 640), "portrait": (512, 768), "landscape": (768, 512)},
           "hd":   {"square": (768, 768), "portrait": (640, 960), "landscape": (960, 640)}}
 STEPS = {"fast": 6, "hd": 8}
 
+def png_pixels(path):
+    """Read a plain 8-bit PNG with nothing but the standard library. Returns (width, height, bytes per pixel, rows)."""
+    import struct, zlib
+    with open(path, "rb") as f: d = f.read()
+    if d[:8] != b"\x89PNG\r\n\x1a\n": raise ValueError("not a png")
+    i = 8; raw = b""; w = h = bpp = 0
+    while i < len(d):
+        n, kind = struct.unpack(">I4s", d[i:i + 8]); body = d[i + 8:i + 8 + n]; i += 12 + n
+        if kind == b"IHDR":
+            w, h, depth, color, _, _, lace = struct.unpack(">IIBBBBB", body)
+            if depth != 8 or lace or color not in (0, 2, 4, 6): raise ValueError("unsupported png")
+            bpp = {0: 1, 2: 3, 4: 2, 6: 4}[color]
+        elif kind == b"IDAT": raw += body
+    raw = zlib.decompress(raw); stride = w * bpp; rows = []; prev = bytearray(stride)
+    for y in range(h):
+        kind = raw[y * (stride + 1)]; line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        if kind == 1:
+            for x in range(bpp, stride): line[x] = (line[x] + line[x - bpp]) & 255
+        elif kind == 2:
+            for x in range(stride): line[x] = (line[x] + prev[x]) & 255
+        elif kind == 3:
+            for x in range(stride): line[x] = (line[x] + ((line[x - bpp] if x >= bpp else 0) + prev[x]) // 2) & 255
+        elif kind == 4:
+            for x in range(stride):
+                a = line[x - bpp] if x >= bpp else 0; b = prev[x]; c2 = prev[x - bpp] if x >= bpp else 0
+                pa = abs(b - c2); pb = abs(a - c2); pc = abs(a + b - 2 * c2)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c2)) & 255
+        rows.append(line); prev = line
+    return w, h, bpp, rows
+
+def preview_png(path, cols):
+    """The same half-block picture, for systems without the Mac image tool."""
+    try:
+        iw, ih, bpp, rows = png_pixels(path)
+        w = min(cols, W() - 4); h = max(2, round(w * ih / iw) // 2 * 2)
+        def px(x, y):
+            line = rows[min(ih - 1, int((y + 0.5) * ih / h))]; i = min(iw - 1, int((x + 0.5) * iw / w)) * bpp
+            r, g, b = (line[i], line[i + 1], line[i + 2]) if bpp >= 3 else (line[i],) * 3
+            return 16 + 36 * round(r / 51) + 6 * round(g / 51) + round(b / 51)
+        return ["".join(f"\033[38;5;{px(x, y)};48;5;{px(x, y + 1)}m▀" for x in range(w)) + R for y in range(0, h - 1, 2)]
+    except Exception:
+        return []
+
 def preview(path, cols=44):
     """A small picture of the image drawn with half-block characters, so it shows up right in the chat."""
-    if not shutil.which("sips"): return []
+    if not shutil.which("sips"): return preview_png(path, cols)
     tmp = tempfile.NamedTemporaryFile(suffix=".bmp", delete=False).name
     try:
         info = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path], capture_output=True, text=True).stdout
@@ -444,8 +534,16 @@ def painting():
 def stop_server():
     """Free the chat model's memory. The image model needs it: both do not fit in 24GB together."""
     port = HOST.rsplit(":", 1)[1]
-    find = ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"] if shutil.which("lsof") else ["pgrep", "-f", "llama-server.*bxzex-model"]
-    pids = [int(x) for x in subprocess.run(find, capture_output=True, text=True).stdout.split() if x.isdigit()]
+    if shutil.which("lsof"):
+        pids = [int(x) for x in subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split() if x.isdigit()]
+    else:                                     # Linux without lsof: look through the process list ourselves
+        pids = []
+        for name in os.listdir("/proc") if os.path.isdir("/proc") else []:
+            if not name.isdigit(): continue
+            try:
+                with open(f"/proc/{name}/cmdline", "rb") as f: args = f.read().split(b"\0")
+            except OSError: continue
+            if b"llama-server" in os.path.basename(args[0]) and port.encode() in args: pids.append(int(name))
     def alive():
         out = []
         for pid in pids:
@@ -474,27 +572,27 @@ def paint_engine():
 def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
     quality = quality.strip().lower() if quality.strip().lower() in SHAPES else "fast"
     w, h = SHAPES[quality].get(shape.strip().lower(), SHAPES[quality]["square"])
-    out = f"{PICTURES}/{time.strftime('%Y-%m-%d %H-%M-%S')}.png"
     prompt = " ".join(prompt.split())
+    mac_engine = os.path.isdir(IMAGE_MODEL) and os.path.exists(IMAGE_BIN)
+    engine = None if mac_engine else paint_engine()
+    if not mac_engine and not (engine and os.path.exists(f"{PAINT}/model.gguf")):
+        return "Image generation is not installed. Run the installer again to add it."
+    out = f"{pictures_dir()}/{time.strftime('%Y-%m-%d %H-%M-%S')}.png"
     try: loras = sorted(os.path.join(LORAS, f) for f in os.listdir(LORAS) if f.endswith(".safetensors"))
     except OSError: loras = []
     scale = os.environ.get("BXZEX_LORA_SCALE", "0.8")
     env = None
-    if os.path.isdir(IMAGE_MODEL) and os.path.exists(IMAGE_BIN):                 # Mac engine
+    if mac_engine:
         cmd = [IMAGE_BIN, "--model", IMAGE_MODEL, "--low-ram", "--prompt", prompt,
                "--width", str(w), "--height", str(h), "--steps", str(STEPS[quality]), "--output", out]
         if loras: cmd += ["--lora-paths", *loras, "--lora-scales", *[scale] * len(loras)]
-    elif paint_engine() and os.path.exists(f"{PAINT}/model.gguf"):               # Linux engine
-        engine = paint_engine()
+    else:                                                                        # Linux engine
         styles = "".join(f" <lora:{os.path.basename(f)[:-len('.safetensors')]}:{scale}>" for f in loras)
         cmd = [engine, "--diffusion-model", f"{PAINT}/model.gguf", "--vae", f"{PAINT}/vae.safetensors",
                "--llm", f"{PAINT}/text.gguf", "-p", prompt + styles, "--cfg-scale", "1.0", "--diffusion-fa",
                "--steps", str(STEPS[quality]), "-W", str(w), "-H", str(h), "-s", "-1", "-o", out]
         if loras: cmd += ["--lora-model-dir", LORAS]
         env = dict(os.environ, LD_LIBRARY_PATH=f"{os.path.dirname(engine)}:{os.environ.get('LD_LIBRARY_PATH', '')}")
-    else:
-        return "Image generation is not installed. Run the installer again to add it."
-    os.makedirs(PICTURES, exist_ok=True)
     sys.stdout.write("\033[?25l")
     wait = Waiting("Making room")
     err = ""
@@ -523,7 +621,7 @@ def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
         last = [l for l in err.splitlines() if l.strip()]
         return f"error: the image could not be made ({last[-1][:200] if last else 'no details'})"
     for row in preview(out): print("  " + row)
-    print(f"  {GOLD}{link('file://' + urllib.parse.quote(out), out.replace(HOME, '~'))}{R} {DIM}· cmd-click to open{R}")
+    print(f"  {GOLD}{link(file_link(out), out.replace(HOME, '~'))}{R} {DIM}· {'cmd' if MAC else 'ctrl'}-click to open{R}")
     return f"saved to {out.replace(HOME, '~')} ({w}x{h}" + (f", {len(loras)} style file(s) applied)" if loras else ")")
 
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
@@ -618,6 +716,7 @@ def list_skills():
     try: files = sorted(f for f in os.listdir(SKILLS_DIR) if f.endswith(".md"))
     except OSError: return found
     for f in files:
+        if f == ("linux-automation.md" if MAC else "mac-automation.md"): continue     # the one for the other system
         head = read_text(os.path.join(SKILLS_DIR, f), 100000)[:600]
         name = re.search(r"(?m)^name:\s*(.+)$", head); desc = re.search(r"(?m)^description:\s*(.+)$", head)
         found.append((name.group(1).strip() if name else f[:-3], desc.group(1).strip() if desc else "", os.path.join(SKILLS_DIR, f)))
@@ -680,7 +779,8 @@ def system_prompt():
         f"You are {AI_NAME}, an uncensored assistant made by bxzex (bxzex.com), running locally and "
         "privately on the user's own computer in the `bxzex-ai` terminal app. If asked what model you are, "
         f"say you are {AI_NAME}, a local uncensored model. "
-        f"Today is {datetime.date.today():%A %B %d, %Y}. Working directory: {os.getcwd().replace(HOME, '~')}.\n"
+        f"Today is {datetime.date.today():%A %B %d, %Y}. This computer runs {system_name()}. "
+        f"Working directory: {os.getcwd().replace(HOME, '~')}.\n"
         "You can act: web_search and fetch_page for anything current or that you are unsure of; "
         "run_shell, read_file and write_file to do things on this computer. When a task needs action, do it "
         "with the tools instead of telling them how. If no tool is needed, just answer.\n"
@@ -713,17 +813,28 @@ def run_tool(call):
 def image_part(path):
     """Downscale to a jpeg so a screenshot doesn't cost minutes of image tokens."""
     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False).name
+    kind = "jpeg"
     try:
-        shrunk = shutil.which("sips") and subprocess.run(["sips", "-s", "format", "jpeg", "-Z", "1024", path, "--out", tmp],
-                                                          capture_output=True).returncode == 0
-        src = tmp if shrunk else path             # without the Mac image tool the picture is sent as it is
-        with open(src, "rb") as f: b64 = base64.b64encode(f.read()).decode()
+        shrunk = False
+        for cmd in (["sips", "-s", "format", "jpeg", "-Z", "1024", path, "--out", tmp],                      # Mac
+                    ["magick", path + "[0]", "-auto-orient", "-resize", "1024x1024>", "-background", "white", "-flatten", tmp],
+                    ["convert", path + "[0]", "-auto-orient", "-resize", "1024x1024>", "-background", "white", "-flatten", tmp],
+                    ["ffmpeg", "-loglevel", "error", "-y", "-i", path, "-frames:v", "1", "-vf",
+                     "scale=1024:1024:force_original_aspect_ratio=decrease:force_divisible_by=2", tmp]):
+            if shutil.which(cmd[0]) and subprocess.run(cmd, capture_output=True).returncode == 0 and os.path.getsize(tmp):
+                shrunk = True; break
+        if not shrunk:                            # no image tool on this system: the picture is sent as it is
+            kind = {".png": "png", ".gif": "gif", ".webp": "webp", ".bmp": "bmp"}.get(os.path.splitext(path)[1].lower(), "jpeg")
+        with open(tmp if shrunk else path, "rb") as f: b64 = base64.b64encode(f.read()).decode()
     finally:
         if os.path.exists(tmp): os.unlink(tmp)
-    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+    return {"type": "image_url", "image_url": {"url": f"data:image/{kind};base64,{b64}"}}
 
 def split_images(text):
     """Pull image file paths (typed or dragged into the terminal) out of a message."""
+    if WSL:                                       # a file dragged in from Windows arrives as C:\Users\...
+        text = re.sub(r'"((?:[A-Za-z]:\\|\\\\wsl)[^"]+)"|\'((?:[A-Za-z]:\\|\\\\wsl)[^\']+)\'|((?:[A-Za-z]:\\|\\\\wsl)\S+)',
+                      lambda m: shlex.quote(windows_path(m.group(1) or m.group(2) or m.group(3))), text)
     try: toks = shlex.split(text)
     except ValueError: return text, []
     imgs = [os.path.expanduser(t) for t in toks
@@ -1067,12 +1178,14 @@ def recorder(wav):
             try: p.communicate(b"q", timeout=5)          # 'q' lets ffmpeg finish the wav header
             except subprocess.TimeoutExpired: p.kill()
         return p, stop
-    for cmd in (["pw-record", "--rate", "16000", "--channels", "1", wav],
-                ["parecord", "--rate=16000", "--channels=1", "--file-format=wav", wav],
+    for cmd in (["parecord", "--rate=16000", "--channels=1", "--file-format=wav", wav],
+                ["pw-record", "--rate", "16000", "--channels", "1", wav],
                 ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", wav],
                 ["ffmpeg", "-loglevel", "error", "-y", "-f", "pulse", "-i", "default", "-ar", "16000", "-ac", "1", wav]):
         if shutil.which(cmd[0]):
-            p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.4)
+            if p.poll() is not None: continue            # it gave up straight away (no sound system for it): try the next
             def stop():
                 p.send_signal(signal.SIGINT)             # these finish the file cleanly on an interrupt
                 try: p.wait(timeout=5)
@@ -1109,7 +1222,8 @@ def listen():
     rec, stop = recorder(wav)
     if not rec:
         os.unlink(wav)
-        print(f"{DIM}no recording tool found. On Linux install one: sudo apt install pipewire-bin (or alsa-utils){R}"); return ""
+        print(f"{DIM}couldn't reach a microphone. Install the recording tool with: sudo apt install pulseaudio-utils"
+              f"{' · then allow the microphone for apps in Windows settings' if WSL else ''}{R}"); return ""
     sys.stdout.write("\033[?25l")
     wait = Waiting("Listening, press enter when done")
     try:
@@ -1133,8 +1247,12 @@ def listen():
     return text
 
 # ---- updates ----
-UPDATE_URL = "https://raw.githubusercontent.com/bxzex/bxzex-ai/main"
+UPDATE_URL = os.environ.get("BXZEX_UPDATE_URL", "https://raw.githubusercontent.com/bxzex/bxzex-ai/main")
+END_MARK = "# ---- end of bxzex-ai ----"
 update_note = ""      # shown in the status line once a newer version has been put in place
+PARTS = 2 if MAC else 3   # which round of installer downloads this version expects (3: the repaired Linux voice engine)
+if "parts" in load_config() and int(load_config().get("parts") or 0) < PARTS:
+    update_note = "one more step to finish this update: type /update full"
 
 def newer(a, b):
     """True if version a is higher than b."""
@@ -1157,7 +1275,7 @@ def check_update(quiet=True):
         here = os.path.dirname(os.path.realpath(__file__))
         app = fetch("bxzex-ai")
         compile(app, "bxzex-ai", "exec")                       # never install something that doesn't even parse
-        if f'VERSION = "{latest[0]}"' not in app: return False
+        if f'VERSION = "{latest[0]}"' not in app or not app.rstrip().endswith(END_MARK): return False   # wrong or cut-off download
         server = fetch("bxzex-server")
         names = re.search(r'SKILLS="([^"]*)"', fetch("install.sh"))
         skills = {n: fetch(f"skills/{n}.md") for n in (names.group(1).split() if names else [])}
@@ -1372,7 +1490,7 @@ def ask(prefill=""):
                     elif key in ("\x1b[C", "\x1bOC"): pos = min(len(buf), pos + 1)
                     elif key in ("\x1b[H", "\x1bOH", "\x1b[1~"): pos = 0
                     elif key in ("\x1b[F", "\x1bOF", "\x1b[4~"): pos = len(buf)
-                    elif key == "\x1b[3~": buf = []; pos = 0           # Delete key clears the line
+                    elif key == "\x1b[3~": del buf[pos:pos + 1]
                     elif key in ("\x1b[A", "\x1bOA") and at > 0:
                         if at == len(past): draft = "".join(buf)
                         at -= 1; buf = list(past[at]); pos = len(buf)
@@ -1412,8 +1530,7 @@ def ask(prefill=""):
 def show_help():
     print(header("Commands"))
     for n, d in COMMANDS: print(f"  {GOLD}{n:<8}{R} {DIM}{d}{R}")
-    print(f"  {DIM}Drag an image in to show it. Esc or Delete clears the line. Up and down arrows walk your history.{R}")
-    print(f"  {DIM}Keep typing while it works and press Enter to add a note.{R}")
+    print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note.{R}")
 
 # ---- installer helpers ----
 if sys.argv[1:2] in (["--version"], ["-v"]):
@@ -1523,3 +1640,4 @@ while True:
         del history[mark:]   # drop the half-finished turn so tool calls never dangle
         print(f"\n{DIM}stopped{R}")
     save_chat()
+# ---- end of bxzex-ai ----

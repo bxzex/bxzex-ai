@@ -22,6 +22,11 @@ export LD_LIBRARY_PATH="$(dirname "$BIN"):$BXZEX_HOME/engine:${LD_LIBRARY_PATH:-
 MODEL="${BXZEX_MODEL:-$BXZEX_HOME/models/bxzex-model.gguf}"
 [ -f "$MODEL" ] || { echo "model not found at $MODEL. Run install.sh, or set BXZEX_MODEL to a .gguf file." >&2; exit 1; }
 
+# four fast cores on the Mac it was tuned on; elsewhere, the real cores (half of what the system counts)
+THREADS=4
+if [ "$(uname -s)" != Darwin ]; then THREADS=$(( $(nproc 2>/dev/null || echo 8) / 2 )); [ "$THREADS" -ge 4 ] || THREADS=4; fi
+THREADS="${BXZEX_THREADS:-$THREADS}"
+
 ARGS=(
   --model "$MODEL"
   --alias bxzex-uncensored
@@ -31,7 +36,7 @@ ARGS=(
   --flash-attn on
   --cache-type-k q8_0 --cache-type-v q4_0
   --batch-size 2048 --ubatch-size 512
-  --threads 4 --threads-batch 4
+  --threads "$THREADS" --threads-batch "$THREADS"
   --parallel 1
   --ctx-checkpoints 8 --cache-ram 2048
   --spec-type "${SPEC:-draft-mtp}" --spec-draft-n-max 3 --spec-draft-p-min 0.4
