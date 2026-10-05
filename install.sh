@@ -187,7 +187,7 @@ fi
 m="$BXZEX_HOME/models"
 if [ ! -f "$m/bxzex-model.gguf" ]; then
   free="$(df -Pk "$HOME" | awk 'NR==2 {print int($4 / 1048576)}')"
-  need=24; [ "$OS" = Darwin ] || need=18
+  need=24; [ "$OS" = Darwin ] || need=25
   [ "$free" -ge "$need" ] || [ -n "${BXZEX_MODEL_URL:-}" ] || die "Not enough disk space: the downloads need about $((need - 1))GB and ${free}GB is free."
   note "Downloading the AI model. It is about 15GB, so this is the long part."
 fi
@@ -195,8 +195,44 @@ download "${BXZEX_MODEL_URL:-$WEIGHTS/orcarouter_Qwen3.8-27B-Uncensored-Q3_K_M.g
 [ -n "${BXZEX_MODEL_URL:-}" ] || download "$WEIGHTS/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf"  "$m/bxzex-vision.gguf" "vision"
 if [ "$OS" = Darwin ]; then
   download "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" "$m/bxzex-voice.bin" "voice"
-else
-  note "Voice input and image generation are Mac-only for now. Everything else works here."
+fi
+
+# ---- Linux: voice and image generation (set BXZEX_VOICE=0 or BXZEX_IMAGES=0 to skip) ----
+if [ "$OS" = Linux ] && [ -z "${BXZEX_SKIP_EXTRAS:-}" ]; then
+  if [ "${BXZEX_VOICE:-1}" != 0 ]; then
+    command -v uv >/dev/null || [ -x "$HOME/.local/bin/uv" ] || drive "voice tools" sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+    UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
+    if [ -x "$HOME/.local/bin/whisper-ctranslate2" ]; then ok "voice engine"
+    else drive "voice engine" "$UV" tool install --python 3.12 whisper-ctranslate2; fi
+    if [ -f "$m/.voice-ready" ]; then ok "voice"
+    else   # one second of silence makes it fetch its speech model now instead of on first use
+      python3 -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\\0'*32000); w.close()" "$m/.silence.wav"
+      drive "voice" "$HOME/.local/bin/whisper-ctranslate2" "$m/.silence.wav" --model small --device cpu --compute_type int8 --output_format txt --output_dir "$m/.voice-tmp"
+      rm -rf "$m/.silence.wav" "$m/.voice-tmp"; touch "$m/.voice-ready"
+    fi
+  fi
+  if [ "${BXZEX_IMAGES:-1}" != 0 ] && [ "$cpu" = x64 ]; then
+    img="$BXZEX_HOME/imgengine"; itag="master-929-3f8527a"; ibuild="sd-master-3f8527a-bin-Linux-Ubuntu-24.04-x86_64"
+    if ls /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json >/dev/null 2>&1; then ibuild="$ibuild-vulkan"; fi
+    if [ -f "$img/.$ibuild" ]; then ok "image engine"
+    else
+      rm -rf "$img"; mkdir -p "$img"
+      download "https://github.com/leejet/stable-diffusion.cpp/releases/download/$itag/$ibuild.zip" "$img/engine.zip" "image engine"
+      python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$img/engine.zip" "$img" && rm -f "$img/engine.zip"
+      sd="$(find "$img" -name sd-cli -type f | head -1)"; [ -n "$sd" ] && chmod +x "$sd"
+      if [ -n "$sd" ] && LD_LIBRARY_PATH="$(dirname "$sd")" "$sd" --help >/dev/null 2>&1; then touch "$img/.$ibuild"
+      else rm -rf "$img"; note "Image generation needs a newer system than this one (Ubuntu 24.04 or similar), so it was skipped."; fi
+    fi
+    if [ -d "$img" ]; then
+      mkdir -p "$m/bxzex-paint" "$BXZEX_HOME/loras"
+      download "https://huggingface.co/leejet/Z-Image-Turbo-GGUF/resolve/main/z_image_turbo-Q4_K.gguf" "$m/bxzex-paint/model.gguf" "image generation"
+      download "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf" "$m/bxzex-paint/text.gguf" "image language"
+      download "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors" "$m/bxzex-paint/vae.safetensors" "image finishing"
+      download "https://github.com/bxzex/bxzex-ai/releases/download/assets/bxzex-image-style.safetensors" "$BXZEX_HOME/loras/bxzex-image-style.safetensors" "image style"
+    fi
+  elif [ "${BXZEX_IMAGES:-1}" != 0 ]; then
+    note "Image generation is not available for ARM Linux yet. Everything else works here."
+  fi
 fi
 
 # ---- image generation (Mac only; set BXZEX_IMAGES=0 to skip) ----
@@ -222,6 +258,16 @@ case ":$PATH:" in *":$bindir:"*) ;; *)
     [ -f "$rc" ] && ! grep -q '.local/bin' "$rc" && printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rc"
   done ;;
 esac
+
+# remember which optional parts are installed, so the app can tell when an update adds more
+python3 - "$BXZEX_HOME/config.json" <<'PART'
+import json, os, sys
+p = sys.argv[1]
+try: d = json.load(open(p))
+except Exception: d = {}
+d["parts"] = 2
+json.dump(d, open(p, "w"))
+PART
 
 python3 "$BXZEX_HOME/bin/bxzex-ai" --car || true
 printf '\n  %s%sREADY.%s Open a new terminal window and type: %sbxzex-ai%s\n' "$B" "$A" "$R" "$B" "$R"

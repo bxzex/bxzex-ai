@@ -14,7 +14,7 @@ set -euo pipefail
 BXZEX_HOME="${BXZEX_HOME:-$HOME/.bxzex-ai}"
 
 # our own engine folder (Linux) comes first, then whatever is on the PATH (Homebrew on a Mac)
-BIN="${BXZEX_SERVER_BIN:-$(find "$BXZEX_HOME/engine" -name llama-server -type f 2>/dev/null | head -1)}"
+BIN="${BXZEX_SERVER_BIN:-$(find "$BXZEX_HOME/engine" -name llama-server -type f 2>/dev/null | head -1 || true)}"
 [ -n "$BIN" ] || BIN="$(command -v llama-server || true)"
 [ -n "$BIN" ] && [ -x "$BIN" ] || { echo "The chat engine is missing. Run the installer again." >&2; exit 1; }
 export LD_LIBRARY_PATH="$(dirname "$BIN"):$BXZEX_HOME/engine:${LD_LIBRARY_PATH:-}"

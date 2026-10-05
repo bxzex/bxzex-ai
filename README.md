@@ -37,7 +37,7 @@ You shouldn't paste a command from the internet into your terminal on trust, min
 
 **Linux**
 - A 64-bit PC with an NVIDIA graphics card that has **16GB of video memory or more**. Without one it still runs on the processor if you have 24GB of RAM, but slowly.
-- About 17GB of free disk space
+- About 25GB of free disk space
 - `curl` and `python3`, which most systems already have
 
 **Windows**
@@ -45,7 +45,7 @@ You shouldn't paste a command from the internet into your terminal on trust, min
 
 It will not run on a computer with 8GB or 16GB of memory and no big graphics card. The installer checks and stops if there isn't enough.
 
-Chat, web search, vision, skills, memory, chat history and the shell tools work everywhere. Image generation and voice input are Mac-only for now. Linux support is new, so tell me if something breaks.
+Everything works on all three: chat, web search, vision, image generation, voice input, skills, memory, chat history and the shell tools. Linux and Windows support is new, so tell me if something breaks. Image generation on Linux needs a recent system (Ubuntu 24.04 or similar) and a 64-bit Intel or AMD processor.
 
 ## Install
 
@@ -55,7 +55,7 @@ Open a terminal and paste this:
 curl -fsSL https://raw.githubusercontent.com/bxzex/bxzex-ai/main/install.sh | bash
 ```
 
-Pick your color, then let it work. It sets up everything and downloads the AI model, vision and skills, plus voice and image generation on a Mac. That's about 21GB on a Mac and 16GB on Linux, so give it a while on slower internet. If your connection drops, paste the same line again and it picks up where it stopped.
+Pick your color, then let it work. It sets up everything and downloads the AI model, vision, voice, image generation and skills. That's about 21GB on a Mac and 23GB on Linux, so give it a while on slower internet. If your connection drops, paste the same line again and it picks up where it stopped.
 
 When it says READY, open a new terminal window and type:
 
@@ -64,6 +64,15 @@ bxzex-ai
 ```
 
 The first launch takes about a minute while the model loads. After that it stays loaded and opens right away.
+
+## Updates
+
+It checks for a new version each time you open it and installs it quietly in the background. When that happens the bar at the bottom says so, and you quit and reopen to use it. Your chats, memory and settings are never touched.
+
+- `/update` checks right now.
+- `/update full` runs the installer again when a new version adds something to download. It skips everything you already have.
+- Your version is in the bar at the bottom and in `bxzex-ai --version`.
+- To turn the automatic check off, launch with `BXZEX_NO_UPDATE=1`.
 
 ## Using it
 
@@ -81,6 +90,7 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/btw` | Add a note without waiting for an answer, like `/btw the client wants it in Spanish`. |
 | `/fast` | Switch fast mode. It's on by default and answers right away. Turn it off when you want it to think a hard question through first. |
 | `/think` | Show or hide its thinking when fast mode is off. |
+| `/update` | Get the newest version. |
 | `/reset` | Start a fresh conversation. |
 | `exit` | Quit. |
 

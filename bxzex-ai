@@ -21,7 +21,7 @@ HOME = os.path.expanduser("~")
 APP_HOME = os.environ.get("BXZEX_HOME", f"{HOME}/.bxzex-ai")
 CONFIG = f"{APP_HOME}/config.json"
 AI_NAME = "BXZEX AI"
-VERSION = "1.0"
+VERSION = "1.1.1"
 
 class Screen:
     """Everything printed goes through here and is remembered, so the conversation can be redrawn
@@ -270,6 +270,9 @@ def ensure_server(block=True):
     """Start the model server if it isn't already running. A cold start reads ~15GB off disk.
     block=False starts it and returns straight away; the next call waits for it."""
     global server_proc
+    try:
+        if os.path.exists(PAINTING) and not painting(): os.remove(PAINTING)   # a leftover lock from a crash
+    except OSError: pass
     if loaded_model(): return True
     if os.path.exists(f"{APP_HOME}/painting.lock") and painting():     # another window is making an image
         wait = Waiting("Waiting for an image to finish")
@@ -342,6 +345,22 @@ def fetch_page(url):
     if not re.match(r"https?://", url): url = "https://" + url
     return clip(page_text(http_get(url)), PAGE_CHARS)
 
+def read_key():
+    """Read one keypress. Arrow keys and other escape sequences come back as a single token
+    instead of echoing their raw codes. Letters come back lowercased."""
+    if not sys.stdin.isatty(): return ""
+    fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        ch = os.read(fd, 1).decode("utf-8", "ignore")
+        if ch == "\x1b":                               # swallow the rest of an escape sequence (arrows, etc.)
+            while select.select([fd], [], [], 0.02)[0]: os.read(fd, 1)
+            return "\x1b"
+        if ch in ("\x03", "\x04"): raise KeyboardInterrupt
+        return ch.lower()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
 def confirm(what, detail):
     global allow_all
     if allow_all: return True
@@ -351,14 +370,16 @@ def confirm(what, detail):
     sys.stdout.write("\033[?25h")
     print(f"{GOLD}?{R} {BOLD}Allow: {what}{R}")
     for line in detail.splitlines()[:12]: print(f"  {DIM}│ {line[:W()-6]}{R}")
+    sys.stdout.write(f"  {GOLD}❯{R} y yes · n no · a always this session  "); sys.stdout.flush()
     try:
-        a = input(f"  {GOLD}❯{R} y yes · n no · a always this session  ").strip().lower()
+        a = read_key()
     except (EOFError, KeyboardInterrupt):
-        print(); return False
+        a = "n"
     finally:
         if busy: typed.start()
-    if a.startswith("a"): allow_all = True; return True
-    return a.startswith("y")
+    print(a if a in "yna" else "")
+    if a == "a": allow_all = True; return True
+    return a == "y"
 
 def run_shell(command):
     if not confirm("run command", command): return "The user declined to run this command."
@@ -442,21 +463,38 @@ def stop_server():
         except OSError: pass
     time.sleep(0.5)
 
+PAINT = f"{APP_HOME}/models/bxzex-paint"     # the same image model packaged for the Linux engine
+
+def paint_engine():
+    """The image engine used on Linux, if it is installed."""
+    for root, _, files in os.walk(f"{APP_HOME}/imgengine"):
+        if "sd-cli" in files: return os.path.join(root, "sd-cli")
+    return None
+
 def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
-    if not (os.path.isdir(IMAGE_MODEL) and os.path.exists(IMAGE_BIN)):
-        return ("Image generation only works on a Mac for now." if sys.platform != "darwin"
-                else "Image generation is not installed. Run the installer again to add it.")
     quality = quality.strip().lower() if quality.strip().lower() in SHAPES else "fast"
     w, h = SHAPES[quality].get(shape.strip().lower(), SHAPES[quality]["square"])
-    os.makedirs(PICTURES, exist_ok=True)
     out = f"{PICTURES}/{time.strftime('%Y-%m-%d %H-%M-%S')}.png"
-    cmd = [IMAGE_BIN, "--model", IMAGE_MODEL, "--low-ram", "--prompt", " ".join(prompt.split()),
-           "--width", str(w), "--height", str(h), "--steps", str(STEPS[quality]), "--output", out]
+    prompt = " ".join(prompt.split())
     try: loras = sorted(os.path.join(LORAS, f) for f in os.listdir(LORAS) if f.endswith(".safetensors"))
     except OSError: loras = []
-    if loras:
-        scale = os.environ.get("BXZEX_LORA_SCALE", "0.8")
-        cmd += ["--lora-paths", *loras, "--lora-scales", *[scale] * len(loras)]
+    scale = os.environ.get("BXZEX_LORA_SCALE", "0.8")
+    env = None
+    if os.path.isdir(IMAGE_MODEL) and os.path.exists(IMAGE_BIN):                 # Mac engine
+        cmd = [IMAGE_BIN, "--model", IMAGE_MODEL, "--low-ram", "--prompt", prompt,
+               "--width", str(w), "--height", str(h), "--steps", str(STEPS[quality]), "--output", out]
+        if loras: cmd += ["--lora-paths", *loras, "--lora-scales", *[scale] * len(loras)]
+    elif paint_engine() and os.path.exists(f"{PAINT}/model.gguf"):               # Linux engine
+        engine = paint_engine()
+        styles = "".join(f" <lora:{os.path.basename(f)[:-len('.safetensors')]}:{scale}>" for f in loras)
+        cmd = [engine, "--diffusion-model", f"{PAINT}/model.gguf", "--vae", f"{PAINT}/vae.safetensors",
+               "--llm", f"{PAINT}/text.gguf", "-p", prompt + styles, "--cfg-scale", "1.0", "--diffusion-fa",
+               "--steps", str(STEPS[quality]), "-W", str(w), "-H", str(h), "-s", "-1", "-o", out]
+        if loras: cmd += ["--lora-model-dir", LORAS]
+        env = dict(os.environ, LD_LIBRARY_PATH=f"{os.path.dirname(engine)}:{os.environ.get('LD_LIBRARY_PATH', '')}")
+    else:
+        return "Image generation is not installed. Run the installer again to add it."
+    os.makedirs(PICTURES, exist_ok=True)
     sys.stdout.write("\033[?25l")
     wait = Waiting("Making room")
     err = ""
@@ -465,12 +503,12 @@ def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
         open(PAINTING, "w").close()
         stop_server()
         wait.label = "Painting"
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         while True:                                   # the generator reports its steps on stderr
-            chunk = proc.stderr.read1(256).decode("utf-8", "ignore")
+            chunk = proc.stdout.read1(256).decode("utf-8", "ignore")
             if not chunk: break
             err = (err + chunk)[-2000:]
-            step = re.findall(r"(\d+)/(\d+)", chunk)
+            step = [x for x in re.findall(r"(\d+)/(\d+)", chunk) if x[1] == str(STEPS[quality])]
             if step: wait.label = f"Painting, step {step[-1][0]} of {step[-1][1]}"
         proc.wait()
     except KeyboardInterrupt:
@@ -528,6 +566,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - /memory: show what you remember. /memory clear wipes it.
 - /history: list earlier chats and continue one. /resume: continue the most recent.
 - /skills: list your skills.
+- /update: get the newest version of the app. It also checks by itself each time it starts.
 - /image <description>: make a picture straight from their words, without you. If they ask you for a picture in conversation, use generate_image.
 - /reset: start a new conversation. exit: quit.
 - Dragging an image file into the window lets you see it.
@@ -1019,28 +1058,70 @@ WHISPER = shutil.which("whisper-cli")
 VOICE_MODEL = f"{APP_HOME}/models/bxzex-voice.bin"
 VOICE_LANG = os.environ.get("BXZEX_VOICE_LANG", "en")
 
+def recorder(wav):
+    """Start recording the microphone to a wav file with whatever this system has. Returns (process, stop)."""
+    if sys.platform == "darwin" and shutil.which("ffmpeg"):
+        p = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-y", "-f", "avfoundation", "-i", ":default",
+                              "-ar", "16000", "-ac", "1", wav], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        def stop():
+            try: p.communicate(b"q", timeout=5)          # 'q' lets ffmpeg finish the wav header
+            except subprocess.TimeoutExpired: p.kill()
+        return p, stop
+    for cmd in (["pw-record", "--rate", "16000", "--channels", "1", wav],
+                ["parecord", "--rate=16000", "--channels=1", "--file-format=wav", wav],
+                ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", wav],
+                ["ffmpeg", "-loglevel", "error", "-y", "-f", "pulse", "-i", "default", "-ar", "16000", "-ac", "1", wav]):
+        if shutil.which(cmd[0]):
+            p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            def stop():
+                p.send_signal(signal.SIGINT)             # these finish the file cleanly on an interrupt
+                try: p.wait(timeout=5)
+                except subprocess.TimeoutExpired: p.kill()
+            return p, stop
+    return None, None
+
+def linux_whisper():
+    tool = shutil.which("whisper-ctranslate2") or f"{HOME}/.local/bin/whisper-ctranslate2"
+    return tool if os.path.exists(tool) else None
+
+def transcribe(wav):
+    """Speech to text, on this machine."""
+    if WHISPER and os.path.exists(VOICE_MODEL):                                   # Mac engine
+        return subprocess.run([WHISPER, "-m", VOICE_MODEL, "-f", wav, "-l", VOICE_LANG, "-nt", "-np"],
+                              capture_output=True, text=True, timeout=180).stdout
+    tool = linux_whisper()                                                        # Linux engine
+    if not tool: return ""
+    outdir = tempfile.mkdtemp()
+    try:
+        cmd = [tool, wav, "--model", "small", "--output_format", "txt", "--output_dir", outdir,
+               "--device", "cpu", "--compute_type", "int8", "--verbose", "False"]
+        if VOICE_LANG != "auto": cmd += ["--language", VOICE_LANG]
+        subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        return " ".join(open(os.path.join(outdir, f), errors="replace").read() for f in os.listdir(outdir) if f.endswith(".txt"))
+    finally:
+        shutil.rmtree(outdir, ignore_errors=True)
+
 def listen():
-    """Record the mic until Enter, transcribe on-device with whisper.cpp, return the text."""
-    if not (WHISPER and shutil.which("ffmpeg") and os.path.exists(VOICE_MODEL)):
-        print(f"{DIM}voice needs whisper-cli, ffmpeg and {VOICE_MODEL}{R}"); return ""
+    """Record the mic until Enter, transcribe it on this machine, return the text."""
+    if not ((WHISPER and os.path.exists(VOICE_MODEL)) or linux_whisper()):
+        print(f"{DIM}voice is not installed. Run the installer again to add it.{R}"); return ""
     wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-    mic = ["-f", "avfoundation", "-i", ":default"] if sys.platform == "darwin" else ["-f", "pulse", "-i", "default"]
-    rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-y", *mic,
-                            "-ar", "16000", "-ac", "1", wav], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    rec, stop = recorder(wav)
+    if not rec:
+        os.unlink(wav)
+        print(f"{DIM}no recording tool found. On Linux install one: sudo apt install pipewire-bin (or alsa-utils){R}"); return ""
     sys.stdout.write("\033[?25l")
     wait = Waiting("Listening, press enter when done")
     try:
         input()
-        sys.stdout.write("\033[1A")          # back onto the loader line the Enter moved us off
+        RAW.write("\033[1A")          # back onto the loader line the Enter moved us off
     except (EOFError, KeyboardInterrupt):
         wait.stop(); rec.kill(); os.unlink(wav); sys.stdout.write("\033[?25h"); print(f"{DIM}cancelled{R}"); return ""
     wait.stop()
-    try: rec.communicate(b"q", timeout=5)    # 'q' lets ffmpeg finish the wav header
-    except subprocess.TimeoutExpired: rec.kill()
+    stop()
     wait = Waiting("Transcribing")
     try:
-        out = subprocess.run([WHISPER, "-m", VOICE_MODEL, "-f", wav, "-l", VOICE_LANG, "-nt", "-np"],
-                             capture_output=True, text=True, timeout=120).stdout
+        out = transcribe(wav)
     except Exception:
         out = ""
     finally:
@@ -1048,8 +1129,65 @@ def listen():
         if os.path.exists(wav): os.unlink(wav)
     text = re.sub(r"[\[(][^\])]*[\])]", " ", out)   # drop [BLANK_AUDIO], (music) and the like
     text = " ".join(text.split())
-    if not text: print(f"{DIM}didn't catch anything. Check the mic permission for Terminal{R}")
+    if not text: print(f"{DIM}didn't catch anything. Check that the microphone is allowed and not muted{R}")
     return text
+
+# ---- updates ----
+UPDATE_URL = "https://raw.githubusercontent.com/bxzex/bxzex-ai/main"
+update_note = ""      # shown in the status line once a newer version has been put in place
+
+def newer(a, b):
+    """True if version a is higher than b."""
+    num = lambda v: [int(x) for x in re.findall(r"\d+", v)][:3]
+    return num(a) > num(b)
+
+def fetch(path):
+    return http_get(f"{UPDATE_URL}/{path}")
+
+def check_update(quiet=True):
+    """Look for a newer version and put it in place. The running session keeps the old one until restart.
+    Only the app, the server launcher and the skills change here: the big model files are never touched."""
+    global update_note
+    try:
+        latest = fetch("VERSION").split()
+        if not latest or not re.fullmatch(r"\d+(\.\d+){1,2}", latest[0]): return False
+        if not newer(latest[0], VERSION):
+            if not quiet: print(f"{DIM}you have the latest version, v{VERSION}{R}")
+            return False
+        here = os.path.dirname(os.path.realpath(__file__))
+        app = fetch("bxzex-ai")
+        compile(app, "bxzex-ai", "exec")                       # never install something that doesn't even parse
+        if f'VERSION = "{latest[0]}"' not in app: return False
+        server = fetch("bxzex-server")
+        names = re.search(r'SKILLS="([^"]*)"', fetch("install.sh"))
+        skills = {n: fetch(f"skills/{n}.md") for n in (names.group(1).split() if names else [])}
+        if not server.startswith("#!") or any(not v.startswith("---") for v in skills.values()): return False
+        os.makedirs(SKILLS_DIR, exist_ok=True)
+        for n, text in skills.items():
+            with open(os.path.join(SKILLS_DIR, f"{n}.md"), "w") as f: f.write(text)
+        for name, text in (("bxzex-server", server), ("bxzex-ai", app)):
+            tmp = os.path.join(here, f".{name}.new")
+            with open(tmp, "w") as f: f.write(text)
+            os.chmod(tmp, 0o755); os.replace(tmp, os.path.join(here, name))
+        update_note = f"updated to v{latest[0]} · quit and reopen to use it"
+        if len(latest) > 1 and latest[1].isdigit() and int(latest[1]) > int(load_config().get("parts", 0) or 0):
+            update_note += " · new features to download: /update full"
+        if not quiet: print(f"{GOLD}●{R} {BOLD}Updated to v{latest[0]}{R} {DIM}· quit and open bxzex-ai again to use it{R}")
+        return True
+    except Exception:
+        if not quiet: print(f"{DIM}couldn't check for updates right now{R}")
+        return False
+
+def full_update():
+    """Run the installer again: it skips what is already there and adds anything new."""
+    box.unpin()
+    script = tempfile.NamedTemporaryFile(suffix=".sh", delete=False).name
+    try:
+        with open(script, "w") as f: f.write(fetch("install.sh"))
+        subprocess.run(["bash", script])
+    finally:
+        os.unlink(script)
+    print(f"{DIM}quit and open bxzex-ai again to use the new version{R}")
 
 # ---- chat history ----
 CHATS = f"{APP_HOME}/chats"     # one .json per conversation, saved after every turn
@@ -1118,7 +1256,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/memory", "what it remembers · /memory clear"), ("/image", "make a picture · /image hd portrait a red fox"), ("/btw", "add a note, no reply"),
             ("/history", "past chats, pick one to continue"), ("/resume", "continue the last chat"),
             ("/fast", "toggle answering without thinking first"), ("/think", "show or hide its thinking"),
-            ("/reset", "start a new conversation"), ("/help", "this list"), ("exit", "quit")]
+            ("/update", "get the newest version · /update full adds new downloads"), ("/reset", "start a new conversation"), ("/help", "this list"), ("exit", "quit")]
 past = []   # earlier inputs, for the up arrow
 
 def status_text(buf, working=False):
@@ -1126,7 +1264,8 @@ def status_text(buf, working=False):
         hits = [f"{n} {d}" for n, d in COMMANDS if n.startswith(buf.split()[0])]
         if hits: return "  " + "   ".join(hits)
     if working: return "  working · type and press Enter to add a note · ctrl-c to stop"
-    return f"  bxzex-ai · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')} · /help"
+    if update_note: return f"  {update_note}"
+    return f"  bxzex-ai v{VERSION} · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')} · /help"
 
 class Box:
     """Keeps the input box on the last four rows. Everything else scrolls in the area above it,
@@ -1225,13 +1364,15 @@ def ask(prefill=""):
                     if rest.startswith("\x1b[200~"): pasting = True; i += 6; continue
                     if rest.startswith("\x1b[201~"): pasting = False; i += 6; continue
                     m = re.match(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]", rest)
-                    if not m: i += 1; continue
+                    if not m:                          # a lone Esc clears the line
+                        if len(rest) == 1 or rest[1] not in "[O": buf = []; pos = 0
+                        i += 1; continue
                     key = m.group(0); i += len(key)
                     if key in ("\x1b[D", "\x1bOD"): pos = max(0, pos - 1)
                     elif key in ("\x1b[C", "\x1bOC"): pos = min(len(buf), pos + 1)
                     elif key in ("\x1b[H", "\x1bOH", "\x1b[1~"): pos = 0
                     elif key in ("\x1b[F", "\x1bOF", "\x1b[4~"): pos = len(buf)
-                    elif key == "\x1b[3~": del buf[pos:pos + 1]
+                    elif key == "\x1b[3~": buf = []; pos = 0           # Delete key clears the line
                     elif key in ("\x1b[A", "\x1bOA") and at > 0:
                         if at == len(past): draft = "".join(buf)
                         at -= 1; buf = list(past[at]); pos = len(buf)
@@ -1271,7 +1412,8 @@ def ask(prefill=""):
 def show_help():
     print(header("Commands"))
     for n, d in COMMANDS: print(f"  {GOLD}{n:<8}{R} {DIM}{d}{R}")
-    print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note.{R}")
+    print(f"  {DIM}Drag an image in to show it. Esc or Delete clears the line. Up and down arrows walk your history.{R}")
+    print(f"  {DIM}Keep typing while it works and press Enter to add a note.{R}")
 
 # ---- installer helpers ----
 if sys.argv[1:2] in (["--version"], ["-v"]):
@@ -1326,6 +1468,8 @@ if not up: sys.exit(1)
 banner()
 refresh_system()
 warm_up()
+if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version in the background each time it starts
+    threading.Thread(target=check_update, daemon=True).start()
 spoken = ""
 while True:
     try:
@@ -1335,6 +1479,8 @@ while True:
     if not user: continue
     if user in ("exit","quit"): break
     if user in ("/help", "/", "/?"): show_help(); continue
+    if user == "/update": check_update(quiet=False); continue
+    if user == "/update full": full_update(); continue
     if user.startswith("/color"): choose_color(user[6:]); continue
     if user=="/fast":
         fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); continue
