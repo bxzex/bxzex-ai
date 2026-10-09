@@ -16,12 +16,39 @@ Agent:  it can search the web, fetch pages, run shell commands and read/write fi
 """
 import json, math, os, re, sys, time, random, shutil, subprocess, threading, urllib.request, urllib.error
 
-HOST = f"http://127.0.0.1:{os.environ.get('BXZEX_PORT', '8080')}"
 HOME = os.path.expanduser("~")
 APP_HOME = os.environ.get("BXZEX_HOME", f"{HOME}/.bxzex-ai")
 CONFIG = f"{APP_HOME}/config.json"
+
+# The model can also run on a cloud graphics card: "remote" (its address) and "remote_key" in config.json,
+# or BXZEX_REMOTE and BXZEX_REMOTE_KEY. Everything else (tools, memory, chats, images, voice) stays here.
+try:
+    with open(CONFIG) as _f: _cfg = json.load(_f)
+except Exception:
+    _cfg = {}
+REMOTE = (os.environ.get("BXZEX_REMOTE") or _cfg.get("remote") or "").rstrip("/")
+REMOTE_KEY = os.environ.get("BXZEX_REMOTE_KEY") or _cfg.get("remote_key") or ""
+HOST = REMOTE or f"http://127.0.0.1:{os.environ.get('BXZEX_PORT', '8080')}"
+
+class _RemoteKey(urllib.request.HTTPRedirectHandler):
+    """Sends the key with requests to the remote model only, never to web pages the tools open.
+    Also follows the 303 the cloud sends while a long request is still waiting for its card."""
+    def http_request(self, req):
+        if REMOTE_KEY and req.full_url.startswith(HOST): req.add_unredirected_header("Authorization", f"Bearer {REMOTE_KEY}")
+        return req
+    https_request = http_request
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and code == 303 and req.data is not None and newurl.startswith(HOST):
+            new = urllib.request.Request(newurl, req.data, dict(req.header_items()), method="POST")   # keep the request as it was
+        return new
+if REMOTE:
+    import ssl
+    _ctx = ssl.create_default_context()
+    if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
+    urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -279,7 +306,7 @@ def header(label, ramp=None):
 # ---- server ----
 def loaded_model():
     try:
-        with urllib.request.urlopen(f"{HOST}/v1/models", timeout=3) as r:
+        with urllib.request.urlopen(f"{HOST}/v1/models", timeout=600 if REMOTE else 3) as r:
             d = json.load(r)["data"]
         return d[0]["id"] if d else None
     except Exception:
@@ -295,6 +322,7 @@ def ensure_server(block=True):
     try:
         if os.path.exists(PAINTING) and not painting(): os.remove(PAINTING)   # a leftover lock from a crash
     except OSError: pass
+    if REMOTE: return wake_remote(block)
     if loaded_model(): return True
     if os.path.exists(f"{APP_HOME}/painting.lock") and painting():     # another window is making an image
         wait = Waiting("Waiting for an image to finish")
@@ -321,6 +349,20 @@ def ensure_server(block=True):
     finally:
         wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
     print(f"{DIM}the model server didn't start. See {APP_HOME.replace(HOME, '~')}/server.log{R}"); return False
+
+def wake_remote(block=True):
+    """The cloud card sleeps when idle; the first request wakes it, which takes up to a minute or two."""
+    if not block:
+        threading.Thread(target=loaded_model, daemon=True).start(); return True
+    sys.stdout.write("\033[?25l")
+    wait = Waiting("Waking the cloud GPU")
+    try:
+        if loaded_model(): return True
+    except KeyboardInterrupt:
+        pass
+    finally:
+        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+    print(f"{DIM}the cloud GPU didn't answer. Check \"remote\" and \"remote_key\" in {CONFIG.replace(HOME, '~')}{R}"); return False
 
 # ---- processor or graphics card ----
 def graphics():
@@ -575,6 +617,7 @@ def painting():
 
 def stop_server():
     """Free the chat model's memory. The image model needs it: both do not fit in 24GB together."""
+    if REMOTE: return                         # the model is on the cloud card, nothing to free here
     port = HOST.rsplit(":", 1)[1]
     if shutil.which("lsof"):
         pids = [int(x) for x in subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split() if x.isdigit()]
@@ -921,7 +964,8 @@ class TypeAhead:
             ready, _, _ = select.select([self.fd], [], [], 0.1)
             if resized: resized = False; box.draw(self.buf, len(self.buf))
             if not ready: continue
-            for ch in os.read(self.fd, 64).decode("utf-8", "ignore"):
+            got = re.sub(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b", "", os.read(self.fd, 64).decode("utf-8", "ignore"))   # arrows and other keys, not text
+            for ch in got:
                 if ch in "\r\n":
                     if self.buf.strip(): self.notes.append(self.buf.strip())
                     self.buf = ""
@@ -1453,7 +1497,7 @@ def full_update():
     print(f"{DIM}quit and open bxzex-ai again to use the new version{R}")
 
 # ---- chat history ----
-CHATS = f"{APP_HOME}/chats"     # one .json per conversation, saved after every turn
+CHATS = f"{APP_HOME}/chats"     # one .json per conversation, saved after every turn and every 30 seconds
 chat_file = None
 
 def plain(content):
@@ -1473,6 +1517,11 @@ def save_chat():
     except OSError:
         pass
 
+def autosave():
+    """Saves the conversation every 30 seconds, so a closed window or a crash loses nothing."""
+    while True:
+        time.sleep(30); save_chat()
+
 def list_chats():
     try: files = sorted((f for f in os.listdir(CHATS) if f.endswith(".json")), reverse=True)
     except OSError: return []
@@ -1489,7 +1538,9 @@ def open_chat(pick=None):
     """Continue an earlier conversation. pick=0 takes the most recent without asking."""
     global history, chat_file
     chats = [c for c in list_chats() if c[0] != chat_file]
-    if not chats: print(f"{DIM}no earlier chats yet{R}"); return
+    if not chats:
+        if pick is None: print(f"{DIM}no earlier chats yet{R}")
+        return
     if pick is None:
         print(header("History"))
         for i, (_, when, title, msgs) in enumerate(chats, 1):
@@ -1733,6 +1784,9 @@ if not up: sys.exit(1)
 banner()
 refresh_system()
 warm_up()
+if load_config().get("continue", True): open_chat(0)   # it remembers: open where the last chat left off (/reset starts fresh)
+threading.Thread(target=autosave, daemon=True).start()
+atexit.register(save_chat)
 if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version in the background each time it starts
     threading.Thread(target=check_update, daemon=True).start()
 spoken = ""
