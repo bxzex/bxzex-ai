@@ -48,7 +48,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.3.7"
+VERSION = "1.3.8"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1178,11 +1178,18 @@ def context_size():
 
 def reply_room(): return min(12000 if REMOTE else 4096, context_size() // 4)   # the cloud card has room for long scripts
 
-REPEAT = ("You already made this exact call twice and got the same result, so it was not run again. Use the result you "
+REPEAT = ("You already made this exact call twice in a row with nothing changed in between, so it was not run again. Use the result you "
           "already have: change the approach, or stop and tell the user where things stand.")
 
 CUT_OFF = ("That call was cut off at the reply length limit, so it never ran. Write long scripts in smaller pieces: "
            "save the script with write_file first, then run it with a short run_shell command.")
+
+def circling(calls):
+    """True when the last calls are one short pattern (1 to 3 calls) repeated three times in a row, unchanged.
+    Editing a script and running it again is not a circle: the edit differs each time."""
+    for n in (1, 2, 3):
+        if len(calls) >= 3 * n and calls[-n:] == calls[-2 * n:-n] == calls[-3 * n:-2 * n]: return True
+    return False
 
 def whole(call):
     """True when a tool call's arguments are complete JSON. A reply that runs out of room leaves them cut off."""
@@ -1379,7 +1386,7 @@ def run_turn(history):
     typed.start()
     try:
         global turn_tok
-        turn_tok = 0; began = time.time(); retried = made_room = False; recent = {}
+        turn_tok = 0; began = time.time(); retried = made_room = False; recent = []
         label = "Reading"
         for _ in range(MAX_STEPS):
             if fold(history): label = "Reading"
@@ -1400,9 +1407,8 @@ def run_turn(history):
                 history.append({"role": "assistant", "content": text, "tool_calls": calls})
                 for i, call in enumerate(calls):
                     call["id"] = call["id"] or f"call_{len(history)}_{i}"
-                    sig = (call["function"]["name"], call["function"].get("arguments"))
-                    recent[sig] = recent.get(sig, 0) + 1
-                    if recent[sig] > 2:                    # the third identical call: it is going round in circles
+                    recent.append((call["function"]["name"], call["function"].get("arguments")))
+                    if circling(recent):                   # the same call, or the same few, a third time in a row
                         history.append({"role": "tool", "tool_call_id": call["id"], "content": REPEAT})
                         print(f"  {DIM}└ skipped: the same call a third time{R}"); continue
                     history.append({"role": "tool", "tool_call_id": call["id"], "content": run_tool(call) if whole(call) else CUT_OFF})
@@ -1579,15 +1585,24 @@ def plain(content):
     if isinstance(content, str): return content
     return " ".join(p.get("text", "") if p.get("type") == "text" else "[image]" for p in content).strip()
 
+last_saved = None
+
+def chat_data():
+    msgs = [dict(m, content=plain(m.get("content") or "")) for m in list(history)]
+    title = next((m["content"] for m in msgs if m["role"] == "user"), "")[:80]
+    return json.dumps({"title": title, "messages": msgs})
+
 def save_chat():
-    global chat_file
+    global chat_file, last_saved
     if not history: return
     try:
         os.makedirs(CHATS, exist_ok=True)
         if not chat_file: chat_file = f"{CHATS}/{time.strftime('%Y-%m-%d_%H-%M-%S')}.json"
-        msgs = [dict(m, content=plain(m.get("content") or "")) for m in history]
-        title = next((m["content"] for m in msgs if m["role"] == "user"), "")[:80]
-        with open(chat_file, "w") as f: json.dump({"title": title, "messages": msgs}, f)
+        data = chat_data()
+        if data == last_saved and os.path.exists(chat_file): return    # nothing new: never overwrite another window's newer save
+        with open(chat_file + ".tmp", "w") as f: f.write(data)
+        os.replace(chat_file + ".tmp", chat_file)                       # all or nothing, so a crash mid-save can't break the chat
+        last_saved = data
     except OSError:
         pass
 
@@ -1624,7 +1639,8 @@ def open_chat(pick=None):
         if not (a.isdigit() and 1 <= int(a) <= len(chats)): return
         pick = int(a) - 1
     path, when, title, msgs = chats[pick]
-    history = msgs; chat_file = path
+    global last_saved
+    history = msgs; chat_file = path; last_saved = chat_data()      # just opened: nothing to save until it changes
     try: saved = time.strftime("%b %d at %-I:%M %p", time.localtime(os.path.getmtime(path)))
     except OSError: saved = when
     print(f"{GOLD}●{R} {BOLD}Continuing from last save{R} {DIM}{saved} · {len(msgs)} messages{R}")
@@ -1916,8 +1932,11 @@ while True:
     try:
         run_turn(history)
     except KeyboardInterrupt:
-        for i, m in enumerate(history):              # drop the half-finished turn so tool calls never dangle
-            if m is asked: del history[i:]; break
-        print(f"\n{DIM}stopped{R}")
+        answered = {m.get("tool_call_id") for m in history if m["role"] == "tool"}
+        for m in list(history):                      # keep the work done so far; only close calls that never got a result
+            for c in m.get("tool_calls") or []:
+                if c.get("id") not in answered:
+                    history.append({"role": "tool", "tool_call_id": c.get("id"), "content": "Stopped by the user before this ran."})
+        print(f"\n{DIM}stopped · everything done so far is kept{R}")
     save_chat()
 # ---- end of bxzex-ai ----
