@@ -48,7 +48,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.3.9"
+VERSION = "1.4.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -401,7 +401,7 @@ UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit
 PAGE_CHARS = 20000 if REMOTE else 6000   # a laptop reads ~20 tok/s, so every 1k chars of tool output costs ~12s; a cloud card reads fast
 OUT_CHARS  = 12000 if REMOTE else 4000
 SHELL_SECONDS = 600 if REMOTE else 120
-MAX_STEPS  = 10**6 if REMOTE else 12   # tool calls per message: no limit on a cloud card (ctrl-c stops it), 12 on a laptop
+MAX_STEPS  = 10**6 if REMOTE else 12   # tool calls per message: no limit on a cloud card (esc or ctrl-c stops it), 12 on a laptop
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".bmp", ".tiff")
 allow_all = False
 
@@ -465,8 +465,10 @@ def read_choice(spots):
                     for key, (a, z) in spots.items():
                         if a <= x <= z: return key
                 continue
-            if buf[0] == "\x1b":                                  # another key's escape sequence: ignore it
-                m = re.match(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b", buf); buf = buf[m.end():]; continue
+            if buf[0] == "\x1b":                                  # Esc on its own stops; another key's escape sequence is ignored
+                m = re.match(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]", buf)
+                if not m: raise KeyboardInterrupt
+                buf = buf[m.end():]; continue
             return buf[0].lower()
     finally:
         RAW.write("\033[?1006l\033[?1000l"); RAW.flush()
@@ -515,8 +517,10 @@ def confirm(what, detail, always_ask=False):
     sys.stdout.write(line + f"{DIM}click or press a key{R}  "); sys.stdout.flush()
     try:
         a = read_choice(spots)
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         a = "n"
+    except KeyboardInterrupt:                         # esc or ctrl-c at the question: stop the whole reply, not just this step
+        print(); raise
     finally:
         if busy: typed.start()
     print(a if a in "yna" else "")
@@ -1013,7 +1017,10 @@ class TypeAhead:
             ready, _, _ = select.select([self.fd], [], [], 0.1)
             if resized: resized = False; box.draw(self.buf, len(self.buf))
             if not ready: continue
-            got = re.sub(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b", "", os.read(self.fd, 64).decode("utf-8", "ignore"))   # arrows and other keys, not text
+            raw = os.read(self.fd, 64).decode("utf-8", "ignore")
+            if re.search(r"\x1b(?![\[O])", raw + " "):          # Esc on its own (not an arrow key): stop, the same as ctrl-c
+                os.kill(os.getpid(), signal.SIGINT); continue
+            got = re.sub(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b", "", raw)   # arrows and other keys, not text
             for ch in got:
                 if ch in "\r\n":
                     if self.buf.strip(): self.notes.append(self.buf.strip())
@@ -1156,7 +1163,7 @@ class Waiting:
         while not self.stop_ev.wait(0.07):
             el = time.time() - self.t0; w = W()
             tok = f" · ↓ {self.tok} tok" if self.tok else ""
-            info = f"({fmt(el)}{tok} · ctrl-c to stop)"
+            info = f"({fmt(el)}{tok} · esc to stop)"
             used = 2 + len(self.label) + 2 + len(info)
             ride = flame(el) + " " if w > used + 16 else ""
             if ride: used += 13
@@ -1684,7 +1691,7 @@ def status_text(buf, working=False):
     if buf.startswith("/"):
         hits = [f"{n} {d}" for n, d in COMMANDS if n.startswith(buf.split()[0])]
         if hits: return "  " + "   ".join(hits)
-    if working: return "  working · type and press Enter to add a note · ctrl-c to stop"
+    if working: return "  working · type and press Enter to add a note · esc to stop"
     if update_note: return f"  {update_note}"
     lite = " · lite" if LITE else ""
     return f"  bxzex-ai v{VERSION}{lite} · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')} · /help"
