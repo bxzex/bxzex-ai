@@ -48,7 +48,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1140,7 +1140,24 @@ def context_size():
             return int(os.environ.get("BXZEX_CTX") or 32768)
     return ctx_size
 
-def reply_room(): return min(4096, context_size() // 4)
+def reply_room(): return min(12000 if REMOTE else 4096, context_size() // 4)   # the cloud card has room for long scripts
+
+CUT_OFF = ("That call was cut off at the reply length limit, so it never ran. Write long scripts in smaller pieces: "
+           "save the script with write_file first, then run it with a short run_shell command.")
+
+def whole(call):
+    """True when a tool call's arguments are complete JSON. A reply that runs out of room leaves them cut off."""
+    try: json.loads(call["function"].get("arguments") or "{}"); return True
+    except ValueError: return False
+
+def mend(msgs):
+    """Replaces cut-off tool calls with empty ones, since the server refuses the whole chat when one is broken."""
+    out = []
+    for m in msgs:
+        if m.get("tool_calls") and not all(whole(c) for c in m["tool_calls"]):
+            m = dict(m, tool_calls=[c if whole(c) else dict(c, function=dict(c["function"], arguments="{}")) for c in m["tool_calls"]])
+        out.append(m)
+    return out
 
 def chars_in(messages):
     n = 0
@@ -1170,7 +1187,7 @@ def summarize(old):
     ask = ("Before we go on, write a summary of this conversation so far, for your own use later. Cover what I asked for "
            "and why, what you did and found, what was decided, the exact names, numbers, file paths and links that matter, "
            "and anything still unfinished. Plain text, under 300 words. Do not call a tool.")
-    body = json.dumps({"model": loaded_model(), "messages": [{"role": "system", "content": SYSTEM}] + msgs + [{"role": "user", "content": ask}],
+    body = json.dumps({"model": loaded_model(), "messages": [{"role": "system", "content": SYSTEM}] + mend(msgs) + [{"role": "user", "content": ask}],
                        "tools": TOOLS, "max_tokens": min(700, reply_room()), "temperature": 0.3,
                        "chat_template_kwargs": {"enable_thinking": False}}).encode()
     try:
@@ -1220,7 +1237,7 @@ def stream(messages, label="Reading"):
     model = loaded_model()
     if not model:
         print(f"{DIM}the model server isn't running. Relaunch bxzex-ai{R}"); return "", []
-    body = json.dumps({"model": model, "messages": [{"role": "system", "content": SYSTEM}] + messages,
+    body = json.dumps({"model": model, "messages": [{"role": "system", "content": SYSTEM}] + mend(messages),
                        "tools": TOOLS, "max_tokens": reply_room(), "temperature": 0.7, "stream": True,
                        "stream_options": {"include_usage": True},
                        "chat_template_kwargs": {"enable_thinking": not fast}}).encode()
@@ -1331,7 +1348,7 @@ def run_turn(history):
                 history.append({"role": "assistant", "content": text, "tool_calls": calls})
                 for i, call in enumerate(calls):
                     call["id"] = call["id"] or f"call_{len(history)}_{i}"
-                    history.append({"role": "tool", "tool_call_id": call["id"], "content": run_tool(call)})
+                    history.append({"role": "tool", "tool_call_id": call["id"], "content": run_tool(call) if whole(call) else CUT_OFF})
                 label = "Reading results"
             else:
                 history.append({"role": "assistant", "content": text})
