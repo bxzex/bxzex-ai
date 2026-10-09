@@ -48,7 +48,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -439,6 +439,38 @@ def fetch_page(url):
     if not re.match(r"https?://", url): url = "https://" + url
     return clip(page_text(http_get(url)), PAGE_CHARS)
 
+def read_choice(spots):
+    """Read one keypress, or a mouse click on one of the buttons on the current line.
+    spots maps a key to the (first, last) columns of its button."""
+    if not sys.stdin.isatty(): return ""
+    fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        RAW.write("\033[6n"); RAW.flush()                         # where the buttons are: the terminal answers ESC[row;colR
+        row, buf = 0, ""
+        while select.select([fd], [], [], 0.3)[0]:
+            buf += os.read(fd, 32).decode("utf-8", "ignore")
+            m = re.search(r"\x1b\[(\d+);\d+R", buf)
+            if m: row = int(m.group(1)); buf = buf[:m.start()] + buf[m.end():]; break
+        RAW.write("\033[?1000h\033[?1006h"); RAW.flush()           # clicks arrive as ESC[<button;col;rowM
+        while True:
+            if not buf: buf = os.read(fd, 64).decode("utf-8", "ignore")
+            if buf[0] in ("\x03", "\x04"): raise KeyboardInterrupt
+            m = re.match(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])", buf)
+            if m:
+                buf = buf[m.end():]
+                b, x, y, press = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) == "M"
+                if press and b == 0 and (not row or y == row):
+                    for key, (a, z) in spots.items():
+                        if a <= x <= z: return key
+                continue
+            if buf[0] == "\x1b":                                  # another key's escape sequence: ignore it
+                m = re.match(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b", buf); buf = buf[m.end():]; continue
+            return buf[0].lower()
+    finally:
+        RAW.write("\033[?1006l\033[?1000l"); RAW.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
 def read_key():
     """Read one keypress. Arrow keys and other escape sequences come back as a single token
     instead of echoing their raw codes. Letters come back lowercased."""
@@ -474,10 +506,14 @@ def confirm(what, detail, always_ask=False):
     sys.stdout.write("\033[?25h")
     print(f"{GOLD}?{R} {BOLD}Allow: {what}{R}")
     for line in detail.splitlines()[:12]: print(f"  {DIM}│ {line[:W()-6]}{R}")
-    choices = "y yes · n no  (this kind always asks)" if always_ask else "y yes · n no · a always this session"
-    sys.stdout.write(f"  {GOLD}❯{R} {choices}  "); sys.stdout.flush()
+    buttons = [("y", " y  yes "), ("n", " n  no ")] + ([] if always_ask else [("a", " a  always allow ")])
+    line, col, spots = f"  {GOLD}❯{R} ", 5, {}
+    for key, label in buttons:
+        line += f"\033[7m{label}{R}  "; spots[key] = (col, col + len(label) - 1); col += len(label) + 2
+    if always_ask: line += f"{DIM}this kind always asks{R}  "
+    sys.stdout.write(line + f"{DIM}click or press a key{R}  "); sys.stdout.flush()
     try:
-        a = read_key()
+        a = read_choice(spots)
     except (EOFError, KeyboardInterrupt):
         a = "n"
     finally:
