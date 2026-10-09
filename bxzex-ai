@@ -48,7 +48,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -295,7 +295,7 @@ def banner():
         sys.stdout.write("  " + row + "\n"); sys.stdout.flush(); time.sleep(0.02)
     site = link("https://bxzex.com", "https://bxzex.com")
     insta = link("https://instagram.com/bxzex", "instagram.com/bxzex")
-    print(f"\n  {BOLD}BXZEX AI{R} {DIM}· uncensored · local · private{R}")
+    print(f"\n  {BOLD}BXZEX AI{R} {DIM}· uncensored · {'cloud GPU' if REMOTE else 'local'} · private{R}")
     print(f"  {GOLD}{site}{R} {DIM}· {insta} · © 2026 bxzex · v{VERSION}{R}")
     print(f"  {DIM}{os.getcwd().replace(HOME, '~')}{R}")
     print(f"\n  {DIM}/help for commands · drop an image to show it · keep typing while it works{R}")
@@ -376,6 +376,8 @@ def graphics():
 
 def choose_device(arg=""):
     """/device shows where the model runs; /device cpu or /device gpu switches and reloads it."""
+    if REMOTE:
+        print(f"{GOLD}●{R} {BOLD}Running on the cloud GPU{R} {DIM}· set in {CONFIG.replace(HOME, '~')} (\"remote\"){R}"); return
     now = "cpu" if os.environ.get("BXZEX_DEVICE", load_config().get("device", "gpu")) == "cpu" else "gpu"
     want = {"cpu": "cpu", "processor": "cpu", "gpu": "gpu", "graphics": "gpu"}.get(arg.strip().lower())
     card = graphics()
@@ -1330,9 +1332,12 @@ def stream(messages, label="Reading"):
         try:
             resp = urllib.request.urlopen(req, timeout=1800)
         except urllib.error.HTTPError as e:          # run_turn decides what to do: make room, restart, or give up
-            wait.stop(); stream_error = f"server error {e.code}: {e.read().decode('utf-8','ignore')[:300]}"; return "", []
-        except Exception as e:
-            wait.stop(); print(f"{DIM}[error: {e}]{R}"); return "", []
+            body = e.read().decode('utf-8', 'ignore')
+            try: body = json.loads(body)["error"]["message"]          # just the message, not the whole JSON reply
+            except Exception: pass
+            wait.stop(); stream_error = f"server error {e.code}: {' '.join(str(body).split())[:200]}"; return "", []
+        except Exception as e:                       # couldn't reach it (a network blip, the card restarting): run_turn retries once
+            wait.stop(); stream_error = f"couldn't reach the model ({getattr(e, 'reason', e)})"; return "", []
 
         for raw in resp:
             line = raw.decode("utf-8","ignore").strip()
@@ -1418,7 +1423,7 @@ def run_turn(history):
                 if retried:
                     print(f"{DIM}the model failed: {stream_error} Try again, or quit and relaunch.{R}"); return
                 retried = True                   # usually the graphics memory got into a bad state: a fresh start clears it
-                print(f"{DIM}the model hit an error ({stream_error.rstrip('.')}), restarting it{R}")
+                print(f"{DIM}the model hit an error ({stream_error.rstrip('.')}), {'trying again' if REMOTE else 'restarting it'}{R}")
                 stop_server()
                 if not ensure_server(): return
                 continue
@@ -1668,7 +1673,7 @@ def open_chat(pick=None):
         mark = f"{GOLD}❯{R}" if m["role"] == "user" else f"{GOLD}●{R}"
         text = " ".join(m["content"].split())
         print(f"{mark} {DIM}{text[:W() * 2 - 8]}{'…' if len(text) > W() * 2 - 8 else ''}{R}")
-    print(f"{DIM}it has to re-read the conversation, so the next reply starts slower{R}")
+    if not REMOTE: print(f"{DIM}it has to re-read the conversation, so the next reply starts slower{R}")
 
 # ---- the input box, pinned to the bottom of the window ----
 import atexit, codecs, signal
@@ -1841,7 +1846,7 @@ def ask(prefill=""):
 def show_help():
     print(header("Commands"))
     for n, d in COMMANDS: print(f"  {GOLD}{n:<8}{R} {DIM}{d}{R}")
-    print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note.{R}")
+    print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note. Esc stops a reply.{R}")
 
 # ---- installer helpers ----
 if sys.argv[1:2] in (["--version"], ["-v"]):
