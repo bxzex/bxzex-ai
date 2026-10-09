@@ -48,7 +48,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1234,6 +1234,8 @@ def summarize(old):
     except Exception:
         return ""
 
+SUMMARY_HEAD = "Summary of our conversation so far"
+
 def fold(history, force=False):
     """Make room when the conversation is close to what the model can hold. Changes history in place.
     Returns True if anything was folded."""
@@ -1247,12 +1249,13 @@ def fold(history, force=False):
         if chars_in(history[i:]) * tok_per_char > max(600, size // 10): break
         cut = i
     changed = False
-    if cut >= 2:
+    folded = history and str(history[0].get("content", "")).startswith(SUMMARY_HEAD)
+    if cut >= 2 and not (folded and cut <= 2):        # only the earlier summary is older: nothing new to fold, just trim below
         sys.stdout.write("\033[?25l")
         wait = Waiting("Tidying up a long conversation")
         try: summary = summarize(history[:cut])
         finally: wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
-        note = "Summary of our conversation so far (the older messages were folded into this to save room):\n" + \
+        note = SUMMARY_HEAD + " (the older messages were folded into this to save room):\n" + \
                (summary or "(it could not be summarized, so the earliest part was dropped)")
         history[:] = [{"role": "user", "content": note}, {"role": "assistant", "content": "Understood. I have that."}] + history[cut:]
         print(f"{DIM}this chat got long, so the older part was folded into a summary to make room{R}\n")
@@ -1261,6 +1264,11 @@ def fold(history, force=False):
         if estimate(history) <= budget: break
         if m["role"] == "tool" and len(m["content"]) > 600:
             m["content"] = m["content"][:500] + "\n[...shortened to save room]"; changed = True
+        for c in m.get("tool_calls") or []:            # a whole file it wrote earlier: keep the call, drop the bulk
+            if len(c["function"].get("arguments") or "") > 1500 and whole(c):
+                args = json.loads(c["function"]["arguments"])
+                args = {k: (v[:300] + "\n[...shortened to save room]" if isinstance(v, str) and len(v) > 400 else v) for k, v in args.items()} if isinstance(args, dict) else args
+                c["function"]["arguments"] = json.dumps(args); changed = True
     return changed
 
 turn_tok = 0   # tokens generated in the current turn, for the summary line
