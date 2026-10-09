@@ -48,7 +48,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.3.4"
+VERSION = "1.3.5"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -400,7 +400,7 @@ import base64, datetime, html, shlex, tempfile, threading, urllib.parse
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"}
 PAGE_CHARS = 6000   # the server reads ~20 tok/s, so every 1k chars of tool output costs ~12s
 OUT_CHARS  = 4000
-MAX_STEPS  = 40 if REMOTE else 12      # tool calls per message; a cloud card is fast enough for long jobs
+MAX_STEPS  = 10**6 if REMOTE else 12   # tool calls per message: no limit on a cloud card (ctrl-c stops it), 12 on a laptop
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".bmp", ".tiff")
 allow_all = False
 
