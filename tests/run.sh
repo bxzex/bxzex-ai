@@ -44,5 +44,6 @@ run footer "$APP" "$(home)"
 run ui "$APP" "$(home)" "$PWD/connectors.txt"
 newer; run update_reload "$T/bin/bxzex-ai" "$(home)" "$T/upd"
 newer; run loaders "$T/bin/bxzex-ai" "$(home)" "$T/upd"
+newer; run modes "$T/bin/bxzex-ai" "$(home)" "$T/upd"
 
 [ $fail = 0 ] && echo "all passed" || { echo "some tests failed"; exit 1; }

@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.11.1"
+VERSION = "1.12.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -3191,6 +3191,7 @@ class TypeAhead:
             if resized: resized = False; box.draw(self.buf, len(self.buf))
             if not ready: continue
             raw = finish_escapes(self.fd, os.read(self.fd, 64).decode("utf-8", "ignore"))
+            if "\x1b[Z" in raw: cycle_mode(busy=True); raw = raw.replace("\x1b[Z", "")        # shift-tab works while it works too
             if "\x1b" in ESC_KEY.sub("", raw):                  # Esc on its own (not an arrow or other key): stop, the same as ctrl-c
                 os.kill(os.getpid(), signal.SIGINT); continue
             got = ESC_KEY.sub("", raw).replace("\x1b", "")       # arrows and other keys, not text
@@ -3406,7 +3407,7 @@ class Waiting:
     def run(self):
         while not self.stop_ev.wait(0.07):
             el = time.time() - self.t0; w = W()
-            tok = f" · ↓ {self.tok} tok" if self.tok else ""
+            tok = f" · ↓ {self.tok / 1000:.1f}k tokens" if self.tok >= 1000 else f" · ↓ {self.tok} tokens" if self.tok else ""
             info = f"({fmt(el)}{tok} · esc to stop)"
             used = 2 + len(self.label) + 2 + len(info)
             ride = flame(el) + " " if w > used + 16 else ""
@@ -3889,6 +3890,8 @@ def get_update(quiet, wait):
         if not newer(latest[0], VERSION):
             say(f"you have the latest version, v{VERSION}"); return False
         if wait: wait.label = f"Downloading v{latest[0]}"
+        if quiet:                                        # found in the background: say so in the footer while it downloads
+            update_note = f"✦ new update released: v{latest[0]} · getting it…"
         here = os.path.dirname(os.path.realpath(__file__))
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(8) as pool:                    # every file at once: one by one took half a minute
@@ -3898,6 +3901,11 @@ def get_update(quiet, wait):
                 say(f"v{latest[0]} is on its way but hasn't reached the download servers yet. Try /update again in a few minutes"); return False
         if not server.startswith("#!"):
             say("part of the download came back broken, nothing was changed. Try /update again"); return False
+        try:                                             # one line per version on what changed, shown after the switch
+            news = fetch("WHATSNEW")
+            if re.match(r"\d+\.\d+", news):
+                with open(f"{APP_HOME}/whatsnew.txt", "w") as f: f.write(news)
+        except Exception: pass
         if apps.startswith("# Apps"):
             with open(f"{APP_HOME}/connectors.txt", "w") as f: f.write(apps)
         for name, text in (("bxzex-server", server), ("bxzex-ai", app)):
@@ -3906,7 +3914,10 @@ def get_update(quiet, wait):
             os.chmod(tmp, 0o755); os.replace(tmp, os.path.join(here, name))
         global reload_ready
         restart_phone()
-        update_note = f"updated to v{latest[0]} · reloading"; reload_ready = True
+        update_note = f"✦ new update released: v{latest[0]} · switching over when you're at the prompt"; reload_ready = True
+        if quiet and sys.stdout.isatty():
+            RAW.write("\a"); RAW.flush()                # a soft ping
+            if away(): notify(AI_NAME, f"Update v{latest[0]} is out. It switches over when you're back at the prompt.")
         if len(latest) > 1 and latest[1].isdigit() and int(latest[1]) > int(load_config().get("parts", 0) or 0):
             update_note += " · new features to download: /update full"
         if wait: wait.stop()
@@ -4096,17 +4107,38 @@ def find_past(q, start):
         if q.lower() in past[j].lower(): return j
     return -1
 
+def mode_badge():
+    """The mode, in color at the start of the status line, the way you switch it next to it."""
+    if PLAN: return f"{R}{TEAL}⏸ plan mode on{R}{DIM} (shift+tab to cycle)"
+    if allow_all: return f"{R}{GOLD}▸▸ always allow on{R}{DIM} (shift+tab to cycle)"
+    return ""
+
+def running_bits():
+    jobs = sum(1 for p, _, _ in JOBS.values() if p.poll() is None)
+    return f" · {jobs} job{'s' if jobs > 1 else ''} running" if jobs else ""
+
+def fit_ansi(text, width):
+    """Cut to a width on screen; color codes take no room and are never cut in half."""
+    out, used = [], 0
+    for part in re.split(r"(\x1b\[[0-9;]*m)", text):
+        if part.startswith("\x1b["): out.append(part); continue
+        if used >= width: continue
+        out.append(part[:width - used]); used += len(part[:width - used])
+    return "".join(out)
+
 def status_text(buf, working=False):
     if FIND_NOTE: return FIND_NOTE
     if buf.startswith("/"):
         hits = [f"{n} {d}" for n, d in COMMANDS + [(c, "your command") for c in custom_commands()] if n.startswith(buf.split()[0])]
         if hits: return "  " + "   ".join(hits)
-    if working: return "  working · type and press Enter to add a note · esc to stop"
-    if update_note: return f"  {update_note}"
-    if PLAN: return "  plan mode · it only looks and plans, nothing is changed · shift-tab or /plan to leave"
-    lite = (" · lite" if LITE else "") + (" · always allow on" if allow_all else "")
-    branch = git_branch()
-    return f"  bxzex-ai v{VERSION}{lite} · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')}{' · ' + branch if branch else ''} · /help"
+    if update_note: return f"  {R}{GOLD}{update_note}{R}{DIM}"
+    badge = mode_badge(); lead = "  " + (badge + f"{DIM} · " if badge else "")
+    if working: return lead + "esc to stop · type and press Enter to add a note" + running_bits()
+
+    branch = git_branch(); where = os.getcwd().replace(HOME, "~") + (" · " + branch if branch else "")
+    if badge: return lead + where + running_bits() + " · /help"
+    return (f"  bxzex-ai v{VERSION}{' · lite' if LITE else ''} · {THEME} · fast {'on' if fast else 'off'} · {where}"
+            + running_bits() + " · shift+tab for modes · /help")
 
 _branch = ("", 0.0, "")
 def git_branch():
@@ -4160,7 +4192,7 @@ class Box:
     def frame(self, text, pos, working):
         w = W(); top = self.h - self.ROWS + 1; room = max(4, w - 3)
         start = max(0, pos - room)
-        st = status_text(text, working)[:w]
+        st = fit_ansi(status_text(text, working), w)
         rule = f"{DIM}{'─' * w}{R}"
         s = (f"\033[{top};1H\033[J{rule}\033[{top + 1};1H{GOLD}❯{R} {text[start:start + room].replace(chr(10), f'{DIM}↵{R}')}"
              f"\033[{top + 2};1H{rule}\033[{top + 3};1H{DIM}{st}{R}")
@@ -4281,7 +4313,7 @@ def ask(prefill=""):
                     elif key in ("\x1b[H", "\x1bOH", "\x1b[1~"): pos = 0
                     elif key in ("\x1b[F", "\x1bOF", "\x1b[4~"): pos = len(buf)
                     elif key == "\x1b[3~": del buf[pos:pos + 1]
-                    elif key == "\x1b[Z": toggle_plan(quiet=True)          # shift-tab: plan mode on or off
+                    elif key == "\x1b[Z": cycle_mode()                     # shift-tab: asks first, plan mode, always allow
                     elif key in ("\x1b[A", "\x1bOA") and at > 0:
                         if at == len(past): draft = "".join(buf)
                         at -= 1; buf = list(past[at]); pos = len(buf)
@@ -4336,13 +4368,22 @@ def ask(prefill=""):
         print(f"{GOLD}❯{R} {BOLD}" + text.replace("\n", f"{R}\n  {BOLD}") + R)
     return text
 
-def toggle_plan(quiet=False):
+def toggle_plan(quiet=False, busy=False):
     global PLAN
     PLAN = not PLAN
     refresh_system()
-    history.append({"role": "user", "content": "(Plan mode is on: only look around and plan, change nothing.)" if PLAN
-                    else "(Plan mode is off: you can go ahead and make the changes now.)"})
+    note = ("(Plan mode is on: only look around and plan, change nothing.)" if PLAN
+            else "(Plan mode is off: you can go ahead and make the changes now.)")
+    if busy: typed.notes.append(note)            # mid-reply it waits for the current step, like any note
+    else: history.append({"role": "user", "content": note})
     if not quiet: print(f"{DIM}plan mode {'on · it looks around and writes a plan, nothing is changed' if PLAN else 'off · it can make changes again'}{R}")
+
+def cycle_mode(busy=False):
+    """shift-tab: asks first → plan mode → always allow → asks first."""
+    global allow_all
+    if PLAN: toggle_plan(quiet=True, busy=busy); allow_all = True
+    elif allow_all: allow_all = False
+    else: toggle_plan(quiet=True, busy=busy)
 
 def show_context():
     size = context_size(); used = estimate(history)
@@ -4448,6 +4489,10 @@ if not up: sys.exit(1)
 if RELOAD:
     fast, show_think, allow_all, PLAN = bool(RELOAD.get("fast", fast)), bool(RELOAD.get("think")), bool(RELOAD.get("allow")), bool(RELOAD.get("plan"))
     print(f"{GOLD}●{R} {BOLD}Updated to v{VERSION}{R} {DIM}· carrying on where you were{R}")
+    try:
+        news = next((l.split(":", 1)[1].strip() for l in open(f"{APP_HOME}/whatsnew.txt") if l.split(":", 1)[0].strip() == VERSION), "")
+        if news: print(f"  {DIM}new: {news}{R}")
+    except (OSError, IndexError): pass
 else:
     banner()
 refresh_system()
@@ -4476,8 +4521,13 @@ elif not RELOAD and load_config().get("continue", True): start_menu()   # contin
 threading.Thread(target=autosave, daemon=True).start()
 atexit.register(save_chat)
 atexit.register(stop_jobs)      # background jobs end with the app
-if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version in the background each time it starts
-    threading.Thread(target=check_update, daemon=True).start()
+if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version when it starts, then every 20 minutes
+    def _updates():
+        while True:
+            check_update()
+            if reload_ready: return
+            time.sleep(int(os.environ.get("BXZEX_UPDATE_EVERY") or 1200))
+    threading.Thread(target=_updates, daemon=True).start()
 def reload_app(typed_text=""):
     """Start the new version in this same window, on the same chat, with the same settings. Nothing is lost."""
     save_chat(); box.unpin()
