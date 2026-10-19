@@ -1,0 +1,5 @@
+1.12.0: the footer shows your mode in color (shift+tab cycles asks first, plan mode, always allow), esc to stop and running jobs; a ping and a footer note when an update comes out, checked every 20 minutes; this line after each update
+1.11.1: the input box at the bottom never disappears after a question with choices or when typing your own answer
+1.11.0: a password for using it from your phone (/password)
+1.10.0: text it from your phone through iMessage (/imessage)
+1.9.0: use it from your phone through Telegram (/phone), /cost, /export, Safari and Messages on a Mac
