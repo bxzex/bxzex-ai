@@ -121,7 +121,7 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/reset` | Start a fresh conversation. `/clear` does the same. |
 | `exit` | Quit. |
 
-When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. The whole thing redraws itself when you resize the window.
+When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go, and Tab finishes the name. Pasted text keeps its line breaks, and the up arrow brings back what you typed, even from earlier sessions. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. The whole thing redraws itself when you resize the window.
 
 To show it an image, drag the file into the terminal window and add your question.
 

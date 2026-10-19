@@ -42,6 +42,11 @@ def log_error(kind, err, tb):
 def _thread_error(a):                     # a loader or a background job failing must never spill over the screen
     if a.exc_type is not SystemExit: log_error(a.exc_type, a.exc_value, a.exc_traceback)
 threading.excepthook = _thread_error
+def _main_error(kind, err, tb):
+    if issubclass(kind, KeyboardInterrupt): sys.stderr.write("\n"); return
+    log_error(kind, err, tb)
+    sys.stderr.write(f"\nbxzex-ai stopped: {kind.__name__}: {str(err)[:160]}\ndetails in {ERROR_LOG.replace(HOME, '~')}\n")
+sys.excepthook = _main_error
 
 class _RemoteKey(urllib.request.HTTPRedirectHandler):
     """Sends the key with requests to the remote model only, never to web pages the tools open.
@@ -61,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -317,13 +322,22 @@ def header(label, ramp=None):
     return f"{GOLD}●{R} {BOLD}{label}{R}"
 
 # ---- server ----
+MODEL_ID = ""; last_ok = 0.0   # the model's name and when it last answered, so a busy cloud card isn't asked again every step
+
 def loaded_model():
+    global MODEL_ID
     try:
         with urllib.request.urlopen(f"{HOST}/v1/models", timeout=600 if REMOTE else 3) as r:
             d = json.load(r)["data"]
-        return d[0]["id"] if d else None
+        MODEL_ID = d[0]["id"] if d else ""
+        return MODEL_ID or None
     except Exception:
+        MODEL_ID = ""
         return None
+
+def awake():
+    """True when the cloud card answered in the last minute: it can't have gone to sleep, so no need to check."""
+    return bool(REMOTE and MODEL_ID and time.time() - last_ok < 60)
 
 server_proc = None
 
@@ -335,7 +349,7 @@ def ensure_server(block=True):
     try:
         if os.path.exists(PAINTING) and not painting(): os.remove(PAINTING)   # a leftover lock from a crash
     except OSError: pass
-    if REMOTE: return wake_remote(block)
+    if REMOTE: return True if awake() else wake_remote(block)
     if loaded_model(): return True
     if os.path.exists(f"{APP_HOME}/painting.lock") and painting():     # another window is making an image
         wait = Waiting("Waiting for an image to finish")
@@ -465,7 +479,11 @@ def keys_mode():
     while the app is busy (starting up, waking the cloud card) is printed raw, like ^[[A for an arrow or ^H for delete."""
     global COOKED
     if not sys.stdin.isatty() or COOKED: return
-    try: COOKED = termios.tcgetattr(sys.stdin.fileno()); tty.setcbreak(sys.stdin.fileno(), termios.TCSANOW)
+    fd = sys.stdin.fileno()
+    try:
+        COOKED = termios.tcgetattr(fd); tty.setcbreak(fd, termios.TCSANOW)
+        mode = termios.tcgetattr(fd); mode[0] &= ~termios.ICRNL           # Enter stays \r, so a pasted \r\n is one line break, not two
+        termios.tcsetattr(fd, termios.TCSANOW, mode)
     except termios.error: COOKED = None; return
     atexit.register(lambda: termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, COOKED))
 
@@ -556,11 +574,12 @@ def confirm(what, detail, always_ask=False, diff=False):
     typed.stop()                      # hand the keyboard back for the question
     sys.stdout.write("\033[?25h")
     print(f"{GOLD}?{R} {BOLD}Allow: {what}{R}")
-    shown = detail.splitlines()
-    room = 40 if diff else 12
+    width = max(20, W() - 6)
+    shown = [part[i:i + width] for part in detail.splitlines() or [""] for i in range(0, max(1, len(part)), width)]
+    room = 40 if diff else 60
     for line in shown[:room]:
         tone = c(114) if diff and line.startswith("+") else c(174) if diff and line.startswith("-") else DIM
-        print(f"  {DIM}│{R} {tone}{line[:W()-6]}{R}")
+        print(f"  {DIM}│{R} {tone}{line}{R}")
     if len(shown) > room: print(f"  {DIM}│ … {len(shown) - room} more lines{R}")
     buttons = [("y", " y  yes "), ("n", " n  no ")] + ([] if always_ask else [("a", " a  always allow ")])
     line, col, spots = f"  {GOLD}❯{R} ", 5, {}
@@ -616,7 +635,12 @@ def run_shell(command):
     return clip(f"exit code {p.returncode}\n{out}{err}".strip(), OUT_CHARS)
 
 def read_file(path, start="0"):
-    with open(os.path.expanduser(path), "r", errors="replace") as f: text = f.read()
+    path = os.path.expanduser(path)
+    size = os.path.getsize(path)
+    if size > 20_000_000: return f"error: {path} is {size // 1_000_000}MB, too big to read whole. Use run_shell with head, tail or grep on it."
+    with open(path, "rb") as f: head = f.read(8000)
+    if b"\0" in head: return f"error: {path} is a binary file ({size:,} bytes), not text. Use run_shell with file or a tool made for that type."
+    with open(path, "r", errors="replace") as f: text = f.read()
     try: at = max(0, int(start))
     except ValueError: at = 0
     part = text[at:at + PAGE_CHARS]
@@ -1470,7 +1494,7 @@ def fold(history, force=False, everything=False):
         note = SUMMARY_HEAD + " (the older messages were folded into this to save room):\n" + \
                (summary or "(it could not be summarized, so the earliest part was dropped)")
         history[:] = [{"role": "user", "content": note}, {"role": "assistant", "content": "Understood. I have that."}] + history[cut:]
-        print(f"{DIM}this chat got long, so the older part was folded into a summary to make room{R}\n")
+        print(f"{DIM}{'the older part of this chat was folded into a summary' if everything else 'this chat got long, so the older part was folded into a summary to make room'}{R}\n")
         changed = True
     for m in history[:-6]:                            # still too big: shorten the oldest results, never the last few steps it is working from
         if estimate(history) <= budget: break
@@ -1499,7 +1523,7 @@ def lines(resp):
 
 def stream(messages, label="Reading"):
     """One model call. Returns (answer text, tool calls)."""
-    model = loaded_model()
+    model = MODEL_ID if awake() else loaded_model()
     if not model:
         print(f"{DIM}the model server isn't running. Relaunch bxzex-ai{R}"); return "", []
     body = json.dumps({"model": model, "messages": [{"role": "system", "content": SYSTEM}] + mend(messages),
@@ -1591,6 +1615,9 @@ def stream(messages, label="Reading"):
         elif phase!="answer": sys.stdout.write(f"{R}\r\033[K")
         sys.stdout.write("\033[?25h")  # restore cursor
         sys.stdout.flush()
+    global last_ok
+    if not stream_error: last_ok = time.time()
+    else: last_ok = 0
     return "".join(answer).strip(), [calls[i] for i in sorted(calls)]
 
 def run_turn(history):
@@ -1834,7 +1861,7 @@ def list_chats():
     try: files = sorted((f for f in os.listdir(CHATS) if f.endswith(".json")), reverse=True)
     except OSError: return []
     out = []
-    for f in files[:20]:
+    for f in files[:50]:
         try:
             with open(os.path.join(CHATS, f)) as fh: d = json.load(fh)
         except Exception:
@@ -1847,14 +1874,17 @@ def menu(rows, at=0, hint="↑↓ to move · enter to pick · esc to cancel"):
     rows are (label, detail). Numbers jump straight to a row."""
     if not (sys.stdin.isatty() and RAW.isatty()) or not rows: return None
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
-    shown = len(rows) + 1
+    fits = max(3, shutil.get_terminal_size((90, 30)).lines - Box.ROWS - 4)     # rows that fit above the input box
+    shown = min(len(rows), fits) + 1
     def draw(first=False):
         w = W(); out = "" if first else f"\033[{shown}A"
-        for i, (label, detail) in enumerate(rows):
+        top = min(max(0, at - (shown - 1) // 2), len(rows) - (shown - 1))
+        for i, (label, detail) in list(enumerate(rows))[top:top + shown - 1]:
             room = max(0, w - len(label) - 6)
             tail = f"  {DIM}{detail[:room]}{R}" if detail and room > 8 else ""
             out += f"\r\033[K  {GOLD}❯ {BOLD}{label}{R}{tail}\n" if i == at else f"\r\033[K    {label}{tail}\n"
-        RAW.write(out + f"\r\033[K  {DIM}{hint[:w - 2]}{R}\n"); RAW.flush()
+        more = f" · {at + 1} of {len(rows)}" if len(rows) > shown - 1 else ""
+        RAW.write(out + f"\r\033[K  {DIM}{(hint + more)[:w - 2]}{R}\n"); RAW.flush()
     try:
         tty.setcbreak(fd, termios.TCSANOW); RAW.write("\033[?25l"); draw(True)
         while True:
@@ -1868,6 +1898,8 @@ def menu(rows, at=0, hint="↑↓ to move · enter to pick · esc to cancel"):
                 elif key in ("\x1b", "\x03", "\x04", "q"): return None
                 elif key.isdigit() and 1 <= int(key) <= len(rows): at = int(key) - 1; draw(); return at
             draw()
+    except KeyboardInterrupt:
+        return None
     finally:
         RAW.write(f"\033[{shown}A\r\033[J\033[?25h"); RAW.flush()     # the list goes away; what was picked is printed after
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
@@ -1930,7 +1962,11 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
             ("/update", "get the newest version · /update full adds new downloads"), ("/reset", "start a new conversation · /clear"), ("/help", "this list"), ("exit", "quit")]
-past = []   # earlier inputs, for the up arrow
+PAST_FILE = f"{APP_HOME}/input_history"
+try:
+    with open(PAST_FILE, errors="replace") as _f: past = [json.loads(l) for l in _f.read().splitlines()[-300:] if l.startswith('"')]
+except (OSError, ValueError):
+    past = []   # earlier inputs, for the up arrow, kept across sessions
 LITE = load_config().get("size") == "lite"     # the lighter build of the model, for computers with less memory
 
 def status_text(buf, working=False):
@@ -1973,7 +2009,7 @@ class Box:
         start = max(0, pos - room)
         st = status_text(text, working)[:w]
         rule = f"{DIM}{'─' * w}{R}"
-        s = (f"\033[{top};1H\033[J{rule}\033[{top + 1};1H{GOLD}❯{R} {text[start:start + room]}"
+        s = (f"\033[{top};1H\033[J{rule}\033[{top + 1};1H{GOLD}❯{R} {text[start:start + room].replace(chr(10), f'{DIM}↵{R}')}"
              f"\033[{top + 2};1H{rule}\033[{top + 3};1H{DIM}{st}{R}")
         return s, 3 + pos - start
     def draw(self, text="", pos=0, working=True):
@@ -2069,7 +2105,9 @@ def ask(prefill=""):
                     continue
                 i += 1
                 if ch in "\r\n":
-                    if pasting: buf.insert(pos, " "); pos += 1
+                    if pasting:
+                        if ch == "\r" and data[i:i + 1] == "\n": i += 1    # one break for \r\n
+                        buf.insert(pos, "\n"); pos += 1
                     else: done = True; break
                 elif ch in "\x7f\b":
                     if pos: del buf[pos - 1]; pos -= 1
@@ -2084,7 +2122,13 @@ def ask(prefill=""):
                     while j and buf[j - 1] == " ": j -= 1
                     while j and buf[j - 1] != " ": j -= 1
                     del buf[j:pos]; pos = j
-                elif ch == "\t": buf.insert(pos, " "); pos += 1
+                elif ch == "\t":
+                    word = "".join(buf)
+                    hits = [n for n, _ in COMMANDS if n.startswith("/") and n.startswith(word)] if word.startswith("/") and " " not in word else []
+                    if hits:
+                        common = os.path.commonprefix(hits)
+                        buf = list(common + (" " if len(hits) == 1 else "")); pos = len(buf)
+                    else: buf.insert(pos, "\t" if pasting else " "); pos += 1
                 elif ch >= " ": buf.insert(pos, ch); pos += 1
             if done: break
             box.focus("".join(buf), pos)
@@ -2093,8 +2137,12 @@ def ask(prefill=""):
     leave()
     text = "".join(buf).strip()
     if text:
-        if not past or past[-1] != text: past.append(text)
-        print(f"{GOLD}❯{R} {BOLD}{text}{R}")
+        if (not past or past[-1] != text) and text not in ("exit", "quit"):
+            past.append(text)
+            try:
+                with open(PAST_FILE, "a") as f: f.write(json.dumps(text) + "\n")
+            except OSError: pass
+        print(f"{GOLD}❯{R} {BOLD}" + text.replace("\n", f"{R}\n  {BOLD}") + R)
     return text
 
 def show_help():
@@ -2208,65 +2256,71 @@ while True:
     except KeyboardInterrupt:                        # one ctrl-c on an empty line could be a slip: quit on the second
         if time.time() - last_break < 2: break
         last_break = time.time(); print(f"{DIM}press ctrl-c again to quit, or type exit{R}"); continue
-    if not user: continue
-    if user in ("exit","quit"): break
-    if user in ("/help", "/", "/?"): show_help(); continue
-    if user == "/update": check_update(quiet=False); continue
-    if user == "/update full": full_update(); continue
-    if user.startswith("/color"): choose_color(user[6:]); continue
-    if user.startswith("/device"): choose_device(user[7:]); continue
-    if user=="/fast":
-        fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); continue
-    if user=="/think":
-        show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); continue
-    if user=="/undo": undo(); continue
-    if user=="/allow":
-        allow_all = not allow_all
-        print(f"{DIM}always allow {'on · commands and file changes run without asking, risky ones still ask' if allow_all else 'off · it asks first'}{R}"); continue
-    if user=="/compact":
-        if len(history) < 3: print(f"{DIM}nothing to fold yet{R}"); continue
-        if ensure_server():
-            try:
-                if not fold(history, force=True, everything=True): print(f"{DIM}nothing to fold yet{R}")
-            except KeyboardInterrupt: print(f"{DIM}stopped{R}")
-            save_chat()
-        continue
-    if user=="/init":
-        turn("Look around this folder with list_files and read the main files (README, package or build files, entry points). "
-             "Then write BXZEX.md here with write_file: what this project is, how to run, build and test it, the layout, and the "
-             "conventions to follow. Keep it under 60 lines and only state what you saw. If BXZEX.md already exists, improve it with edit_file.")
-        refresh_system(); continue
-    if user.startswith("!") and len(user) > 1:
-        try: own_command(user[1:].strip())
-        except Exception as e: print(f"{DIM}couldn't run it: {e}{R}")
-        save_chat(); continue
-    if user in ("/reset", "/clear"):
-        history=[]; chat_file=None; allow_all=False; UNDO.clear(); refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); continue
-    if user=="/history": open_chat(); continue
-    if user=="/resume": open_chat(0); continue
-    if user.startswith("/memory"): show_memory(user[7:]); continue
-    if user=="/skills": show_skills(); continue
-    if user.startswith("/btw"):
-        if user[4:].strip():
-            history.append({"role": "user", "content": "By the way: " + user[4:].strip()})
-            print(f"{DIM}noted, no reply needed{R}")
-        else:
-            print(f"{DIM}/btw <note> adds a note without a reply · or just type while it's working and press Enter{R}")
-        continue
-    if user in ("/v", "/voice"):
-        spoken = listen(); continue
-    if user.startswith("/image"):
-        want = user[6:].strip()
-        if not want:
-            print(f"{DIM}/image <description> makes a picture · to show it one, drag the file into this window{R}"); continue
-        shape, quality = "square", "fast"
-        while want.split(" ", 1)[0].lower() in ("hd", "fast", "square", "portrait", "landscape") and " " in want:
-            word, want = want.split(" ", 1)
-            if word.lower() in ("hd", "fast"): quality = word.lower()
-            else: shape = word.lower()
-        try: result = generate_image(want, shape, quality, wait_for_chat=False)   # the chat model reloads while you look
-        except KeyboardInterrupt: result = "stopped"
-        print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
-        continue
-    turn(user)
+    try:
+        if not user: continue
+        if user in ("exit","quit"): break
+        if user in ("/help", "/", "/?"): show_help(); continue
+        if user == "/update": check_update(quiet=False); continue
+        if user == "/update full": full_update(); continue
+        if user.startswith("/color"): choose_color(user[6:]); continue
+        if user.startswith("/device"): choose_device(user[7:]); continue
+        if user=="/fast":
+            fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); continue
+        if user=="/think":
+            show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); continue
+        if user=="/undo": undo(); continue
+        if user=="/allow":
+            allow_all = not allow_all
+            print(f"{DIM}always allow {'on · commands and file changes run without asking, risky ones still ask' if allow_all else 'off · it asks first'}{R}"); continue
+        if user=="/compact":
+            if len(history) < 3: print(f"{DIM}nothing to fold yet{R}"); continue
+            if ensure_server():
+                try:
+                    if not fold(history, force=True, everything=True): print(f"{DIM}nothing to fold yet{R}")
+                except KeyboardInterrupt: print(f"{DIM}stopped{R}")
+                save_chat()
+            continue
+        if user=="/init":
+            turn("Look around this folder with list_files and read the main files (README, package or build files, entry points). "
+                 "Then write BXZEX.md here with write_file: what this project is, how to run, build and test it, the layout, and the "
+                 "conventions to follow. Keep it under 60 lines and only state what you saw. If BXZEX.md already exists, improve it with edit_file.")
+            refresh_system(); continue
+        if user.startswith("!") and len(user) > 1:
+            try: own_command(user[1:].strip())
+            except Exception as e: print(f"{DIM}couldn't run it: {e}{R}")
+            save_chat(); continue
+        if user in ("/reset", "/clear"):
+            history=[]; chat_file=None; allow_all=False; UNDO.clear(); refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); continue
+        if user=="/history": open_chat(); continue
+        if user=="/resume": open_chat(0); continue
+        if user.startswith("/memory"): show_memory(user[7:]); continue
+        if user=="/skills": show_skills(); continue
+        if user.startswith("/btw"):
+            if user[4:].strip():
+                history.append({"role": "user", "content": "By the way: " + user[4:].strip()})
+                print(f"{DIM}noted, no reply needed{R}")
+            else:
+                print(f"{DIM}/btw <note> adds a note without a reply · or just type while it's working and press Enter{R}")
+            continue
+        if user in ("/v", "/voice"):
+            spoken = listen(); continue
+        if user.startswith("/image"):
+            want = user[6:].strip()
+            if not want:
+                print(f"{DIM}/image <description> makes a picture · to show it one, drag the file into this window{R}"); continue
+            shape, quality = "square", "fast"
+            while want.split(" ", 1)[0].lower() in ("hd", "fast", "square", "portrait", "landscape") and " " in want:
+                word, want = want.split(" ", 1)
+                if word.lower() in ("hd", "fast"): quality = word.lower()
+                else: shape = word.lower()
+            try: result = generate_image(want, shape, quality, wait_for_chat=False)   # the chat model reloads while you look
+            except KeyboardInterrupt: result = "stopped"
+            print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
+            continue
+        turn(user)
+    except KeyboardInterrupt:                          # ctrl-c in any command stops that command, never the app
+        print(f"\n{DIM}stopped{R}")
+    except Exception as e:
+        log_error(type(e), e, e.__traceback__)
+        print(f"{DIM}that didn't work ({e.__class__.__name__}: {str(e)[:120]}) · details in {ERROR_LOG.replace(HOME, '~')}{R}")
 # ---- end of bxzex-ai ----
