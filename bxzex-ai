@@ -48,7 +48,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -442,9 +442,19 @@ def fetch_page(url):
     if not re.match(r"https?://", url): url = "https://" + url
     return clip(page_text(http_get(url)), PAGE_CHARS)
 
+ESC_PART = re.compile(r"\x1b(\[[0-9;<?]*|O)?$")                  # an escape sequence the read cut off before its last byte
+ESC_KEY  = re.compile(r"\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[0-9;?]*[A-Za-z~]|\x1bO[A-Za-z]")
+
+def finish_escapes(fd, buf):
+    """A read can end halfway through a key's or a click's escape sequence (a trackpad scroll sends dozens at once).
+    Wait a moment for the rest, so the cut-off half isn't taken for Esc on its own."""
+    while ESC_PART.search(buf) and select.select([fd], [], [], 0.05)[0]:
+        buf += os.read(fd, 64).decode("utf-8", "ignore")
+    return buf
+
 def read_choice(spots):
     """Read one keypress, or a mouse click on one of the buttons on the current line.
-    spots maps a key to the (first, last) columns of its button."""
+    spots maps a key to the (first, last) columns of its button. Other keys, scrolls and clicks are ignored."""
     if not sys.stdin.isatty(): return ""
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
     try:
@@ -458,6 +468,7 @@ def read_choice(spots):
         RAW.write("\033[?1000h\033[?1006h"); RAW.flush()           # clicks arrive as ESC[<button;col;rowM
         while True:
             if not buf: buf = os.read(fd, 64).decode("utf-8", "ignore")
+            buf = finish_escapes(fd, buf)
             if buf[0] in ("\x03", "\x04"): raise KeyboardInterrupt
             m = re.match(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])", buf)
             if m:
@@ -467,13 +478,16 @@ def read_choice(spots):
                     for key, (a, z) in spots.items():
                         if a <= x <= z: return key
                 continue
-            if buf[0] == "\x1b":                                  # Esc on its own stops; another key's escape sequence is ignored
-                m = re.match(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]", buf)
-                if not m: raise KeyboardInterrupt
-                buf = buf[m.end():]; continue
-            return buf[0].lower()
+            if buf[0] == "\x1b":
+                m = ESC_KEY.match(buf)
+                if m: buf = buf[m.end():]; continue                # another key's escape sequence: ignored
+                if buf == "\x1b": raise KeyboardInterrupt           # Esc on its own, nothing after it: stop
+                buf = buf[1:]; continue                            # a broken sequence: drop it, never a stop
+            ch, buf = buf[0].lower(), buf[1:]
+            if ch in spots: return ch                              # stray text (the tail of a cut-off sequence) can't answer for you
     finally:
         RAW.write("\033[?1006l\033[?1000l"); RAW.flush()
+        while select.select([fd], [], [], 0.05)[0]: os.read(fd, 256)   # the click's release and late scroll events, so they don't land in the note box
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 def read_key():
@@ -1019,10 +1033,10 @@ class TypeAhead:
             ready, _, _ = select.select([self.fd], [], [], 0.1)
             if resized: resized = False; box.draw(self.buf, len(self.buf))
             if not ready: continue
-            raw = os.read(self.fd, 64).decode("utf-8", "ignore")
+            raw = finish_escapes(self.fd, os.read(self.fd, 64).decode("utf-8", "ignore"))
             if re.search(r"\x1b(?![\[O])", raw + " "):          # Esc on its own (not an arrow key): stop, the same as ctrl-c
                 os.kill(os.getpid(), signal.SIGINT); continue
-            got = re.sub(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b", "", raw)   # arrows and other keys, not text
+            got = re.sub(r"\x1b\[[0-9;<?]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b", "", raw)   # arrows and other keys, not text
             for ch in got:
                 if ch in "\r\n":
                     if self.buf.strip(): self.notes.append(self.buf.strip())
@@ -1959,9 +1973,9 @@ while True:
     except KeyboardInterrupt:
         answered = {m.get("tool_call_id") for m in history if m["role"] == "tool"}
         for m in list(history):                      # keep the work done so far; only close calls that never got a result
-            for c in m.get("tool_calls") or []:
-                if c.get("id") not in answered:
-                    history.append({"role": "tool", "tool_call_id": c.get("id"), "content": "Stopped by the user before this ran."})
+            for call in m.get("tool_calls") or []:      # not "c": that name is the colour function every loader uses
+                if call.get("id") not in answered:
+                    history.append({"role": "tool", "tool_call_id": call.get("id"), "content": "Stopped by the user before this ran."})
         print(f"\n{DIM}stopped · everything done so far is kept{R}")
     save_chat()
 # ---- end of bxzex-ai ----
