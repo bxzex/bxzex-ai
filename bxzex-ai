@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.5.4"
+VERSION = "1.5.5"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1052,7 +1052,7 @@ def learn(msgs):
             text = plain(m.get("content") or "") if m["role"] in ("user", "assistant") else ""
             if text and not text.startswith(SUMMARY_HEAD): talk.append(f"{m['role'].upper()}: {text[:1500]}")
         if not talk: return
-        known = (read_text(ABOUT, 8000) + "\n" + read_text(MEMORY, 8000)).strip()
+        known = (read_text(ABOUT, 10**6)[:16000] + "\n" + read_text(MEMORY, 8000)).strip()
         ask = ("Here is what is already known about the user:\n" + (known or "(nothing yet)") + "\n\nHere is the latest part of a chat:\n"
                + "\n".join(talk) + "\n\nList NEW lasting facts about the user that this chat shows and that are not already known: "
                "who they are, their work, projects, goals, plans, people in their life, tools, likes and dislikes, how they want things done. "
@@ -1138,7 +1138,7 @@ def refresh_system():
     if skills:
         parts.append("## Skills\nBefore starting a task that matches one of these, call use_skill with its name "
                      "and follow what it says:\n" + "\n".join(f"- {n}: {' '.join(d.split(':')[0].split()[:9])}" for n, d, _ in skills))   # short hints: every prompt token costs load time
-    me = read_text(ABOUT, 8000)
+    me = read_text(ABOUT, 10**6)[:16000]           # the start of it matters most: who they are comes first
     if me: parts.append("## About the user (they wrote this for you: it is true, use it)\n" + me)
     notes = read_text(MEMORY, 8000 if REMOTE else 3000)
     if notes: parts.append("## What you remember about the user\n" + notes)
