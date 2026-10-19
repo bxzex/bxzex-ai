@@ -30,6 +30,19 @@ REMOTE = (os.environ.get("BXZEX_REMOTE") or _cfg.get("remote") or "").rstrip("/"
 REMOTE_KEY = os.environ.get("BXZEX_REMOTE_KEY") or _cfg.get("remote_key") or ""
 HOST = REMOTE or f"http://127.0.0.1:{os.environ.get('BXZEX_PORT', '8080')}"
 
+ERROR_LOG = f"{APP_HOME}/error.log"
+def log_error(kind, err, tb):
+    """Keep the details of a crash out of the conversation: they go to error.log, the screen gets one line."""
+    import traceback
+    try:
+        os.makedirs(APP_HOME, exist_ok=True)
+        with open(ERROR_LOG, "a") as f:
+            f.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} v{VERSION}\n" + "".join(traceback.format_exception(kind, err, tb)))
+    except OSError: pass
+def _thread_error(a):                     # a loader or a background job failing must never spill over the screen
+    if a.exc_type is not SystemExit: log_error(a.exc_type, a.exc_value, a.exc_traceback)
+threading.excepthook = _thread_error
+
 class _RemoteKey(urllib.request.HTTPRedirectHandler):
     """Sends the key with requests to the remote model only, never to web pages the tools open.
     Also follows the 303 the cloud sends while a long request is still waiting for its card."""
@@ -48,7 +61,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -397,7 +410,7 @@ def choose_device(arg=""):
     stop_server(); ensure_server()
 
 # ---- tools ----
-import base64, datetime, html, shlex, tempfile, threading, urllib.parse
+import base64, datetime, difflib, fnmatch, html, http.client, shlex, tempfile, threading, urllib.parse
 
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"}
 PAGE_CHARS = 20000 if REMOTE else 6000   # a laptop reads ~20 tok/s, so every 1k chars of tool output costs ~12s; a cloud card reads fast
@@ -516,7 +529,7 @@ RISKY = re.compile(r"""(?ix)
 SENSITIVE = re.compile(r"/(\.ssh|\.gnupg|\.aws|\.config|Library|\.zshrc|\.zprofile|\.bashrc|\.bash_profile|\.profile|\.gitconfig|\.netrc)(/|$)"
                        r"|^/(etc|usr|bin|sbin|System|boot|var|mnt/[a-z]/Windows)/")
 
-def confirm(what, detail, always_ask=False):
+def confirm(what, detail, always_ask=False, diff=False):
     global allow_all
     if allow_all and not always_ask: return True
     if not sys.stdin.isatty(): return False
@@ -524,7 +537,12 @@ def confirm(what, detail, always_ask=False):
     typed.stop()                      # hand the keyboard back for the question
     sys.stdout.write("\033[?25h")
     print(f"{GOLD}?{R} {BOLD}Allow: {what}{R}")
-    for line in detail.splitlines()[:12]: print(f"  {DIM}│ {line[:W()-6]}{R}")
+    shown = detail.splitlines()
+    room = 40 if diff else 12
+    for line in shown[:room]:
+        tone = c(114) if diff and line.startswith("+") else c(174) if diff and line.startswith("-") else DIM
+        print(f"  {DIM}│{R} {tone}{line[:W()-6]}{R}")
+    if len(shown) > room: print(f"  {DIM}│ … {len(shown) - room} more lines{R}")
     buttons = [("y", " y  yes "), ("n", " n  no ")] + ([] if always_ask else [("a", " a  always allow ")])
     line, col, spots = f"  {GOLD}❯{R} ", 5, {}
     for key, label in buttons:
@@ -543,8 +561,28 @@ def confirm(what, detail, always_ask=False):
     if a == "a" and not always_ask: allow_all = True; return True
     return a == "y"
 
+# Commands that only look at things. These run without asking, alone or chained with pipes, && and ;
+LOOKS = {"ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "find", "file", "stat", "du", "df", "which",
+         "whoami", "echo", "tree", "uname", "uniq", "cut", "diff", "basename", "dirname", "realpath", "nl", "sort", "column", "type"}
+GIT_LOOKS = {"status", "log", "diff", "show", "ls-files", "blame", "rev-parse", "shortlog"}
+
+def only_looks(command):
+    """True when every part of the command just reads: no writing to files, no running other programs."""
+    if re.search(r"[>`]|\$\(|<\(", command): return False
+    for part in re.split(r"&&|\|\||[;|&\n]", command):
+        try: words = shlex.split(part)
+        except ValueError: return False
+        if not words: continue
+        name = words[0]
+        if name not in LOOKS and name != "git": return False
+        if name == "git" and (len(words) < 2 or words[1] not in GIT_LOOKS): return False
+        if any(w.startswith(("--output", "--pre", "--exec", "-exec", "-ok", "-delete", "-fprint", "-fls")) for w in words): return False
+        if name in ("sort", "tree") and any(w == "-o" or w.startswith("-o") and name == "sort" for w in words[1:]): return False
+    return True
+
 def run_shell(command):
-    if not confirm("run command", command, always_ask=bool(RISKY.search(command))): return "The user declined to run this command."
+    if not only_looks(command) and not confirm("run command", command, always_ask=bool(RISKY.search(command))):
+        return "The user declined to run this command."
     # no keyboard for the command (a prompt would freeze the app), and its own process group so a timeout stops all of it
     p = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True, errors="replace", start_new_session=True)
@@ -566,12 +604,86 @@ def read_file(path, start="0"):
     if at + PAGE_CHARS < len(text): part += f"\n[...{len(text) - at - PAGE_CHARS} more chars: call read_file again with start={at + PAGE_CHARS}]"
     return part
 
-def write_file(path, content):
-    path = os.path.expanduser(path)
-    if not confirm(f"write {path}", content, always_ask=bool(SENSITIVE.search(os.path.abspath(path)))): return "The user declined to write this file."
+UNDO = []   # (path, what it held before, or None if it didn't exist), newest last, for /undo
+
+def changes(old, new):
+    """The lines that change, as + and - lines, for the allow question."""
+    out = [l.rstrip("\n") for l in difflib.unified_diff(old.splitlines(True), new.splitlines(True), n=1)][2:]
+    return "\n".join(l for l in out if not l.startswith("@@")) or "(no changes)"
+
+def save_file(path, content):
+    old = None
+    if os.path.exists(path):
+        with open(path, "r", errors="replace") as f: old = f.read()
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w") as f: f.write(content)
+    UNDO.append((path, old))
+
+def write_file(path, content):
+    path = os.path.expanduser(path)
+    old = None
+    if os.path.isfile(path):
+        with open(path, "r", errors="replace") as f: old = f.read()
+    shown = changes(old, content) if old is not None else content
+    if not confirm(f"{'update' if old is not None else 'write'} {path}", shown, always_ask=bool(SENSITIVE.search(os.path.abspath(path))),
+                   diff=old is not None): return "The user declined to write this file."
+    save_file(path, content)
     return f"wrote {len(content)} chars to {path}"
+
+def edit_file(path, old_text, new_text, replace_all="false"):
+    path = os.path.expanduser(path)
+    with open(path, "r", errors="replace") as f: text = f.read()
+    n = text.count(old_text) if old_text else 0
+    if not n: return "error: old_text was not found in the file. Read the file again and copy the text exactly, spaces included."
+    every = str(replace_all).lower() == "true"
+    if n > 1 and not every: return f"error: old_text appears {n} times. Include more of the lines around it so it matches once, or set replace_all to true."
+    new = text.replace(old_text, new_text) if every else text.replace(old_text, new_text, 1)
+    if not confirm(f"edit {path}", changes(text, new), always_ask=bool(SENSITIVE.search(os.path.abspath(path))), diff=True):
+        return "The user declined this edit."
+    save_file(path, new)
+    return f"edited {path}: {n if every else 1} change(s)"
+
+def undo(arg=""):
+    """Put back the file the last write or edit changed."""
+    if not UNDO: print(f"{DIM}nothing to undo in this session{R}"); return
+    path, old = UNDO.pop()
+    try:
+        if old is None: os.remove(path); print(f"{GOLD}●{R} removed {path.replace(HOME, '~')} {DIM}· it didn't exist before{R}")
+        else:
+            with open(path, "w") as f: f.write(old)
+            print(f"{GOLD}●{R} put back {path.replace(HOME, '~')} {DIM}· as it was before the last change{R}")
+        history.append({"role": "user", "content": f"(I undid your last change to {path}. It is back to how it was before.)"})
+    except OSError as e: print(f"{DIM}couldn't undo: {e}{R}")
+
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".next", "dist", "build", ".cache", ".DS_Store"}
+
+def list_files(path=".", pattern=""):
+    root = os.path.expanduser(path or ".")
+    if not os.path.isdir(root): return f"error: {root} is not a folder"
+    out = []
+    for at, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
+        depth = os.path.relpath(at, root).count(os.sep) + (at != root)
+        if depth > 4: dirs[:] = []; continue
+        for f in sorted(files):
+            if pattern and not fnmatch.fnmatch(f, pattern): continue
+            full = os.path.join(at, f)
+            try: size = os.path.getsize(full)
+            except OSError: size = 0
+            out.append(f"{os.path.relpath(full, root)}  ({size:,} bytes)")
+            if len(out) >= 400: return "\n".join(out) + "\n[...more files: narrow it with pattern or a subfolder]"
+    return "\n".join(out) or "no files"
+
+def search_files(pattern, path=".", file_pattern=""):
+    root = os.path.expanduser(path or ".")
+    if shutil.which("rg"):
+        cmd = ["rg", "-n", "--no-heading", "-S", "--max-columns", "300", "-m", "50"] + (["-g", file_pattern] if file_pattern else []) + ["--", pattern, root]
+    else:
+        cmd = ["grep", "-rnIE", "-m", "50"] + [f"--exclude-dir={d}" for d in SKIP_DIRS] + ([f"--include={file_pattern}"] if file_pattern else []) + ["--", pattern, root]
+    try: p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired: return "error: the search took too long. Search a smaller folder."
+    if p.returncode > 1: return f"error: {p.stderr.strip()[:300]}"
+    return clip(p.stdout.strip() or "no matches", OUT_CHARS)
 
 # ---- making images ----
 IMAGE_MODEL = f"{APP_HOME}/models/bxzex-image"
@@ -753,7 +865,7 @@ def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
         env = dict(os.environ, LD_LIBRARY_PATH=f"{os.path.dirname(engine)}:{os.environ.get('LD_LIBRARY_PATH', '')}")
     sys.stdout.write("\033[?25l")
     wait = Waiting("Making room")
-    err = ""
+    err = ""; proc = None
     try:
         while painting(): wait.label = "Waiting for another image to finish"; time.sleep(1)
         open(PAINTING, "w").close()
@@ -768,7 +880,8 @@ def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
             if step: wait.label = f"Painting, step {step[-1][0]} of {step[-1][1]}"
         proc.wait()
     except KeyboardInterrupt:
-        proc.kill(); wait.stop()
+        if proc: proc.kill()
+        wait.stop()
         if os.path.exists(PAINTING): os.remove(PAINTING)
         ensure_server(block=False); raise
     finally:
@@ -783,7 +896,8 @@ def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
     return f"saved to {out.replace(HOME, '~')} ({w}x{h}" + (f", {len(loras)} style file(s) applied)" if loras else ")")
 
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
-              "read_file": read_file, "write_file": write_file,
+              "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
+              "list_files": list_files, "search_files": search_files,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
               "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
 
@@ -798,7 +912,14 @@ TOOLS = [
     tool("run_shell", "Run a shell command on this computer and return its output.", command="the command"),
     tool("read_file", "Read a text file from this computer. Long files come in parts: pass start to read further.", path="file path",
          start="character to start from, default 0"),
-    tool("write_file", "Create or overwrite a text file on this computer.", path="file path", content="full file content"),
+    tool("write_file", "Create a new text file, or replace one completely. To change part of a file, use edit_file.", path="file path", content="full file content"),
+    tool("edit_file", "Change part of a file: replaces old_text (copied exactly from the file) with new_text. Much faster than rewriting the whole file.",
+         path="file path", old_text="the exact text to replace, with enough lines around it to match once", new_text="what goes in its place",
+         replace_all="true to replace every match, default false"),
+    tool("list_files", "List the files in a folder and its subfolders, with sizes. No need to ask.", path="folder, default .",
+         pattern="only names like this, e.g. *.py, default all"),
+    tool("search_files", "Search inside files for a regex. Returns file:line: matching text.", pattern="regex to look for",
+         path="folder or file, default .", file_pattern="only files like this, e.g. *.js, default all"),
     tool("remember", "Save a lasting note about the user for future conversations.", note="one short sentence"),
     tool("use_skill", "Load the full instructions for one of your skills.", name="skill name"),
     {"type": "function", "function": {"name": "generate_image",
@@ -826,14 +947,22 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - /device: show whether you run on the graphics card (GPU) or the processor (CPU). /device cpu or /device gpu switches.
 - /update: get the newest version of the app. It also checks by itself each time it starts.
 - /image <description>: make a picture straight from their words, without you. If they ask you for a picture in conversation, use generate_image.
-- /reset: start a new conversation. exit: quit.
+- /undo: put back the last file you wrote or edited.
+- /compact: fold the conversation so far into a summary, to make room.
+- /init: you look around this folder and write a BXZEX.md about it, which you read in every later chat here.
+- /allow: turn "always allow" on or off for this conversation.
+- !<command>: they run a command themselves; you see its output.
+- @<file>: they attach a file; its text is in their message.
+- /reset or /clear: start a new conversation. exit: quit.
 - Dragging an image file into the window lets you see it.
-- Ctrl-C stops your reply.
+- Esc or Ctrl-C stops your reply.
 - They can type while you are working and press Enter; it reaches you as a "By the way" note. /btw <note> adds one without asking for a reply.
 
 ## What you can do
 - web_search and fetch_page: look things up online.
-- run_shell, read_file, write_file: act on this computer. Commands and file writes ask the user first.
+- list_files, search_files, read_file: look around this computer. These never ask.
+- edit_file: change part of a file by replacing exact text. Use it instead of rewriting a whole file with write_file.
+- run_shell, write_file: act on this computer. Commands that only look (ls, cat, grep, git status...) run straight away; others and file changes ask the user first, showing them what changes.
 - remember: save a short note that you will still have in future conversations.
 - use_skill: load one of your skills (listed below) before a task it covers.
 - generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes about a minute (use quality hd only when asked for high quality) and you are reloaded afterwards. Make one image per request unless asked for more.
@@ -845,6 +974,7 @@ or asks you to remember something, call remember with one short sentence. Do not
 ## Your instructions
 Anything written below this line is from the user. Follow it.
 """
+GUIDE_MARK = "Anything written below this line is from the user. Follow it.\n"
 
 def read_text(path, limit):
     try:
@@ -903,12 +1033,13 @@ SYSTEM = ""
 def refresh_system():
     """Build the system prompt once per conversation so the server's prompt cache stays valid."""
     global SYSTEM
-    if not os.path.exists(GUIDE):
-        try:
+    try:
+        mine = read_text(GUIDE, 10**6)
+        if not mine or (GUIDE_MARK.strip() in mine and not mine.startswith(DEFAULT_GUIDE.strip())):   # missing, or written by an older version
             os.makedirs(APP_HOME, exist_ok=True)
-            with open(GUIDE, "w") as f: f.write(DEFAULT_GUIDE)
-        except OSError:
-            pass
+            with open(GUIDE, "w") as f: f.write(DEFAULT_GUIDE + (mine.split(GUIDE_MARK.strip(), 1)[1].lstrip("\n") if mine else ""))
+    except OSError:
+        pass
     parts = [system_prompt(), read_text(GUIDE, 6000) or DEFAULT_GUIDE]
     here = read_text(os.path.join(os.getcwd(), "BXZEX.md"), 3000)
     if here: parts.append("## Notes for this folder\n" + here)
@@ -942,7 +1073,8 @@ def system_prompt():
         f"Today is {datetime.date.today():%A %B %d, %Y}. This computer runs {system_name()}. "
         f"Working directory: {os.getcwd().replace(HOME, '~')}.\n"
         "You can act: web_search and fetch_page for anything current or that you are unsure of; "
-        "run_shell, read_file and write_file to do things on this computer. When a task needs action, do it "
+        "list_files, search_files and read_file to look around; edit_file to change part of a file and write_file only for "
+        "new files or full rewrites; run_shell for everything else. When a task needs action, do it "
         "with the tools instead of telling them how. If no tool is needed, just answer.\n"
         "Reading tool output is slow for you, so use as few calls as the task needs and rely on search "
         "snippets before fetching whole pages. Keep answers short and plain.\n"
@@ -956,6 +1088,7 @@ def run_tool(call):
         args = json.loads(fn["arguments"] or "{}")
     except Exception:
         return "error: arguments were not valid JSON"
+    if not isinstance(args, dict): return "error: arguments must be a JSON object with the tool's named fields"
     shown = " ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " ")
     print(f"{TEAL}◆{R} {BOLD}{name}{R}{DIM}({shown[:W()-len(name)-6]}){R}")
     if name not in TOOL_FUNCS: return f"error: no tool named {name}"
@@ -1003,7 +1136,20 @@ def split_images(text):
     rest = " ".join(t for t in toks if os.path.expanduser(t) not in imgs)
     return rest, imgs
 
+def attach_files(text):
+    """@path in a message attaches that file's text, the way dragging in an image shows the image."""
+    extra = []
+    for m in re.finditer(r"(?<!\S)@(\S+)", text):
+        path = os.path.expanduser(m.group(1).rstrip(".,;:!?)"))
+        if os.path.isfile(path) and not path.lower().endswith(IMG_EXT):
+            try:
+                body = read_file(path)
+                extra.append(f"\n\n--- {path} ---\n{body}"); print(f"  {DIM}└ file {path.replace(HOME, '~')}{R}")
+            except OSError: pass
+    return text + "".join(extra)
+
 def user_message(text):
+    text = attach_files(text)
     text, imgs = split_images(text)
     if not imgs: return {"role": "user", "content": text}
     for p in imgs: print(f"  {DIM}└ image {p}{R}")
@@ -1282,12 +1428,13 @@ def summarize(old):
 
 SUMMARY_HEAD = "Summary of our conversation so far"
 
-def fold(history, force=False):
+def fold(history, force=False, everything=False):
     """Make room when the conversation is close to what the model can hold. Changes history in place.
     Returns True if anything was folded."""
     size = context_size()
     budget = size - reply_room() - min(2000, size // 8)
     if force: budget = int(budget * 0.6)
+    if everything: budget = 0                         # /compact: fold whatever is older than the last exchange
     if estimate(history) <= budget: return False
     users = [i for i, m in enumerate(history) if m["role"] == "user"]
     cut = users[-1] if users else 0                   # the current request and everything after it always stays
@@ -1319,8 +1466,17 @@ def fold(history, force=False):
 
 turn_tok = 0   # tokens generated in the current turn, for the summary line
 stream_error = ""   # set when the server reports a failure instead of an answer
-DOING = {"generate_image": "Writing the image prompt", "write_file": "Writing file", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
+DOING = {"generate_image": "Writing the image prompt", "write_file": "Writing file", "edit_file": "Editing file",
+         "list_files": "Looking through files", "search_files": "Searching files", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
          "read_file": "Opening file", "use_skill": "Loading skill", "remember": "Saving to memory"}
+
+def lines(resp):
+    """The reply's lines, ending quietly if the connection drops halfway (what arrived is kept)."""
+    global stream_error
+    try:
+        for raw in resp: yield raw
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        stream_error = f"the connection dropped ({e.__class__.__name__})"
 
 def stream(messages, label="Reading"):
     """One model call. Returns (answer text, tool calls)."""
@@ -1353,7 +1509,7 @@ def stream(messages, label="Reading"):
         except Exception as e:                       # couldn't reach it (a network blip, the card restarting): run_turn retries once
             wait.stop(); stream_error = f"couldn't reach the model ({getattr(e, 'reason', e)})"; return "", []
 
-        for raw in resp:
+        for raw in lines(resp):
             line = raw.decode("utf-8","ignore").strip()
             if not line.startswith("data:"): continue
             p = line[5:].strip()
@@ -1441,6 +1597,7 @@ def run_turn(history):
                 stop_server()
                 if not ensure_server(): return
                 continue
+            if stream_error and (text or calls): print(f"{DIM}{stream_error}, so this reply may be cut short{R}")
             if calls:
                 if text: print()
                 history.append({"role": "assistant", "content": text, "tool_calls": calls})
@@ -1702,7 +1859,10 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/history", "past chats, pick one to continue"), ("/resume", "continue the last chat"),
             ("/fast", "toggle answering without thinking first"), ("/think", "show or hide its thinking"),
             ("/device", "run on the graphics card or the processor · /device cpu"),
-            ("/update", "get the newest version · /update full adds new downloads"), ("/reset", "start a new conversation"), ("/help", "this list"), ("exit", "quit")]
+            ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
+            ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
+            ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
+            ("/update", "get the newest version · /update full adds new downloads"), ("/reset", "start a new conversation · /clear"), ("/help", "this list"), ("exit", "quit")]
 past = []   # earlier inputs, for the up arrow
 LITE = load_config().get("size") == "lite"     # the lighter build of the model, for computers with less memory
 
@@ -1712,7 +1872,7 @@ def status_text(buf, working=False):
         if hits: return "  " + "   ".join(hits)
     if working: return "  working · type and press Enter to add a note · esc to stop"
     if update_note: return f"  {update_note}"
-    lite = " · lite" if LITE else ""
+    lite = (" · lite" if LITE else "") + (" · always allow on" if allow_all else "")
     return f"  bxzex-ai v{VERSION}{lite} · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')} · /help"
 
 class Box:
@@ -1804,7 +1964,9 @@ def ask(prefill=""):
                 raise
             if resized: resized = False; box.focus("".join(buf), pos)
             if not ready: continue
-            data = dec.decode(os.read(fd, 4096)); i = 0; done = False
+            data = dec.decode(os.read(fd, 4096))
+            if ESC_PART.search(data): data = finish_escapes(fd, data)     # a key code cut in two must not read as Esc, which clears the line
+            i = 0; done = False
             while i < len(data):
                 ch = data[i]
                 if ch == "\x1b":
@@ -1860,7 +2022,8 @@ def ask(prefill=""):
 def show_help():
     print(header("Commands"))
     for n, d in COMMANDS: print(f"  {GOLD}{n:<8}{R} {DIM}{d}{R}")
-    print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note. Esc stops a reply.{R}")
+    print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note. Esc stops a reply.")
+    print(f"  Looking at files and read-only commands (ls, cat, grep, git status) never ask. File changes show what changes first.{R}")
 
 # ---- installer helpers ----
 if sys.argv[1:2] in (["--version"], ["-v"]):
@@ -1920,12 +2083,52 @@ threading.Thread(target=autosave, daemon=True).start()
 atexit.register(save_chat)
 if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version in the background each time it starts
     threading.Thread(target=check_update, daemon=True).start()
-spoken = ""
+def close_open_calls():
+    """After a stop or an error: keep the work done so far; only close calls that never got a result."""
+    answered = {m.get("tool_call_id") for m in history if m["role"] == "tool"}
+    for m in list(history):
+        for call in m.get("tool_calls") or []:      # not "c": that name is the colour function every loader uses
+            if call.get("id") not in answered:
+                history.append({"role": "tool", "tool_call_id": call.get("id"), "content": "Stopped by the user before this ran."})
+
+def turn(text):
+    print()
+    history.append(user_message(text))
+    try:
+        run_turn(history)
+    except KeyboardInterrupt:
+        close_open_calls(); print(f"\n{DIM}stopped · everything done so far is kept{R}")
+    except Exception as e:                           # never lose the app or the chat over one bad step
+        log_error(type(e), e, e.__traceback__); close_open_calls()
+        print(f"\n{DIM}something went wrong ({e.__class__.__name__}: {str(e)[:120]}) · the chat is kept · details in {ERROR_LOG.replace(HOME, '~')}{R}")
+    save_chat()
+
+def own_command(cmd):
+    """!command: run it yourself. The output shows here and the assistant sees it too."""
+    print(f"{TEAL}◆{R} {BOLD}{cmd}{R}")
+    p = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, errors="replace", start_new_session=True)
+    got = []
+    try:
+        for line in p.stdout: got.append(line); sys.stdout.write(f"  {line}"); sys.stdout.flush()
+        p.wait()
+    except KeyboardInterrupt:
+        try: os.killpg(p.pid, 9)
+        except OSError: pass
+        got.append("[stopped]\n")
+    out = "".join(got)
+    print(f"  {DIM}└ exit code {p.returncode}{R}")
+    history.append({"role": "user", "content": f"(I ran this myself: `{cmd}`)\nexit code {p.returncode}\n{clip(out, OUT_CHARS)}"})
+
+spoken = ""; last_break = 0
 while True:
     try:
         user = ask(spoken or typed.leftover); spoken = typed.leftover = ""
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         break
+    except KeyboardInterrupt:                        # one ctrl-c on an empty line could be a slip: quit on the second
+        if time.time() - last_break < 2: break
+        last_break = time.time(); print(f"{DIM}press ctrl-c again to quit, or type exit{R}"); continue
     if not user: continue
     if user in ("exit","quit"): break
     if user in ("/help", "/", "/?"): show_help(); continue
@@ -1937,8 +2140,29 @@ while True:
         fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); continue
     if user=="/think":
         show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); continue
-    if user=="/reset":
-        history=[]; chat_file=None; allow_all=False; refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); continue
+    if user=="/undo": undo(); continue
+    if user=="/allow":
+        allow_all = not allow_all
+        print(f"{DIM}always allow {'on · commands and file changes run without asking, risky ones still ask' if allow_all else 'off · it asks first'}{R}"); continue
+    if user=="/compact":
+        if len(history) < 3: print(f"{DIM}nothing to fold yet{R}"); continue
+        if ensure_server():
+            try:
+                if not fold(history, force=True, everything=True): print(f"{DIM}nothing to fold yet{R}")
+            except KeyboardInterrupt: print(f"{DIM}stopped{R}")
+            save_chat()
+        continue
+    if user=="/init":
+        turn("Look around this folder with list_files and read the main files (README, package or build files, entry points). "
+             "Then write BXZEX.md here with write_file: what this project is, how to run, build and test it, the layout, and the "
+             "conventions to follow. Keep it under 60 lines and only state what you saw. If BXZEX.md already exists, improve it with edit_file.")
+        refresh_system(); continue
+    if user.startswith("!") and len(user) > 1:
+        try: own_command(user[1:].strip())
+        except Exception as e: print(f"{DIM}couldn't run it: {e}{R}")
+        save_chat(); continue
+    if user in ("/reset", "/clear"):
+        history=[]; chat_file=None; allow_all=False; UNDO.clear(); refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); continue
     if user=="/history": open_chat(); continue
     if user=="/resume": open_chat(0); continue
     if user.startswith("/memory"): show_memory(user[7:]); continue
@@ -1965,17 +2189,5 @@ while True:
         except KeyboardInterrupt: result = "stopped"
         print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
         continue
-    print()
-    asked = user_message(user)
-    history.append(asked)
-    try:
-        run_turn(history)
-    except KeyboardInterrupt:
-        answered = {m.get("tool_call_id") for m in history if m["role"] == "tool"}
-        for m in list(history):                      # keep the work done so far; only close calls that never got a result
-            for call in m.get("tool_calls") or []:      # not "c": that name is the colour function every loader uses
-                if call.get("id") not in answered:
-                    history.append({"role": "tool", "tool_call_id": call.get("id"), "content": "Stopped by the user before this ran."})
-        print(f"\n{DIM}stopped · everything done so far is kept{R}")
-    save_chat()
+    turn(user)
 # ---- end of bxzex-ai ----

@@ -112,10 +112,16 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/think` | Show or hide its thinking when fast mode is off. |
 | `/device` | Show whether it runs on your graphics card (GPU) or your processor (CPU). `/device cpu` or `/device gpu` switches and it remembers. |
 | `/update` | Get the newest version. |
-| `/reset` | Start a fresh conversation. |
+| `!command` | Run a command yourself, like `!git status`. You see the output and so does it. |
+| `@file` | Attach a file to your message, like `what does @app.py do`. |
+| `/undo` | Put back the last file it wrote or edited. |
+| `/compact` | Fold the chat so far into a short summary to make room. |
+| `/init` | It looks around the folder you're in and writes a `BXZEX.md` about the project, which it reads every time you work there. |
+| `/allow` | Turn "always allow" on or off. Risky commands like `rm` still ask. |
+| `/reset` | Start a fresh conversation. `/clear` does the same. |
 | `exit` | Quit. |
 
-Type `/` and it shows you the commands as you go. The whole thing redraws itself when you resize the window.
+Type `/` and it shows you the commands as you go. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. The whole thing redraws itself when you resize the window.
 
 To show it an image, drag the file into the terminal window and add your question.
 
