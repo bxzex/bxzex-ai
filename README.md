@@ -125,6 +125,9 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/say` | Read its replies out loud. |
 | `/schedule` | Tasks it does on its own at set times, even with the app closed. Ask in your own words ("every weekday at 8am, read my Gmail and tell me what's important") and it sets it up; each run's report comes as a notification. Here you read the results, run one now, pause or remove it. |
 | `/check` | Open a site or your local app as an iPhone, Android phone, iPad and desktop (Safari's engine for Apple devices), find what breaks (sideways scrolling, buttons too small to tap, tiny text, broken images, console errors) and look at screenshots of each. `/check localhost:5173`, `/check bxzex.com android`. Screenshots are saved in Pictures/BXZEX/checks. The first time, it offers to download the browsers it needs (about 400 MB). |
+| `/phone` | Use it from your phone through Telegram: it walks you through making a bot (one minute), then you can write to it from anywhere and it works on your computer. Questions and OKs come as buttons, scheduled reports arrive there, and only your Telegram account can use it. `/phone test`, `/phone off`. |
+| `/cost` | What the cloud card has cost today, this month and last month, from Modal's own billing. |
+| `/export` | Save this chat as a Markdown document in the folder you're in. `/export ~/Desktop` saves it there. |
 | `/commit` | It looks at your changes and commits them with a message in your repo's style. `/commit and push` pushes too. |
 | `/review` | It reviews your changes (or your branch) for bugs and security holes before you push, worst first, and changes nothing. |
 | `/hooks` | Your own commands that run before or after its tools, or when a reply is done. A before-hook that fails blocks the tool. `/hooks add after edit_file|write_file npx prettier --write "$BXZEX_FILE"`. |
@@ -141,6 +144,8 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go, and Tab finishes the name. Ctrl+V pastes a screenshot from the clipboard. Ctrl+R searches what you sent before. Pasted text keeps its line breaks, and the up arrow brings back what you typed, even from earlier sessions. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. Press `f` at a question to always allow that kind of command (like `npm test`) or file changes in that folder, kept between sessions; `/allow clear` forgets them. Tables come out as grids and code in color. The whole thing redraws itself when you resize the window.
 
 To show it an image, drag the file into the terminal window and add your question.
+
+On a Mac it can also work in Safari (list your tabs, open pages, read a page, run JavaScript in it, including pages you're signed in to) and in Messages (read recent messages, look people up in Contacts, and send an iMessage or text, which always asks you first). The first time, macOS asks you to allow it.
 
 On the cloud card it can hand research to helpers, and several run at the same time. Helpers only look (read, search, fetch pages, read-only commands) and report back.
 

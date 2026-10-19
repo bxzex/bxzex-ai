@@ -51,7 +51,7 @@ os.write(fd, b"\x12"); pump(0.3); os.write(fd, b"cats"); pump(0.5)       # ctrl-
 shown = out.decode("utf-8", "ignore")
 os.write(fd, b"\r"); pump(0.3); os.write(fd, b"\r"); pump(1.5)           # take the match, then send it
 os.write(fd, b"remind me\r"); pump(2); os.write(fd, b"y"); pump(2)        # schedule it
-os.write(fd, b"/commit\r"); pump(1.5); os.write(fd, b"/hooks\r"); pump(1)
+os.write(fd, b"/commit\r"); pump(1.5); os.write(fd, b"/hooks\r"); pump(1); os.write(fd, b"/export\r"); pump(1)
 os.write(fd, b"/schedule\r"); pump(1); os.write(fd, b"\x1b"); pump(0.5); os.write(fd, b"exit\r"); pump(3)
 plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]|\x1b\]8;;[^\x1b]*\x1b\\\\", "", out.decode("utf-8", "ignore")).replace("─", "")
 tools = {m["tool_call_id"]: m["content"] for msgs in GOT for m in msgs if m["role"] == "tool"}
@@ -64,6 +64,9 @@ print("ctrl-r status:", "search past messages: cats" in re.sub(r"\x1b\[[0-9;?]*[
 sched = json.load(open(home + "/schedules.json")) if os.path.exists(home + "/schedules.json") else []
 print("scheduled:", [(s["name"], s.get("days"), s.get("at")) for s in sched])
 print("/commit:", any("Commit my changes" in u for u in users), "| /hooks:", "Hooks" in plain and "/hooks remove 1" in plain)
+import glob
+exported = glob.glob(home + "/bxzex-chat-*.md")
+print("/export:", bool(exported) and "**You:** first message about cats" in open(exported[0]).read())
 print("/schedule:", "Scheduled tasks" in plain and "Weather" in plain)
 r = subprocess.run([sys.executable, sys.argv[1], "--run-schedule", "s1"], env=env, capture_output=True, text=True, timeout=60, cwd=home)
 done = json.load(open(home + "/schedules.json"))[0]

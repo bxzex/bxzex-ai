@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.8.4"
+VERSION = "1.9.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -674,6 +674,7 @@ def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
     global allow_all
     if allow_all and not always_ask: return True
     if rule and not always_ask and allowed_here(rule): return True
+    if PHONE: return phone_choose(f"Allow: {what}?", ["Yes", "No"], detail) == 0
     if not sys.stdin.isatty(): return False
     global tool_wait
     if tool_wait: tool_wait.stop(); tool_wait = None       # the loader steps aside for the question
@@ -1121,8 +1122,11 @@ def update_todos(todos):
 
 def ask_user(question, options=""):
     """A question with choices the user picks with the arrow keys, or answers in their own words."""
-    if not sys.stdin.isatty(): return "The user isn't at the keyboard. Pick the most sensible option and say which."
     picks = [o.strip() for o in str(options).split("|") if o.strip()][:6]
+    if PHONE and picks:
+        at = phone_choose(question, picks)
+        return f"The user picked: {picks[at]}" if at is not None else "The user didn't answer. Use your best judgment and say what you chose."
+    if not sys.stdin.isatty(): return "The user isn't at the keyboard. Pick the most sensible option and say which."
     busy = typed.th is not None
     typed.stop()
     try:
@@ -1571,7 +1575,10 @@ def run_schedule(sid):
         if it["id"] == sid: it.update(result=path, seen=quiet, ran=stamp.strftime("%b %d %H:%M"))
     save_schedules([it for it in items if not (it["id"] == sid and "once" in it)])
     if "once" in item: ticker()
-    if not quiet: notify(f"{AI_NAME} · {item['name']}", " ".join(re.sub(r"[*#`>|_]", "", result).split()))
+    if not quiet:
+        notify(f"{AI_NAME} · {item['name']}", " ".join(re.sub(r"[*#`>|_]", "", result).split()))
+        try: phone_send(f"{item['name']}\n\n{result}")
+        except Exception as e: log_error(type(e), e, e.__traceback__)
 
 def schedule_task(action="add", when="", task="", name="", can_act="false", id=""):
     action = str(action).strip().lower()
@@ -2006,10 +2013,414 @@ def test_page(url, devices="phone,tablet,desktop", steps="", see="true"):
     return f"Checked {url}\n\n" + "\n\n".join(report) + ("\n\nThe screenshots of the first screen follow, so look at them too: spacing, overlap, "
                                                           "cut-off text, things that look wrong." if PENDING_SHOTS else "")
 
+# ---- your phone: talk to it from Telegram, get scheduled reports there, and OK its actions with a tap ----
+TG_API = os.environ.get("BXZEX_TELEGRAM_API", "https://api.telegram.org")
+PHONE = None            # set while it's answering a message from the phone: questions and OKs go there as buttons
+PHONE_QUEUE = []        # messages that came in while it was waiting on a button
+PHONE_LABEL = "com.bxzex.ai.phone"
+
+def tg(method, token=None, timeout=30, **params):
+    token = token or (load_config().get("phone") or {}).get("token", "")
+    url = f"{TG_API}/bot{token}/{method}"; body = json.dumps(params)
+    if shutil.which("curl"):
+        r = subprocess.run(["curl", "-sS", "--max-time", str(timeout + 10), "-H", "Content-Type: application/json", "-d", "@-", url],
+                           input=body, capture_output=True, text=True)
+        got = json.loads(r.stdout or "{}")
+    else:
+        with urllib.request.urlopen(urllib.request.Request(url, body.encode(), {"Content-Type": "application/json"}), timeout=timeout + 10) as r:
+            got = json.load(r)
+    if not got.get("ok"): raise RuntimeError(got.get("description") or "Telegram didn't answer")
+    return got["result"]
+
+def phone_send(text, **extra):
+    """Send to your phone, in pieces Telegram accepts. Returns the last message sent."""
+    conf = load_config().get("phone") or {}
+    if not conf.get("chat"): return None
+    text = text.strip() or "(empty)"; last = None
+    for i in range(0, len(text), 3900):
+        last = tg("sendMessage", chat_id=conf["chat"], text=text[i:i + 3900], disable_web_page_preview=True,
+                  **(extra if i + 3900 >= len(text) else {}))
+    return last
+
+def phone_choose(question, choices, detail=""):
+    """Buttons on the phone. Waits up to 15 minutes for a tap and returns the choice's number, or None."""
+    nonce = f"{random.randrange(10**8)}"
+    sent = phone_send(f"{question}\n\n{detail[:1800]}" if detail else question,
+                      reply_markup={"inline_keyboard": [[{"text": c[:40], "callback_data": f"{nonce}:{i}"}] for i, c in enumerate(choices)]})
+    conf = load_config().get("phone") or {}; offset = conf.get("offset", 0); end = time.time() + 900
+    while time.time() < end:
+        try: ups = tg("getUpdates", offset=offset, timeout=25, allowed_updates=["message", "callback_query"])
+        except Exception: time.sleep(3); continue
+        for u in ups:
+            offset = u["update_id"] + 1
+            cb = u.get("callback_query")
+            if cb and str(cb.get("data", "")).startswith(nonce + ":") and cb["message"]["chat"]["id"] == conf["chat"]:
+                pick = int(cb["data"].split(":")[1])
+                try:
+                    tg("answerCallbackQuery", callback_query_id=cb["id"])
+                    tg("editMessageReplyMarkup", chat_id=conf["chat"], message_id=sent["message_id"], reply_markup={"inline_keyboard": []})
+                    phone_send(f"→ {choices[pick]}")
+                except Exception: pass
+                save_config(phone=dict(load_config().get("phone") or {}, offset=offset))
+                return pick
+            if u.get("message"): PHONE_QUEUE.append(u)
+        save_config(phone=dict(load_config().get("phone") or {}, offset=offset))
+    phone_send("No answer in 15 minutes, so I skipped it.")
+    return None
+
+def phone_photo(file_id):
+    """A photo sent from the phone, saved here so it can look at it."""
+    f = tg("getFile", file_id=file_id)
+    token = (load_config().get("phone") or {}).get("token", "")
+    os.makedirs(f"{APP_HOME}/phone", exist_ok=True)
+    path = f"{APP_HOME}/phone/{int(time.time())}-{os.path.basename(f['file_path'])}"
+    subprocess.run(["curl", "-sS", "-o", path, f"{TG_API}/file/bot{token}/{f['file_path']}"], capture_output=True)
+    return path
+
+def phone_loop():
+    """Runs on its own (started by the system): answers what you send from your phone, one message at a time."""
+    global PHONE, history
+    conf = load_config().get("phone") or {}
+    if not conf.get("chat"): print("the phone isn't set up: run /phone in the app"); return
+    chat_path = f"{APP_HOME}/phone-chat.json"
+    try:
+        with open(chat_path) as f: history = json.load(f)
+    except (OSError, ValueError): history = []
+    if load_config().get("mcp"): connect_mcp()
+    refresh_skills(); refresh_system()
+    offset = conf.get("offset", 0)
+    while True:
+        if PHONE_QUEUE: ups = [PHONE_QUEUE.pop(0)]
+        else:
+            try: ups = tg("getUpdates", offset=offset, timeout=50, allowed_updates=["message", "callback_query"])
+            except Exception as e:
+                if "Unauthorized" in str(e): print("the bot key stopped working: run /phone again"); return
+                time.sleep(5); continue
+        for u in ups:
+            offset = max(offset, u["update_id"] + 1)
+            save_config(phone=dict(load_config().get("phone") or {}, offset=offset))
+            msg = u.get("message") or {}
+            if not msg or msg.get("chat", {}).get("id") != conf["chat"]: continue      # only you: anyone else is ignored
+            text = (msg.get("text") or msg.get("caption") or "").strip()
+            if msg.get("photo"):
+                try: text = (text + " " + phone_photo(msg["photo"][-1]["file_id"])).strip()
+                except Exception: pass
+            if not text: continue
+            if text in ("/start", "/help"):
+                phone_send(f"{AI_NAME} on your computer. Write anything and it works on it there. /new starts a fresh chat."); continue
+            if text == "/new":
+                history = []; phone_send("New chat."); continue
+            PHONE = conf["chat"]
+            stop = threading.Event()
+            def typing():
+                while not stop.is_set():
+                    try: tg("sendChatAction", chat_id=conf["chat"], action="typing", timeout=5)
+                    except Exception: pass
+                    stop.wait(4)
+            threading.Thread(target=typing, daemon=True).start()
+            start = len(history)
+            try:
+                history.append(user_message(text)); run_turn(history)
+                reply = "\n\n".join(m["content"] for m in history[start:] if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip())
+            except Exception as e:
+                log_error(type(e), e, e.__traceback__); close_open_calls(); reply = f"Something went wrong: {e}"
+            finally:
+                stop.set(); PHONE = None
+            PENDING_SHOTS.clear()
+            try: phone_send(reply or "Done.")
+            except Exception as e: log_error(type(e), e, e.__traceback__)
+            try:
+                with open(chat_path, "w") as f: json.dump(history[-200:], f)
+            except OSError: pass
+
+def phone_service(on=True):
+    """Keep the phone bridge running in the background (launchd on a Mac, a user service on Linux)."""
+    if os.environ.get("BXZEX_NO_TICKER"): return ""
+    me = [sys.executable, os.path.abspath(__file__), "--phone"]
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": HOME}
+    if "BXZEX_HOME" in os.environ: env["BXZEX_HOME"] = APP_HOME
+    try:
+        if MAC:
+            import plistlib
+            plist = f"{HOME}/Library/LaunchAgents/{PHONE_LABEL}.plist"; where = f"gui/{os.getuid()}"
+            subprocess.run(["launchctl", "bootout", f"{where}/{PHONE_LABEL}"], capture_output=True)
+            if not on:
+                if os.path.exists(plist): os.remove(plist)
+                return ""
+            os.makedirs(os.path.dirname(plist), exist_ok=True)
+            with open(plist, "wb") as f:
+                f.write(plistlib.dumps({"Label": PHONE_LABEL, "ProgramArguments": me, "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 20,
+                                        "EnvironmentVariables": env, "StandardOutPath": f"{APP_HOME}/phone.log", "StandardErrorPath": f"{APP_HOME}/phone.log"}))
+            r = subprocess.run(["launchctl", "bootstrap", where, plist], capture_output=True, text=True)
+            return "" if r.returncode == 0 else f"couldn't start it in the background: {r.stderr.strip()[:160]}"
+        unit = f"{HOME}/.config/systemd/user/bxzex-phone.service"
+        if not shutil.which("systemctl"): return "this computer has no systemd: start it yourself with  bxzex-ai --phone &"
+        if not on:
+            subprocess.run(["systemctl", "--user", "disable", "--now", "bxzex-phone"], capture_output=True)
+            if os.path.exists(unit): os.remove(unit)
+            return ""
+        os.makedirs(os.path.dirname(unit), exist_ok=True)
+        with open(unit, "w") as f:
+            f.write("[Unit]\nDescription=bxzex-ai phone bridge\n\n[Service]\nExecStart=" + " ".join(shlex.quote(x) for x in me)
+                    + "\nRestart=always\nRestartSec=20\n" + "".join(f"Environment={k}={v}\n" for k, v in env.items()) + "\n[Install]\nWantedBy=default.target\n")
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        r = subprocess.run(["systemctl", "--user", "enable", "--now", "bxzex-phone"], capture_output=True, text=True)
+        return "" if r.returncode == 0 else f"couldn't start it: {r.stderr.strip()[:160]}"
+    except Exception as e:
+        log_error(type(e), e, e.__traceback__); return f"couldn't start it: {e}"
+
+def restart_phone():
+    """After an update the bridge starts again, so it runs the new version."""
+    if not (load_config().get("phone") or {}).get("chat") or os.environ.get("BXZEX_NO_TICKER"): return
+    if MAC: subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{PHONE_LABEL}"], capture_output=True)
+    elif shutil.which("systemctl"): subprocess.run(["systemctl", "--user", "restart", "bxzex-phone"], capture_output=True)
+
+def setup_phone(arg=""):
+    arg = arg.strip()
+    conf = load_config().get("phone") or {}
+    if arg == "off":
+        phone_service(False); save_config(phone={}); print(f"{DIM}phone off · the bot no longer answers{R}"); return
+    if arg == "test" and conf.get("chat"):
+        try: phone_send(f"Test from {AI_NAME} on your computer."); print(f"{DIM}sent · check your phone{R}")
+        except Exception as e: print(f"{DIM}couldn't send: {e}{R}")
+        return
+    if conf.get("chat") and arg != "again":
+        print(header("Phone"))
+        print(f"  {DIM}connected to Telegram as @{conf.get('bot', '?')} · write to it from your phone and it works here")
+        print(f"  scheduled reports also go there · /phone test · /phone again to reconnect · /phone off{R}"); return
+    print(header("Connect your phone"))
+    print(f"  {DIM}1. In Telegram on your phone, open @BotFather and send /newbot. Give it any name.")
+    print(f"  2. It replies with a key like 123456:ABC-xyz. Paste it here.{R}")
+    token = line_input(f"  {GOLD}❯{R} key: ").strip()
+    if not token: print(f"  {DIM}cancelled{R}"); return
+    try: me = tg("getMe", token=token)
+    except Exception as e: print(f"  {DIM}that key didn't work: {e}{R}"); return
+    print(f"  {DIM}3. Now open {link('https://t.me/' + me['username'], 't.me/' + me['username'])} on your phone and send it any message.{R}")
+    wait = Waiting("Waiting for your message"); found = None; offset = 0
+    try:
+        end = time.time() + 300
+        while time.time() < end and not found:
+            for u in tg("getUpdates", token=token, offset=offset, timeout=20):
+                offset = u["update_id"] + 1
+                if u.get("message", {}).get("chat", {}).get("type") == "private": found = u["message"]
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        wait.stop(); print(f"  {DIM}couldn't reach Telegram: {e}{R}"); return
+    finally:
+        wait.stop()
+    if not found: print(f"  {DIM}no message came in, try /phone again{R}"); return
+    save_config(phone={"token": token, "chat": found["chat"]["id"], "user": found["from"]["id"], "bot": me["username"], "offset": offset})
+    try: os.chmod(CONFIG, 0o600)
+    except OSError: pass
+    trouble = phone_service(True)
+    tg("sendMessage", token=token, chat_id=found["chat"]["id"],
+       text=f"Connected to {AI_NAME} on your computer. Write anything and it works on it there. Only you can use it. /new starts a fresh chat.")
+    print(f"{GOLD}●{R} {BOLD}Phone connected{R} {DIM}· only your Telegram account can use it · it keeps running in the background{R}"
+          + (f"\n  {DIM}{trouble}{R}" if trouble else ""))
+
+# ---- /cost: what the cloud card has cost, from Modal's own billing ----
+def show_cost(arg=""):
+    conf = load_config().get("cost") or {}
+    if not REMOTE: print(f"{DIM}this computer runs the model itself, so there's no cloud bill{R}"); return
+    if not shutil.which("modal") or not conf.get("app"):
+        print(f"{DIM}/cost needs the modal command and, in {CONFIG.replace(HOME, '~')}: \"cost\": {{\"app\": \"<your Modal app>\", \"profile\": \"<your Modal profile>\"}}{R}"); return
+    env = dict(os.environ, **({"MODAL_PROFILE": conf["profile"]} if conf.get("profile") else {}))
+    def modal(*a):
+        r = subprocess.run(["modal", "billing", *a, "--json"], capture_output=True, text=True, env=env, timeout=90, stdin=subprocess.DEVNULL)
+        return json.loads(r.stdout)
+    sys.stdout.write("\033[?25l"); wait = Waiting("Asking Modal for the bill")
+    try:
+        today = modal("report", "--for", "today", "-r", "h", "--tz", "local")
+        month = modal("report", "--for", "this month")
+        last = modal("report", "--for", "last month")
+        summary = modal("summary")
+    except Exception as e:
+        wait.stop(); sys.stdout.write("\033[?25h"); print(f"{DIM}couldn't get the bill from Modal: {e}{R}"); return
+    wait.stop(); sys.stdout.write("\033[?25h")
+    mine = lambda rows: sum(float(r["cost"]) for r in rows if r.get("description") == conf["app"])
+    hours = sum(1 for r in today if r.get("description") == conf["app"] and float(r["cost"]) > 0.05)
+    d = datetime.date.today(); days_in = (d.replace(month=d.month % 12 + 1, day=1, year=d.year + (d.month == 12)) - datetime.timedelta(days=1)).day
+    print(header("Cloud card cost"))
+    print(f"  {GOLD}today{R}        ${mine(today):.2f}  {DIM}awake in {hours} hour{'s' if hours != 1 else ''} of today{R}")
+    week = [r for r in month if r.get("description") == conf["app"] and r.get("interval_start", "")[:10] >= str(d - datetime.timedelta(days=7))]
+    per_day = (sum(float(r["cost"]) for r in week) + mine(today)) / 8          # the last 7 full days and today
+    print(f"  {GOLD}this month{R}   ${mine(month):.2f}  {DIM}at this week's pace, about ${mine(month) + per_day * (days_in - d.day):.0f} by the end of the month{R}")
+    print(f"  {GOLD}last month{R}   ${mine(last):.2f}")
+    w = load_config().get("warm") or {}
+    if w: print(f"  {DIM}/warm is on {w.get('from')}:00 to {w.get('to')}:00, which adds about ${4 * (w.get('to', 0) - w.get('from', 0))} a day{R}")
+    print(f"  {DIM}whole Modal account this month: ${float(summary.get('metered_cost', 0)):.2f} used, ${float(summary.get('billed_cost', 0)):.2f} billed after credits{R}")
+
+# ---- /export: the chat as a document ----
+def export_chat(arg=""):
+    msgs = [m for m in history if m.get("role") in ("user", "assistant")]
+    if not msgs: print(f"{DIM}nothing to export yet{R}"); return
+    first = next((plain(m["content"]) for m in msgs if m["role"] == "user"), "chat")
+    title = " ".join(first.split()[:10])
+    path = os.path.expanduser(arg.strip()) if arg.strip() else os.path.join(os.getcwd(), f"bxzex-chat-{datetime.datetime.now():%Y-%m-%d-%H%M}.md")
+    if os.path.isdir(path): path = os.path.join(path, f"bxzex-chat-{datetime.datetime.now():%Y-%m-%d-%H%M}.md")
+    out = [f"# {title}", f"{AI_NAME} · {datetime.datetime.now():%B %d, %Y at %H:%M}", ""]
+    for m in msgs:
+        text = plain(m.get("content") or "").strip()
+        if m["role"] == "user":
+            if text.startswith(("(Screenshots from", "(The result of my scheduled")): continue
+            out += [f"**You:** {text}", ""]
+        else:
+            for call in m.get("tool_calls") or []:
+                try: args = json.loads(call["function"].get("arguments") or "{}")
+                except ValueError: args = {}
+                shown = " ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " ")[:160]
+                out.append(f"> {call['function']['name']}: {shown}")
+            if m.get("tool_calls"): out.append("")
+            if text: out += [f"**{AI_NAME}:** {text}", ""]
+    try:
+        with open(path, "w") as f: f.write("\n".join(out) + "\n")
+    except OSError as e:
+        print(f"{DIM}couldn't save it: {e}{R}"); return
+    print(f"{GOLD}●{R} {BOLD}Saved{R} {DIM}· {link(file_link(path), path.replace(HOME, '~'))}{R}")
+
+# ---- Safari and Messages on a Mac ----
+def osa(script, *args, timeout=30):
+    r = subprocess.run(["osascript", *sum((["-e", l] for l in script.strip().splitlines()), []), *args],
+                       capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    if r.returncode != 0: raise RuntimeError(r.stderr.strip()[-400:] or "AppleScript failed")
+    return r.stdout.rstrip("\n")
+
+SAFARI_TAB = '''on tabRef(w, t)
+  tell application "Safari"
+    if w is 0 then return current tab of front window
+    return tab t of window w
+  end tell
+end tabRef'''
+
+def safari(action, url="", script="", tab=""):
+    """Safari: list tabs, open a page, read a tab's text, or run JavaScript in a tab."""
+    if not MAC: return "error: Safari control only works on a Mac"
+    action = str(action).strip().lower()
+    w, t = (int(x) for x in str(tab).split(".")) if re.fullmatch(r"\d+\.\d+", str(tab).strip()) else (0, 0)
+    try:
+        if action == "tabs":
+            return osa('''tell application "Safari"
+  set out to ""
+  repeat with w from 1 to count of windows
+    repeat with t from 1 to count of tabs of window w
+      set out to out & w & "." & t & "  " & (name of tab t of window w) & "  " & (URL of tab t of window w) & linefeed
+    end repeat
+  end repeat
+  return out
+end tell''') or "Safari has no open tabs"
+        if action == "open":
+            if not str(url).strip(): return "error: give the url to open"
+            osa('''on run argv
+  tell application "Safari"
+    activate
+    if (count of windows) is 0 then make new document
+    set URL of current tab of front window to item 1 of argv
+  end tell
+end run''', str(url).strip())
+            return f"opened {url} in Safari"
+        if action in ("read", "run"):
+            js = "document.title + '\\n' + location.href + '\\n\\n' + document.body.innerText" if action == "read" else str(script)
+            if action == "run":
+                if not js.strip(): return "error: give the JavaScript to run"
+                if PLAN: return plan_block()
+                if not confirm("run JavaScript in Safari", js): return "The user declined."
+            out = osa(SAFARI_TAB + '''
+on run argv
+  set r to tabRef((item 2 of argv) as integer, (item 3 of argv) as integer)
+  tell application "Safari" to return (do JavaScript (item 1 of argv) in r) as text
+end run''', js, str(w), str(t), timeout=60)
+            return clip(out or "(no result)", PAGE_CHARS)
+        return "error: action is tabs, open, read or run"
+    except subprocess.TimeoutExpired:
+        return "error: Safari took too long to answer"
+    except RuntimeError as e:
+        if re.search(r"(?i)javascript.*apple ?events|allow javascript", str(e)):
+            return ("error: Safari blocks this until it's allowed once. Tell the user: Safari > Settings > Advanced > tick \"Show features for "
+                    "web developers\", then the Develop menu > \"Allow JavaScript from Apple Events\".")
+        if re.search(r"-1743|not authori[sz]ed|not allowed", str(e)):
+            return "error: this terminal isn't allowed to control Safari. Tell the user: System Settings > Privacy & Security > Automation > their terminal app > turn on Safari."
+        return f"error: {e}"
+
+MESSAGES_DB = f"{HOME}/Library/Messages/chat.db"
+
+def message_text(text, blob):
+    """Newer Messages keeps the words in a binary field: pull the readable text out of it."""
+    if text: return text
+    if not blob: return ""
+    try:
+        part = blob.split(b"NSString", 1)[1][5:]
+        n, part = (part[0], part[1:]) if part[0] < 0x80 else (int.from_bytes(part[1:3], "little"), part[3:])
+        return part[:n].decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+def imessage(action, to="", text="", limit="10", who=""):
+    """Messages: send an iMessage or text, read recent messages, or find someone's number in Contacts."""
+    if not MAC: return "error: Messages only works on a Mac"
+    action = str(action).strip().lower()
+    try:
+        if action == "send":
+            to, text = str(to).strip(), str(text).strip()
+            if not to or not text: return "error: give who to send to (a phone number or email) and the text"
+            if PLAN: return plan_block()
+            if not confirm(f"send a message to {to}", text, always_ask=True): return "The user declined. Nothing was sent."
+            osa('''on run argv
+  tell application "Messages"
+    try
+      set s to 1st account whose service type = iMessage
+      send (item 2 of argv) to participant (item 1 of argv) of s
+    on error
+      set s to 1st account whose service type = SMS
+      send (item 2 of argv) to participant (item 1 of argv) of s
+    end try
+  end tell
+end run''', to, text)
+            return f"sent to {to}"
+        if action == "find":
+            name = str(who or to).strip()
+            if not name: return "error: give the name to look up"
+            return osa('''on run argv
+  set out to ""
+  tell application "Contacts"
+    repeat with p in (people whose name contains (item 1 of argv))
+      set out to out & (name of p) & ":"
+      repeat with ph in phones of p
+        set out to out & " " & (value of ph)
+      end repeat
+      repeat with em in emails of p
+        set out to out & " " & (value of em)
+      end repeat
+      set out to out & linefeed
+    end repeat
+  end tell
+  return out
+end run''', name) or f"nobody named {name} in Contacts"
+        if action == "read":
+            import sqlite3
+            try:
+                db = sqlite3.connect(f"file:{MESSAGES_DB}?mode=ro", uri=True)
+                rows = db.execute("""select datetime(m.date / 1000000000 + 978307200, 'unixepoch', 'localtime'), m.is_from_me, h.id, m.text, m.attributedBody
+                    from message m left join handle h on m.handle_id = h.ROWID
+                    where (? = '' or h.id like ?) order by m.date desc limit ?""",
+                    (str(who or to).strip(), f"%{str(who or to).strip()}%", max(1, min(int(str(limit) or 10), 50)))).fetchall()
+            except (sqlite3.Error, ValueError) as e:
+                return ("error: can't read Messages yet. Tell the user: System Settings > Privacy & Security > Full Disk Access > turn on their "
+                        f"terminal app, then quit and reopen it. ({e})")
+            return "\n".join(f"{when}  {('me → ' + (h or '?')) if mine else (h or '?')}: {message_text(t, b)}"
+                             for when, mine, h, t, b in reversed(rows)) or "no messages"
+        return "error: action is send, read or find"
+    except subprocess.TimeoutExpired:
+        return "error: Messages took too long to answer"
+    except RuntimeError as e:
+        if re.search(r"-1743|not authori[sz]ed|not allowed", str(e)):
+            return "error: this terminal isn't allowed to control Messages or Contacts. Tell the user: System Settings > Privacy & Security > Automation > their terminal app > turn on Messages and Contacts."
+        return f"error: {e}"
+
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
               "list_files": list_files, "search_files": search_files,
-              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task: one_helper(1, str(task)), "schedule_task": schedule_task, "test_page": test_page,
+              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task: one_helper(1, str(task)), "schedule_task": schedule_task, "test_page": test_page, "safari": safari, "imessage": imessage,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
               "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
 
@@ -2051,6 +2462,15 @@ TOOLS = [
          devices="any of phone, small, big, android, tablet, ipad-mini, tablet-landscape, phone-landscape, desktop; default phone,tablet,desktop",
          steps="optional actions before checking, one per line: click Menu · click #signup · type #email me@x.com · scroll 1200 · wait 1000 · press Enter",
          see="false to skip the screenshots, default true"),
+] + ([
+    tool("safari", "Control Safari on this Mac: list its open tabs, open a page, read a tab's text, or run JavaScript in a tab (to click, fill in "
+         "forms or pull data out of a page that needs their login).", action="tabs, open, read or run",
+         url="for open: the address", script="for run: the JavaScript; the value of its last line comes back",
+         tab="which tab like 1.2 (window.tab) from tabs, default the front tab"),
+    tool("imessage", "Messages on this Mac: send an iMessage or text, read recent messages, or find someone's number or email in Contacts. "
+         "Sending always asks the user first.", action="send, read or find", to="for send: phone number or email; for read: only this person, default all",
+         text="for send: the message", limit="for read: how many, default 10", who="for find: the name to look up, default none"),
+] if MAC else []) + [
     tool("schedule_task", "Do a task later or again and again on its own, even with the app closed: every morning, every weekday, every hour, once "
          "at a time. Each run's report is saved and sent to them as a notification. Also lists or removes scheduled tasks.",
          action="add, list or remove, default add", when="daily 08:00, weekdays 9am, mon,thu 18:00, every 30 minutes, hourly, or once 2026-10-20 15:00",
@@ -2346,7 +2766,7 @@ def system_prompt():
 # what the loader says while each tool works, so nothing ever looks frozen (images draw their own)
 RUNNING = {"run_shell": "Running", "check_job": "Checking the job", "web_search": "Searching the web", "fetch_page": "Opening page", "read_file": "Reading",
            "list_files": "Looking through files", "search_files": "Searching files", "write_file": "Saving", "edit_file": "Saving",
-           "use_skill": "Loading skill", "schedule_task": "Scheduling", "test_page": "Checking the page"}
+           "use_skill": "Loading skill", "schedule_task": "Scheduling", "test_page": "Checking the page", "safari": "Working in Safari", "imessage": "Working in Messages"}
 tool_wait = None; tool_label = ""
 LAST_TOOLS = []     # (call shown, full output) for this reply, for ctrl-o
 
@@ -3178,6 +3598,7 @@ def get_update(quiet, wait):
             with open(tmp, "w") as f: f.write(text)
             os.chmod(tmp, 0o755); os.replace(tmp, os.path.join(here, name))
         global reload_ready
+        restart_phone()
         update_note = f"updated to v{latest[0]} · reloading"; reload_ready = True
         if len(latest) > 1 and latest[1].isdigit() and int(latest[1]) > int(load_config().get("parts", 0) or 0):
             update_note += " · new features to download: /update full"
@@ -3347,6 +3768,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/commit", "commit your changes with a message it writes"), ("/review", "review your changes for bugs before you push"),
             ("/hooks", "your own commands before or after its tools"), ("/check", "check a site on phone, tablet and desktop · /check localhost:5173"), ("/notify", "notifications when it finishes in the background"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
+            ("/phone", "use it from your phone through Telegram"), ("/cost", "what the cloud card has cost"), ("/export", "save this chat as a document"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -3678,6 +4100,8 @@ if sys.argv[1:2] == ["--flyby"]:
 
 if sys.argv[1:2] == ["--tick"]:
     tick(); sys.exit(0)
+if sys.argv[1:2] == ["--phone"]:             # the phone bridge, kept running by the system
+    phone_loop(); sys.exit(0)
 if sys.argv[1:2] == ["--ticker"]:            # set the system timer on or off to match what's scheduled
     print(ticker() or "ok"); sys.exit(0)
 if sys.argv[1:2] == ["--run-schedule"] and len(sys.argv) > 2:
@@ -3870,6 +4294,9 @@ while True:
         if user.startswith("/schedule"): show_schedules(user[9:]); continue
         if user.startswith("/hooks"): show_hooks(user[6:]); continue
         if user.startswith("/warm"): keep_warm(user[5:]); continue
+        if user.startswith("/phone"): setup_phone(user[6:]); continue
+        if user == "/cost": show_cost(); continue
+        if user.startswith("/export"): export_chat(user[7:]); continue
         if user == "/notify":
             on = not load_config().get("notify", True); save_config(notify=on)
             print(f"{DIM}notifications {'on · when a reply takes 30s or more, or it needs you, while you are in another window' if on else 'off'}{R}"); continue
