@@ -119,6 +119,10 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/todos` | Its to-do list for the job it's on. On bigger jobs it keeps one and ticks steps off as it goes. |
 | `/jobs` | Commands it left running in the background, like a dev server. They stop when you quit. |
 | `/context` | How full the chat is. |
+| `/rewind` | Go back to an earlier message, change it and send it again, and put back the files it changed after it if you want. Esc twice on an empty line does the same. |
+| `/last` | The full output of the last tools it ran (it shows only the first line). Ctrl+O does the same. |
+| `/apps` | The apps you can connect. `/apps email` searches them, `/apps connected` shows yours. |
+| `/say` | Read its replies out loud. |
 | `/mcp` | Connected tool servers and apps. `/mcp add <name> <url> Header:value` adds one. |
 | `/undo` | Put back the last file it wrote or edited. |
 | `/compact` | Fold the chat so far into a short summary to make room. |
@@ -127,7 +131,7 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/reset` | Start a fresh conversation. `/clear` does the same. |
 | `exit` | Quit. |
 
-When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go, and Tab finishes the name. Pasted text keeps its line breaks, and the up arrow brings back what you typed, even from earlier sessions. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. The whole thing redraws itself when you resize the window.
+When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go, and Tab finishes the name. Ctrl+V pastes a screenshot from the clipboard. Pasted text keeps its line breaks, and the up arrow brings back what you typed, even from earlier sessions. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. Press `f` at a question to always allow that kind of command (like `npm test`) or file changes in that folder, kept between sessions; `/allow clear` forgets them. Tables come out as grids and code in color. The whole thing redraws itself when you resize the window.
 
 To show it an image, drag the file into the terminal window and add your question.
 
@@ -156,6 +160,7 @@ Everything it knows about itself lives in four places inside `~/.bxzex-ai`, all 
 - **`BXZEX.md`** is its guide. Add your own rules at the bottom ("always answer in Spanish", "I'm a mechanic, keep it practical") and it follows them in every conversation. Put a `BXZEX.md` in any folder and it reads that too when you launch it from there.
 - **`memory.md`** is what it has saved about you. One line per thing.
 - **`about.md`** is where you tell it who you are. It's read in every chat and never leaves your computer.
+- **`tests/`** (in this repo) checks the whole app in a real terminal against a stand-in model: `bash tests/run.sh`.
 - **`commands/`** holds your own slash commands: save a prompt as `commands/name.md` and type `/name`.
 - **`chats/`** keeps every conversation, so nothing is lost when you close the window.
 - **`skills/`** holds one file per skill. Copy one, change the name and description at the top, write what you want it to know, and it has a new skill.

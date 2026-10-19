@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -470,18 +470,87 @@ def http_get(url):
         raise RuntimeError(f"could not load {url}")
 
 def web_search(query):
-    page = http_get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query))
-    hits = re.findall(r'(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>', page)
-    out = []
-    for href, title, snip in hits[:6]:
-        href = html.unescape(href)
-        url = urllib.parse.parse_qs(urllib.parse.urlparse(href).query).get("uddg", [href])[0]
-        out.append(f"{page_text(title)}\n{url}\n{page_text(snip)}")
-    return "\n\n".join(out) or "no results"
+    """DuckDuckGo first; if it is blocked or changes, its light page, then Bing. One of them answers."""
+    q = urllib.parse.quote_plus(query)
+    def ddg():
+        page = http_get("https://html.duckduckgo.com/html/?q=" + q)
+        return [(urllib.parse.parse_qs(urllib.parse.urlparse(html.unescape(h)).query).get("uddg", [html.unescape(h)])[0], t, sn)
+                for h, t, sn in re.findall(r'(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>', page)]
+    def ddg_lite():
+        page = http_get("https://lite.duckduckgo.com/lite/?q=" + q)
+        links = re.findall(r"(?s)<a[^>]+href=\"([^\"]+)\"[^>]*class='result-link'[^>]*>(.*?)</a>", page) or \
+                re.findall(r"(?s)<a[^>]+class='result-link'[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>", page)
+        snips = re.findall(r"(?s)class='result-snippet'[^>]*>(.*?)</td>", page)
+        return [(urllib.parse.parse_qs(urllib.parse.urlparse(html.unescape(h)).query).get("uddg", [html.unescape(h)])[0], t, snips[i] if i < len(snips) else "")
+                for i, (h, t) in enumerate(links)]
+    def bing():
+        page = http_get("https://www.bing.com/search?q=" + q + "&setlang=en")
+        def real(u):                                 # bing hands out its own tracking links: the real address is inside, base64
+            u = html.unescape(u)
+            m = re.search(r"[?&]u=a1([^&]+)", u)
+            if "bing.com/ck/" in u and m:
+                try: return base64.urlsafe_b64decode(m.group(1) + "=" * (-len(m.group(1)) % 4)).decode("utf-8", "ignore")
+                except ValueError: pass
+            return u
+        return [(real(h), t, sn) for h, t, sn in
+                re.findall(r'(?s)<li class="b_algo".*?<h2[^>]*><a[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?(?:<p[^>]*>(.*?)</p>|</li>)', page)]
+    for engine in (ddg, ddg_lite, bing):
+        try: hits = [(u, t, sn) for u, t, sn in engine() if u.startswith("http")]
+        except Exception: hits = []
+        if hits:
+            return "\n\n".join(f"{page_text(t)}\n{u}\n{page_text(sn or '')}" for u, t, sn in hits[:6])
+    return "no results (the search sites didn't answer; try other words, or fetch_page a site you know)"
 
 def fetch_page(url):
     if not re.match(r"https?://", url): url = "https://" + url
+    if re.search(r"\.pdf($|[?#])", url, re.I) or head_type(url).startswith("application/pdf"):
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+        try:
+            subprocess.run(["curl", "-sL", "--max-time", "40", "--max-filesize", "30000000", "-A", UA["User-Agent"], "-o", tmp, url], capture_output=True)
+            return clip(pdf_text(tmp) or "the PDF had no readable text (it may be scanned images)", PAGE_CHARS)
+        finally:
+            if os.path.exists(tmp): os.unlink(tmp)
     return clip(page_text(http_get(url)), PAGE_CHARS)
+
+def head_type(url):
+    try:
+        p = subprocess.run(["curl", "-sIL", "--max-time", "10", "-A", UA["User-Agent"], url], capture_output=True, text=True, errors="replace")
+        types = re.findall(r"(?im)^content-type:\s*([^;\r\n]+)", p.stdout)
+        return types[-1].strip().lower() if types else ""
+    except Exception: return ""
+
+def pdf_text(path):
+    """Text out of a PDF: pdftotext when installed, otherwise a plain reader for ordinary text PDFs."""
+    if shutil.which("pdftotext"):
+        p = subprocess.run(["pdftotext", "-layout", path, "-"], capture_output=True, text=True, errors="replace")
+        if p.stdout.strip(): return p.stdout.strip()
+    if MAC:                                          # the Mac's own PDF reader, which handles every kind of font
+        js = ('ObjC.import("PDFKit"); var d = $.PDFDocument.alloc.initWithURL($.NSURL.fileURLWithPath(' + json.dumps(os.path.abspath(path)) + '));'
+              ' d.isNil() ? "" : d.string.js')
+        try:
+            p = subprocess.run(["osascript", "-l", "JavaScript", "-e", js], capture_output=True, text=True, errors="replace", timeout=60)
+            if p.stdout.strip(): return p.stdout.strip()
+        except subprocess.TimeoutExpired: pass
+    import zlib
+    try:
+        with open(path, "rb") as f: data = f.read()
+    except OSError: return ""
+    if not data.startswith(b"%PDF"): return ""
+    out = []
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S):
+        chunk = m.group(1)
+        try: chunk = zlib.decompress(chunk)
+        except zlib.error: pass
+        for t in re.finditer(rb"\[(.*?)\]\s*TJ|\((.*?)(?<!\\)\)\s*Tj|(T\*|ET|Td|TD)", chunk, re.S):
+            if t.group(3): out.append(b"\n" if t.group(3) in (b"T*", b"ET") else b" "); continue
+            if t.group(1) is not None:
+                bits = re.findall(rb"\((.*?)(?<!\\)\)|(-?\d+\.?\d*)", t.group(1), re.S)
+                out.append(b"".join(b if b else (b" " if n and float(n) < -200 else b"") for b, n in bits))
+            else: out.append(t.group(2))
+    text = b"".join(out).decode("latin-1", "ignore")
+    text = re.sub(r"\\([()\\])", r"\1", text).replace("\\n", "\n")
+    text = re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n\n", text))
+    return text.strip() if sum(ch.isalpha() for ch in text) > 40 else ""
 
 ESC_PART = re.compile(r"\x1b(\[[0-9;<?]*|O)?$")                  # an escape sequence the read cut off before its last byte
 ESC_KEY  = re.compile(r"\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[0-9;?<=>]*[ -/]*[@-~]|\x1bO[A-Za-z]|\x1b[^\[O\x1b]")
@@ -497,6 +566,7 @@ def keys_mode():
     try:
         COOKED = termios.tcgetattr(fd); tty.setcbreak(fd, termios.TCSANOW)
         mode = termios.tcgetattr(fd); mode[0] &= ~termios.ICRNL           # Enter stays \r, so a pasted \r\n is one line break, not two
+        mode[3] &= ~termios.IEXTEN                                         # ctrl-o and ctrl-v come to the app instead of the terminal
         termios.tcsetattr(fd, termios.TCSANOW, mode)
     except termios.error: COOKED = None; return
     atexit.register(lambda: termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, COOKED))
@@ -580,9 +650,29 @@ RISKY = re.compile(r"""(?ix)
 SENSITIVE = re.compile(r"/(\.ssh|\.gnupg|\.aws|\.config|Library|\.zshrc|\.zprofile|\.bashrc|\.bash_profile|\.profile|\.gitconfig|\.netrc)(/|$)"
                        r"|^/(etc|usr|bin|sbin|System|boot|var|mnt/[a-z]/Windows)/")
 
-def confirm(what, detail, always_ask=False, diff=False):
+def folder_rules():
+    return (load_config().get("allow") or {}).get(os.getcwd(), [])
+
+def allowed_here(rule):
+    return bool(rule) and rule in folder_rules()
+
+def allow_here(rule):
+    allow = load_config().get("allow") or {}
+    allow.setdefault(os.getcwd(), [])
+    if rule not in allow[os.getcwd()]: allow[os.getcwd()].append(rule)
+    save_config(allow=allow)
+
+def command_rule(command):
+    """npm test, git commit, python3: the start of a command, which "always here" remembers."""
+    try: words = shlex.split(re.split(r"&&|\|\||[;|&\n]", command)[0])
+    except ValueError: return ""
+    if not words: return ""
+    return " ".join(words[:2]) if len(words) > 1 and re.fullmatch(r"[a-z][a-z:-]*", words[1]) else words[0]
+
+def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
     global allow_all
     if allow_all and not always_ask: return True
+    if rule and not always_ask and allowed_here(rule): return True
     if not sys.stdin.isatty(): return False
     global tool_wait
     if tool_wait: tool_wait.stop(); tool_wait = None       # the loader steps aside for the question
@@ -597,7 +687,8 @@ def confirm(what, detail, always_ask=False, diff=False):
         tone = c(114) if diff and line.startswith("+") else c(174) if diff and line.startswith("-") else DIM
         print(f"  {DIM}│{R} {tone}{line}{R}")
     if len(shown) > room: print(f"  {DIM}│ … {len(shown) - room} more lines{R}")
-    buttons = [("y", " y  yes "), ("n", " n  no ")] + ([] if always_ask else [("a", " a  always allow ")])
+    buttons = [("y", " y  yes "), ("n", " n  no ")] + ([] if always_ask else [("a", " a  always, this chat ")]) \
+              + ([("f", f" f  always here: {rule_label[:28]} ")] if rule and not always_ask else [])
     line, col, spots = f"  {GOLD}❯{R} ", 5, {}
     for key, label in buttons:
         line += f"\033[7m{label}{R}  "; spots[key] = (col, col + len(label) - 1); col += len(label) + 2
@@ -611,7 +702,10 @@ def confirm(what, detail, always_ask=False, diff=False):
         print(); raise
     finally:
         if busy: typed.start()
-    print(a if a in "yna" else "")
+    print(a if a in "ynaf" else "")
+    if a == "f" and rule:
+        allow_here(rule); print(f"  {DIM}saved: {rule_label} is always allowed in {os.getcwd().replace(HOME, '~')} · /allow clear to undo{R}")
+        a = "y"
     if a in "ya" and a and tool_label: sys.stdout.write("\033[?25l"); tool_wait = Waiting(tool_label)   # and comes back while it runs
     if a == "a" and not always_ask: allow_all = True; return True
     return a == "y"
@@ -637,8 +731,10 @@ def only_looks(command):
 
 def run_shell(command, background="false"):
     if PLAN and not only_looks(command): return plan_block()
+    rules = {command_rule(part) for part in re.split(r"&&|\|\||[;|&\n]", command) if part.strip() and not only_looks(part)}
+    rule = f"cmd:{rules.pop()}" if len(rules) == 1 else ""
     if not only_looks(command) and not confirm("run in the background" if str(background).lower() == "true" else "run command",
-                                               command, always_ask=bool(RISKY.search(command))):
+                                               command, always_ask=bool(RISKY.search(command)), rule=rule, rule_label=rule[4:] + " …"):
         return "The user declined to run this command."
     if str(background).lower() == "true": return start_job(command)
     # no keyboard for the command (a prompt would freeze the app), and its own process group so a timeout stops all of it
@@ -654,17 +750,25 @@ def run_shell(command, background="false"):
         return f"command timed out after {SHELL_SECONDS}s and was stopped"
     return clip(f"exit code {p.returncode}\n{out}{err}".strip(), OUT_CHARS)
 
-def read_file(path, start="0"):
+def read_file(path, start="0", lines=""):
     path = os.path.expanduser(path)
     size = os.path.getsize(path)
     if size > 20_000_000: return f"error: {path} is {size // 1_000_000}MB, too big to read whole. Use run_shell with head, tail or grep on it."
     with open(path, "rb") as f: head = f.read(8000)
+    if head.startswith(b"%PDF"): return clip(pdf_text(path) or "the PDF had no readable text (it may be scanned images)", PAGE_CHARS)
+    m = re.match(r"\s*(\d+)\s*(?:-\s*(\d+))?\s*$", str(lines or ""))
+    if m and not b"\0" in head:
+        with open(path, "r", errors="replace") as f: all_lines = f.read().splitlines()
+        a = max(1, int(m.group(1))); b = min(len(all_lines), int(m.group(2) or a + 199), a + 399)
+        body = "\n".join(f"{n:>5}│ {all_lines[n - 1]}" for n in range(a, b + 1))
+        return (f"lines {a}-{b} of {len(all_lines)} (the numbers and │ are not part of the file: leave them out when you copy text into edit_file)\n" + body)
     if b"\0" in head: return f"error: {path} is a binary file ({size:,} bytes), not text. Use run_shell with file or a tool made for that type."
     with open(path, "r", errors="replace") as f: text = f.read()
     try: at = max(0, int(start))
     except ValueError: at = 0
     part = text[at:at + PAGE_CHARS]
-    if at + PAGE_CHARS < len(text): part += f"\n[...{len(text) - at - PAGE_CHARS} more chars: call read_file again with start={at + PAGE_CHARS}]"
+    if at + PAGE_CHARS < len(text): part += (f"\n[...{len(text) - at - PAGE_CHARS} more chars: call read_file again with start={at + PAGE_CHARS}, "
+                                             f"or read numbered lines with lines, like lines=\"200-300\" ({text.count(chr(10)) + 1} lines in all)]")
     return part
 
 UNDO = []   # (path, what it held before, or None if it didn't exist), newest last, for /undo
@@ -689,8 +793,9 @@ def write_file(path, content):
     if os.path.isfile(path):
         with open(path, "r", errors="replace") as f: old = f.read()
     shown = changes(old, content) if old is not None else content
+    here = os.path.abspath(path).startswith(os.getcwd() + os.sep)
     if not confirm(f"{'update' if old is not None else 'write'} {path}", shown, always_ask=bool(SENSITIVE.search(os.path.abspath(path))),
-                   diff=old is not None): return "The user declined to write this file."
+                   diff=old is not None, rule="edits" if here else "", rule_label="file changes"): return "The user declined to write this file."
     save_file(path, content)
     return f"wrote {len(content)} chars to {path}"
 
@@ -703,7 +808,9 @@ def edit_file(path, old_text, new_text, replace_all="false"):
     every = str(replace_all).lower() == "true"
     if n > 1 and not every: return f"error: old_text appears {n} times. Include more of the lines around it so it matches once, or set replace_all to true."
     new = text.replace(old_text, new_text) if every else text.replace(old_text, new_text, 1)
-    if not confirm(f"edit {path}", changes(text, new), always_ask=bool(SENSITIVE.search(os.path.abspath(path))), diff=True):
+    here = os.path.abspath(path).startswith(os.getcwd() + os.sep)
+    if not confirm(f"edit {path}", changes(text, new), always_ask=bool(SENSITIVE.search(os.path.abspath(path))), diff=True,
+                   rule="edits" if here else "", rule_label="file changes"):
         return "The user declined this edit."
     save_file(path, new)
     return f"edited {path}: {n if every else 1} change(s)"
@@ -970,7 +1077,35 @@ def show_todos():
         elif state == ">": print(f"  {GOLD}▸{R} {BOLD}{text}{R}")
         else: print(f"  {DIM}○{R} {text}")
 
+def todo_items(todos):
+    """The list as models actually send it: [ ] lines, or JSON (strings, or objects with text and done/status)."""
+    data = todos
+    if isinstance(todos, str) and todos.strip()[:1] in "[{":
+        try: data = json.loads(todos)
+        except ValueError:
+            try:
+                import ast
+                data = ast.literal_eval(todos)
+            except (ValueError, SyntaxError): data = todos
+    if isinstance(data, dict): data = data.get("todos") or data.get("items") or [data]
+    if not isinstance(data, list): return None
+    out = []
+    for it in data:
+        if isinstance(it, str): out.append((" ", it.strip())); continue
+        if not isinstance(it, dict): continue
+        text = next((str(it[k]) for k in ("t", "text", "title", "content", "task", "step", "name") if it.get(k)), "")
+        status = str(it.get("status") or it.get("state") or "").lower()
+        done = it.get("done") is True or it.get("completed") is True or status in ("done", "completed", "complete", "finished")
+        doing = status in ("in_progress", "in progress", "doing", "active", "current") or it.get("current") is True
+        if text: out.append(("x" if done else ">" if doing else " ", text.strip()))
+    return out
+
 def update_todos(todos):
+    parsed = todo_items(todos)
+    if parsed:
+        TODOS[:] = parsed[:20]; show_todos()
+        left = sum(1 for st, _ in TODOS if st != "x")
+        return f"to-do list updated: {len(TODOS) - left} done, {left} left"
     items = []
     for line in str(todos).splitlines():
         m = re.match(r"\s*(?:[-*]\s*)?\[(.)\]\s*(.+)", line)
@@ -1108,14 +1243,47 @@ def mcp_rpc(server, method, params=None, note=False):
 def mcp_name(server, tool_name):
     return re.sub(r"[^A-Za-z0-9_-]", "_", f"{server}__{tool_name}")[:64]
 
+COMPOSIO_API = "https://backend.composio.dev/api/v3.1"
+
+def composio_key():
+    conf = (load_config().get("mcp") or {}).get("composio") or {}
+    return (conf.get("headers") or {}).get("x-api-key", "")
+
+def composio_api(path, body=None):
+    req = urllib.request.Request(COMPOSIO_API + path, json.dumps(body).encode() if body is not None else None,
+                                 {"x-api-key": composio_key(), "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r: return json.load(r)
+
+def renew_composio():
+    """Composio sessions can run out. With the project key, a fresh one is made and saved, so apps keep working."""
+    if not composio_key(): return False
+    try:
+        conf = load_config().get("mcp") or {}
+        user = conf["composio"].get("user_id") or "bxzex-ai"
+        made = composio_api("/tool_router/session", {"user_id": user})
+        url = (made.get("mcp") or {}).get("url")
+        if not url: return False
+        conf["composio"]["url"] = url; conf["composio"]["user_id"] = user
+        save_config(mcp=conf)
+        try: os.chmod(CONFIG, 0o600)
+        except OSError: pass
+        return True
+    except Exception:
+        return False
+
 def connect_mcp():
     """Start every MCP server in config.json and add its tools to the ones the model can call."""
     for server, conf in (load_config().get("mcp") or {}).items():
         if not isinstance(conf, dict) or not conf.get("url"): continue
         try:
             mcp_sessions.pop(server, None)
-            mcp_rpc(server, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
-                                           "clientInfo": {"name": "bxzex-ai", "version": VERSION}})
+            try:
+                mcp_rpc(server, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
+                                               "clientInfo": {"name": "bxzex-ai", "version": VERSION}})
+            except Exception:
+                if not (server == "composio" and renew_composio()): raise
+                mcp_rpc(server, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
+                                               "clientInfo": {"name": "bxzex-ai", "version": VERSION}})
             try: mcp_rpc(server, "notifications/initialized", note=True)
             except Exception: pass
             tools, cursor = [], None
@@ -1145,8 +1313,10 @@ def mcp_call(name, args):
         if not confirm(f"{server}: {real}", shown): return "The user declined this action."
     try: res = mcp_rpc(server, "tools/call", {"name": real, "arguments": args})
     except Exception as e:
-        if "session" in str(e).lower():               # the server forgot us: connect again once
-            mcp_sessions.pop(server, None); connect_again(server)
+        if re.search(r"(?i)session|expired|not found|40[134]", str(e)):   # the server forgot us: connect again once
+            mcp_sessions.pop(server, None)
+            if server == "composio": renew_composio()
+            connect_again(server)
             res = mcp_rpc(server, "tools/call", {"name": real, "arguments": args})
         else: raise
     parts = []
@@ -1160,6 +1330,44 @@ def mcp_call(name, args):
 
 def connect_again(server):
     mcp_rpc(server, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "bxzex-ai", "version": VERSION}})
+
+def show_apps(arg=""):
+    """/apps: what it can connect to. /apps <word> searches the list, /apps connected shows what you've signed in to."""
+    want = arg.strip()
+    if want == "connected":
+        if not composio_key(): print(f"{DIM}Composio isn't set up yet · see /mcp{R}"); return
+        user = ((load_config().get("mcp") or {}).get("composio") or {}).get("user_id") or "bxzex"
+        wait = Waiting("Checking your apps")
+        try: got = composio_api(f"/connected_accounts?user_ids={urllib.parse.quote(user)}&limit=100")
+        finally: wait.stop()
+        print(header("Your connected apps"))
+        rows = [((i.get("toolkit") or {}).get("slug", "?"), i.get("status", "")) for i in got.get("items", [])]
+        for slug, st in sorted(set(rows)):
+            print(f"  {GOLD if st == 'ACTIVE' else DIM}{slug}{R}  {DIM}{'connected' if st == 'ACTIVE' else st.lower().replace('_', ' ')}{R}")
+        if not rows: print(f"  {DIM}none yet · ask it to connect one, like \"connect my gmail\"{R}")
+        return
+    text = read_text(f"{APP_HOME}/connectors.txt", 10**7)
+    if not text: print(f"{DIM}the list of apps isn't here yet · /update gets it{R}"); return
+    if not want:
+        cats = re.findall(r"(?m)^## (.+)$", text)
+        print(header(f"Apps it can connect to ({len(re.findall(r'(?m)^- ', text))})"))
+        line = "  "
+        for cat in cats:
+            if len(line) + len(cat) + 3 > W(): print(f"{DIM}{line}{R}"); line = "  "
+            line += cat + " · "
+        print(f"{DIM}{line.rstrip(' ·')}{R}")
+        print(f"  {DIM}/apps <word> to search (like /apps email or /apps shopify) · /apps connected for yours · or just ask it to connect one{R}")
+        return
+    hits, cat = [], ""
+    for row in text.splitlines():
+        if row.startswith("## "): cat = row[3:]
+        elif row.startswith("- ") and (want.lower() in row.lower() or want.lower() in cat.lower()): hits.append(row[2:])
+    print(header(f"Apps matching \"{want}\" ({len(hits)})"))
+    for h in hits[:40]:
+        name, _, rest = h.partition(": ")
+        print(f"  {GOLD}{name}{R} {DIM}{rest[:max(10, W() - len(name) - 6)]}{R}")
+    if len(hits) > 40: print(f"  {DIM}… {len(hits) - 40} more · narrow it down{R}")
+    if hits: print(f"  {DIM}to use one, just ask: \"connect my {hits[0].split(' (')[0].lower()}\"{R}")
 
 def show_mcp(arg=""):
     words = arg.split()
@@ -1209,8 +1417,9 @@ TOOLS = [
          "[ ] to do, [>] the one you are on now, [x] done. The user sees it.", todos="the full list"),
     tool("ask_user", "Ask the user to choose when you really need their decision. They pick with the arrow keys or type their own answer.",
          question="short question", options="2 to 5 short choices separated by |"),
-    tool("read_file", "Read a text file from this computer. Long files come in parts: pass start to read further.", path="file path",
-         start="character to start from, default 0"),
+    tool("read_file", "Read a text file or a PDF from this computer. Long files come in parts: pass start to read further, or lines like 120-180 "
+         "to get those lines with line numbers.", path="file path", start="character to start from, default 0",
+         lines="line range like 120-180, default none"),
     tool("write_file", "Create a new text file, or replace one completely. To change part of a file, use edit_file.", path="file path", content="full file content"),
     tool("edit_file", "Change part of a file: replaces old_text (copied exactly from the file) with new_text. Much faster than rewriting the whole file.",
          path="file path", old_text="the exact text to replace, with enough lines around it to match once", new_text="what goes in its place",
@@ -1251,6 +1460,9 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - /update: get the newest version of the app. It also checks by itself each time it starts.
 - /image <description>: make a picture straight from their words, without you. If they ask you for a picture in conversation, use generate_image.
 - /plan or shift-tab: plan mode. You only look around and write a plan; changes are blocked until they turn it off.
+- /apps: browse the apps you can connect; /apps connected shows theirs.
+- /rewind or esc esc: go back to an earlier message and change it. ctrl-o: full tool output. ctrl-v: paste a screenshot.
+- /say: you read replies out loud.
 - /mcp: their connected tool servers, like Composio for their apps (Gmail, Calendar, Slack, GitHub...).
 - /todos: your to-do list. /jobs: commands you left running. /context: how full the chat is.
 - Their own commands: a prompt saved as ~/.bxzex-ai/commands/name.md runs with /name.
@@ -1323,7 +1535,8 @@ def learn(msgs):
         ask = ("Here is what is already known about the user:\n" + (known or "(nothing yet)") + "\n\nHere is the latest part of a chat:\n"
                + "\n".join(talk) + "\n\nList NEW lasting facts about the user that this chat shows and that are not already known: "
                "who they are, their work, projects, goals, plans, people in their life, tools, likes and dislikes, how they want things done. "
-               "Only facts about the user, stated or clearly shown by them, not guesses and not things about the topic. One short sentence "
+               "Only facts about the user, stated or clearly shown by them, not guesses and not things about the topic. Skip temporary "
+               "situations and one-off events (a deadline today, a mood, something that happened once): keep what will still be true next month. One short sentence "
                "each, on its own line starting with '- '. At most 4. If there is nothing new and lasting, reply with NONE.")
         body = json.dumps({"model": MODEL_ID or loaded_model(), "messages": [{"role": "user", "content": ask}], "max_tokens": 250,
                            "temperature": 0.2, "chat_template_kwargs": {"enable_thinking": False}}).encode()
@@ -1338,10 +1551,19 @@ def learn(msgs):
     finally:
         learning.release()
 
+learn_due = False
+
 def maybe_learn():
-    global user_turns
+    """Every few messages, mark that it's time to learn. It runs once they have been idle at the prompt for a while,
+    because the cloud card answers one request at a time: a learning pass must never sit in front of their next reply."""
+    global user_turns, learn_due
     user_turns += 1
-    if REMOTE and user_turns % LEARN_EVERY == 0 and load_config().get("learn", True):
+    if REMOTE and user_turns % LEARN_EVERY == 0 and load_config().get("learn", True): learn_due = True
+
+def learn_if_idle(idle_for):
+    global learn_due
+    if learn_due and idle_for > 20:
+        learn_due = False
         threading.Thread(target=learn, args=(list(history),), daemon=True).start()
 
 def show_memory(arg=""):
@@ -1459,6 +1681,16 @@ RUNNING = {"run_shell": "Running", "check_job": "Checking the job", "web_search"
            "list_files": "Looking through files", "search_files": "Searching files", "write_file": "Saving", "edit_file": "Saving",
            "use_skill": "Loading skill"}
 tool_wait = None; tool_label = ""
+LAST_TOOLS = []     # (call shown, full output) for this reply, for ctrl-o
+
+def show_last():
+    if not LAST_TOOLS: print(f"{DIM}no tool output yet in this reply{R}"); return
+    for title, out in LAST_TOOLS[-6:]:
+        print(f"{TEAL}◆{R} {BOLD}{title}{R}")
+        lines = out.splitlines()
+        for l in lines[:300]: print(f"  {DIM}│{R} {l}")
+        if len(lines) > 300: print(f"  {DIM}│ … {len(lines) - 300} more lines{R}")
+    print()
 
 def run_tool(call):
     fn = call["function"]; name = fn["name"]
@@ -1482,7 +1714,8 @@ def run_tool(call):
         tool_label = ""; sys.stdout.write("\033[?25h"); sys.stdout.flush()
     lines = [l for l in out.strip().splitlines() if l.strip()]
     first = lines[0] if lines else "(empty)"
-    more = f" (+{len(lines)-1} lines)" if len(lines) > 1 else ""
+    LAST_TOOLS.append((f"{name}({shown[:W() - len(name) - 6]})", out))
+    more = f" (+{len(lines)-1} lines · ctrl-o)" if len(lines) > 1 else ""
     print(f"  {DIM}└ {first[:W()-len(more)-6]}{more}{R}\n")
     return out
 
@@ -1604,6 +1837,9 @@ class Markdown:
         self.prev = "\n"
         self.col = 0
         self.word = []; self.word_w = 0; self.word_style = R
+        self.codeline = ""    # the code line being written inside a ``` block, coloured when it ends
+        self.tline = None     # the table row being collected, from its first |
+        self.trows = []       # rows of a table, drawn as a grid once the table ends
 
     def style(self):
         s = R
@@ -1639,8 +1875,8 @@ class Markdown:
     def resolve(self, run, nxt):
         n = getattr(self, run); setattr(self, run, 0)
         if run == "ticks":
-            if n >= 3: self.fence = not self.fence; self.skip = True
-            elif self.fence: self.out("`" * n)
+            if n >= 3 and not self.codeline.strip(): self.fence = not self.fence; self.skip = True
+            elif self.fence: self.codeline += "`" * n; return
             else: self.code = not self.code
         elif run == "stars":
             if n >= 2: self.bold = not self.bold
@@ -1657,7 +1893,51 @@ class Markdown:
         sys.stdout.write(R + "\n"); self.bol = self.col0 = True; self.prev = "\n"; self.col = 0
         self.word_style = self.style()
 
+    def code_line(self):
+        self.flush_word()
+        sys.stdout.write((self.prefix if self.col0 else "") + ("" if self.col0 else "\n  ") + highlight(self.codeline) + R + "\n")
+        self.prefix = "  "; self.codeline = ""
+        self.bol = self.col0 = True; self.prev = "\n"; self.col = 0
+
+    def table(self):
+        """Draw the collected | rows as a grid that fits the window."""
+        import textwrap
+        rows = [[c.strip() for c in r.strip().strip("|").split("|")] for r in self.trows]
+        self.trows = []
+        rows = [r for r in rows if not all(re.fullmatch(r":?-{2,}:?", c) for c in r if c) or not any(r)]
+        if not rows: return
+        clean = lambda t: re.sub(r"\*\*|__|`", "", t)
+        n = max(len(r) for r in rows); rows = [[clean(c) for c in r] + [""] * (n - len(r)) for r in rows]
+        width = [max(3, max(len(r[i]) for r in rows)) for i in range(n)]
+        room = TW() - 2 - (3 * n + 1)
+        while sum(width) > room and max(width) > 8: width[width.index(max(width))] -= 1
+        self.flush_word()
+        if not self.col0: sys.stdout.write("\n")
+        elif self.prefix.strip(): sys.stdout.write(self.prefix.rstrip() + "\n")
+        line = lambda l, m, r: f"  {DIM}{l}" + m.join("─" * (w + 2) for w in width) + f"{r}{R}\n"
+        out = [line("┌", "┬", "┐")]
+        for k, r in enumerate(rows):
+            cells = [textwrap.wrap(c, w) or [""] for c, w in zip(r, width)]
+            for j in range(max(len(c) for c in cells)):
+                parts = [(c[j] if j < len(c) else "").ljust(w) for c, w in zip(cells, width)]
+                out.append(f"  {DIM}│{R} " + f" {DIM}│{R} ".join((BOLD + x + R) if k == 0 else x for x in parts) + f" {DIM}│{R}\n")
+            if k == 0 and len(rows) > 1: out.append(line("├", "┼", "┤"))
+        out.append(line("└", "┴", "┘"))
+        sys.stdout.write("".join(out))
+        self.prefix = "  "; self.bol = self.col0 = True; self.prev = "\n"; self.col = 0
+
     def char(self, ch):
+        if not self.fence:
+            if self.tline is not None:                     # inside a table row
+                if ch == "\n": self.trows.append(self.tline); self.tline = None
+                else: self.tline += ch
+                return
+            if self.trows:
+                if ch == "|" : self.tline = "|"; return     # the next row of the same table
+                if ch in " \t" : return
+                self.table()
+            if ch == "|" and self.bol and self.col0 and not self.word and not (self.stars or self.ticks or self.hashes or self.dash):
+                self.tline = "|"; return
         run = {"*": "stars", "`": "ticks", "#": "hashes"}.get(ch)
         if run == "hashes" and not (self.bol and not self.fence and not self.code): run = None
         if run == "stars" and (self.fence or self.code): run = None
@@ -1669,6 +1949,10 @@ class Markdown:
                 self.word_style = self.style()
             return
         if run: setattr(self, run, getattr(self, run) + 1); return
+        if self.fence:                                     # code: kept as written, coloured a line at a time
+            if ch == "\n": self.code_line()
+            else: self.codeline += ch
+            return
         if self.dash:
             self.dash = False
             if ch == " ": self.out("•"); self.bullet = True
@@ -1692,11 +1976,31 @@ class Markdown:
         sys.stdout.flush()
 
     def close(self):
+        if self.tline is not None: self.trows.append(self.tline); self.tline = None
+        if self.trows: self.table()
         for r in ("stars", "ticks", "hashes"):
             if getattr(self, r): self.resolve(r, "\n")
+        if self.codeline: self.code_line()
         if self.dash: self.out("-")
         self.flush_word()
         sys.stdout.write(R)
+
+CODE_WORDS = set("""def class return if elif else for while in not and or import from as with try except finally raise lambda yield await async
+    function const let var new this export default switch case break continue do typeof instanceof null undefined true false True False None
+    fn pub impl struct enum match use mod mut self static void int float bool string public private protected interface type package func go
+    select insert update delete where join create table values echo then fi done esac local""".split())
+
+def highlight(line):
+    """Code colours that work for most languages: keywords, strings, numbers and comments."""
+    out = []
+    for m in re.finditer(r'(?P<c>(?:#|//|--(?=\s)).*$)|(?P<s>"(?:\\.|[^"\\])*"?|\'(?:\\.|[^\'\\])*\'?|`[^`]*`?)|(?P<n>\b\d+(?:\.\d+)?\b)|(?P<w>[A-Za-z_][A-Za-z0-9_]*)|(?P<o>.)', line):
+        t = m.group(0)
+        if m.group("c"): out.append(f"{c(244)}{ITAL}{t}{R}")
+        elif m.group("s"): out.append(f"{c(150)}{t}{R}")
+        elif m.group("n"): out.append(f"{c(180)}{t}{R}")
+        elif m.group("w") and t in CODE_WORDS: out.append(f"{GOLD}{BOLD}{t}{R}")
+        else: out.append(f"{c(252)}{t}{R}")
+    return "".join(out)
 
 class Waiting:
     """One-line status shown while it loads, reads or thinks: flames, what it's doing, how long, how many tokens."""
@@ -1763,9 +2067,11 @@ def whole(call):
     except ValueError: return False
 
 def mend(msgs):
-    """Replaces cut-off tool calls with empty ones, since the server refuses the whole chat when one is broken."""
+    """Replaces cut-off tool calls with empty ones, since the server refuses the whole chat when one is broken.
+    Also leaves out the app's own notes on a message (keys starting with _), which the server doesn't need."""
     out = []
     for m in msgs:
+        if any(k.startswith("_") for k in m): m = {k: v for k, v in m.items() if not k.startswith("_")}
         if m.get("tool_calls") and not all(whole(c) for c in m["tool_calls"]):
             m = dict(m, tool_calls=[c if whole(c) else dict(c, function=dict(c["function"], arguments="{}")) for c in m["tool_calls"]])
         out.append(m)
@@ -1966,7 +2272,6 @@ def run_turn(history):
     """Agent loop: keep calling the model until it answers without asking for a tool.
     Anything typed and sent while it works is passed to it as a "by the way" note."""
     if not ensure_server(): return      # e.g. still reloading after an image
-    while learned: print(f"{DIM}remembered: {learned.pop(0)}{R}")
     typed.start()
     try:
         global turn_tok
@@ -2008,9 +2313,12 @@ def run_turn(history):
                 history.append({"role": "user", "content": "By the way: " + " ".join(notes)})
                 label = "Reading"
             elif not calls:
+                if speak and text: say_aloud(text)
                 took = time.time() - began
-                if sys.stdout.isatty() and took >= 1:
-                    print(f"\n{DIM}≈ done in {fmt(took)} · {turn_tok} tok{R}")
+                got = len(learned); learned.clear()
+                note = f"remembered {got} new thing{'s' if got > 1 else ''} about you (/memory)" if got else ""
+                if sys.stdout.isatty() and took >= 1: print(f"\n{DIM}≈ done in {fmt(took)} · {turn_tok} tok{' · ' + note if note else ''}{R}")
+                elif note: print(f"\n{DIM}≈ {note}{R}")
                 return
         print(f"{DIM}paused after {MAX_STEPS} tool steps · type continue to keep going{R}")
     finally:
@@ -2065,6 +2373,28 @@ def transcribe(wav):
         return " ".join(open(os.path.join(outdir, f), errors="replace").read() for f in os.listdir(outdir) if f.endswith(".txt"))
     finally:
         shutil.rmtree(outdir, ignore_errors=True)
+
+speak = False
+speaker = None
+
+def say_aloud(text):
+    """Read a reply out loud: say on a Mac, spd-say or espeak on Linux."""
+    global speaker
+    hush()
+    words = re.sub(r"```.*?```", " (code) ", text, flags=re.S)
+    words = re.sub(r"[*_`#>|]+", "", re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", words))
+    words = re.sub(r"https?://\S+", "a link", words)
+    words = " ".join(words.split())[:4000]
+    if not words: return
+    cmd = (["say"] if shutil.which("say") else ["spd-say", "-w"] if shutil.which("spd-say") else ["espeak"] if shutil.which("espeak") else None)
+    if cmd: speaker = subprocess.Popen(cmd + [words], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def hush():
+    global speaker
+    if speaker and speaker.poll() is None:
+        try: speaker.kill()
+        except OSError: pass
+    speaker = None
 
 def listen():
     """Record the mic until Enter, transcribe it on this machine, return the text."""
@@ -2333,7 +2663,9 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/device", "run on the graphics card or the processor · /device cpu"),
             ("/plan", "plan mode: it only looks and plans · also shift-tab"), ("/todos", "its to-do list"),
             ("/jobs", "commands running in the background"), ("/context", "how full the chat is"),
-            ("/mcp", "connected tools and apps · /mcp add name url"),
+            ("/mcp", "connected tools and apps · /mcp add name url"), ("/apps", "apps it can connect · /apps email · /apps connected"),
+            ("/rewind", "go back to an earlier message · also esc esc"), ("/last", "full output of the last tools · also ctrl-o"),
+            ("/say", "read replies out loud"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -2446,6 +2778,7 @@ def ask(prefill=""):
     box.fit()                            # the window may have been resized while it was busy
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
     buf = list(prefill); pos = len(buf); at = len(past); draft = ""; pasting = False
+    last_esc = 0.0; last_key = time.time()
     dec = codecs.getincrementaldecoder("utf-8")("ignore")
     print()
     tty.setcbreak(fd, termios.TCSANOW)
@@ -2461,6 +2794,7 @@ def ask(prefill=""):
         while True:
             try:
                 if reload_ready: raise Reload("".join(buf))
+                if not buf: learn_if_idle(time.time() - last_key)
                 ready, _, _ = select.select([fd], [], [], 0.15)
             except InterruptedError:
                 ready = []
@@ -2470,6 +2804,7 @@ def ask(prefill=""):
             if resized: resized = False; box.focus("".join(buf), pos)
             if not ready: continue
             if not buf: wake_soon()                       # they started typing: get a sleeping cloud card going now
+            last_key = time.time()
             data = dec.decode(os.read(fd, 4096))
             if ESC_PART.search(data): data = finish_escapes(fd, data)     # a key code cut in two must not read as Esc, which clears the line
             i = 0; done = False
@@ -2480,8 +2815,10 @@ def ask(prefill=""):
                     if rest.startswith("\x1b[200~"): pasting = True; i += 6; continue
                     if rest.startswith("\x1b[201~"): pasting = False; i += 6; continue
                     m = ESC_KEY.match(rest)
-                    if not m:                          # a lone Esc clears the line; a broken code is just dropped
-                        if len(rest) == 1: buf = []; pos = 0
+                    if not m:                          # a lone Esc clears the line; twice on an empty line goes back (rewind)
+                        if len(rest) == 1:
+                            if not buf and time.time() - last_esc < 0.8: buf = list("/rewind"); done = True; break
+                            buf = []; pos = 0; last_esc = time.time()
                         i += 1; continue
                     key = m.group(0); i += len(key)
                     if key in ("\x1bb", "\x1b[1;3D", "\x1b[1;5D", "\x1b[1;9D"):      # a word left
@@ -2517,6 +2854,12 @@ def ask(prefill=""):
                     if pos: del buf[pos - 1]; pos -= 1
                 elif ch == "\x04":
                     if not buf: raise EOFError
+                elif ch == "\x0f": buf = list("/last"); done = True; break       # ctrl-o: the full output of the last tools
+                elif ch == "\x16":                                             # ctrl-v: paste a screenshot from the clipboard
+                    shot = clipboard_image()
+                    if shot:
+                        add = (shlex.quote(shot) if " " in shot else shot) + " "
+                        buf[pos:pos] = list(add); pos += len(add)
                 elif ch == "\x01": pos = 0
                 elif ch == "\x05": pos = len(buf)
                 elif ch == "\x15": del buf[:pos]; pos = 0
@@ -2564,6 +2907,25 @@ def show_context():
     print(header("Context"))
     print(f"  {GOLD}{bar}{R} {pct}% {DIM}· about {used:,} of {size:,} tokens · {len(history)} messages{R}")
     print(f"  {DIM}it folds older messages into a summary by itself when it gets full · /compact does it now{R}")
+
+def clipboard_image():
+    """Save the picture on the clipboard (a screenshot) to a file and return its path, or "" when there isn't one."""
+    os.makedirs(f"{APP_HOME}/pasted", exist_ok=True)
+    out = f"{APP_HOME}/pasted/{time.strftime('%Y-%m-%d_%H-%M-%S')}.png"
+    try:
+        if MAC:
+            script = (f'set f to (open for access POSIX file "{out}" with write permission)\n'
+                      'try\nwrite (the clipboard as «class PNGf») to f\nend try\nclose access f')
+            subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+        elif shutil.which("wl-paste"):
+            with open(out, "wb") as f: subprocess.run(["wl-paste", "--type", "image/png"], stdout=f, stderr=subprocess.DEVNULL, timeout=5)
+        elif shutil.which("xclip"):
+            with open(out, "wb") as f: subprocess.run(["xclip", "-selection", "clipboard", "-t", "image/png", "-o"], stdout=f, stderr=subprocess.DEVNULL, timeout=5)
+        if os.path.exists(out) and os.path.getsize(out) > 100: return out
+    except Exception: pass
+    try: os.remove(out)
+    except OSError: pass
+    return ""
 
 def show_help():
     print(header("Commands"))
@@ -2672,9 +3034,41 @@ def close_open_calls():
             if call.get("id") not in answered:
                 history.append({"role": "tool", "tool_call_id": call.get("id"), "content": "Stopped by the user before this ran."})
 
+def rewind():
+    """Go back to an earlier message: the chat is cut there and the message comes back into the box to change and send again."""
+    global spoken
+    picks = [(i, m) for i, m in enumerate(history) if m["role"] == "user" and isinstance(m.get("content"), (str, list))
+             and not plain(m["content"]).startswith(("(", "By the way", SUMMARY_HEAD))][-20:][::-1]
+    if not picks: print(f"{DIM}nothing to go back to yet{R}"); return
+    print(header("Go back to"))
+    at = menu([(" ".join(plain(m["content"]).split())[:W() - 10], "") for _, m in picks], hint="↑↓ to move · enter to go back to it · esc to cancel")
+    if at is None: print(f"  {DIM}cancelled{R}"); return
+    i, m = picks[at]
+    mark = m.get("_undo", len(UNDO)); changed = len(UNDO) - mark
+    put_back = False
+    if changed > 0:
+        how = menu([("Go back in the chat only", "files stay as they are now"),
+                    ("Go back and put files back too", f"undoes {changed} file change{'s' if changed > 1 else ''} made after it")])
+        if how is None: print(f"  {DIM}cancelled{R}"); return
+        put_back = how == 1
+    if put_back:
+        while len(UNDO) > mark:
+            path, old = UNDO.pop()
+            try:
+                if old is None: os.remove(path)
+                else:
+                    with open(path, "w") as f: f.write(old)
+            except OSError: pass
+    del history[i:]
+    spoken = plain(m["content"])
+    print(f"{GOLD}●{R} {BOLD}Went back{R} {DIM}· {'files put back · ' if put_back else ''}your message is in the box: change it and press Enter{R}")
+    save_chat()
+
 def turn(text):
     print()
-    history.append(user_message(text))
+    hush()
+    LAST_TOOLS.clear()
+    history.append(dict(user_message(text), _undo=len(UNDO)))
     try:
         run_turn(history)
         maybe_learn()                                # every few messages, what's new about the user is saved in the background
@@ -2729,6 +3123,13 @@ while True:
             show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); continue
         if user=="/undo": undo(); continue
         if user=="/plan": toggle_plan(); continue
+        if user=="/rewind": rewind(); continue
+        if user=="/last": show_last(); continue
+        if user.startswith("/apps"): show_apps(user[5:]); continue
+        if user=="/say":
+            speak = not speak; hush()
+            print(f"{DIM}reading replies out loud {'on' if speak else 'off'}{R}" if (shutil.which("say") or shutil.which("spd-say") or shutil.which("espeak"))
+                  else f"{DIM}no voice on this computer · on Linux: sudo apt install speech-dispatcher{R}"); continue
         if user=="/todos":
             if TODOS: print(header("To-do")); show_todos()
             else: print(f"{DIM}no to-do list yet · it makes one for jobs with a few steps{R}")
@@ -2742,8 +3143,12 @@ while True:
             text = re.sub(r"(?s)\A---.*?---\s*", "", text)
             turn(text.replace("$ARGUMENTS", rest.strip()) if "$ARGUMENTS" in text else (text + ("\n\n" + rest if rest.strip() else "")))
             continue
+        if user=="/allow clear":
+            allow = load_config().get("allow") or {}; allow.pop(os.getcwd(), None); save_config(allow=allow)
+            print(f"{DIM}nothing is always allowed in this folder any more{R}"); continue
         if user=="/allow":
             allow_all = not allow_all
+            if folder_rules(): print(f"{DIM}always allowed in this folder: {', '.join(r.replace('cmd:', '') for r in folder_rules())} · /allow clear to wipe{R}")
             print(f"{DIM}always allow {'on · commands and file changes run without asking, risky ones still ask' if allow_all else 'off · it asks first'}{R}"); continue
         if user=="/compact":
             if len(history) < 3: print(f"{DIM}nothing to fold yet{R}"); continue
