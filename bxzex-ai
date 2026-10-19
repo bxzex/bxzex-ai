@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1873,7 +1873,7 @@ BROWSER_HOME = f"{APP_HOME}/browser"     # its own copy of the page checker, whe
 PENDING_SHOTS = []                      # screenshots the model should see, added after the tool results
 
 PAGE_CHECK = r'''
-import json, sys, time
+import json, re, sys, time
 from playwright.sync_api import sync_playwright
 job = json.loads(sys.argv[1]); out = []
 LOOK = """() => {
@@ -1890,18 +1890,34 @@ LOOK = """() => {
                   .filter(e => { const r = e.getBoundingClientRect(); const inline = e.tagName == 'A' && /^(P|LI|SPAN|TD)$/.test(e.parentElement.tagName);
                                  return !inline && (r.height < 20 || r.width < 24); });
   const tiny = all.filter(e => [...e.childNodes].some(n => n.nodeType == 3 && n.textContent.trim()) && parseFloat(getComputedStyle(e).fontSize) < 12);
+  const edge = W > 700 ? [] : all.filter(e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+                  const words = [...e.childNodes].some(n => n.nodeType == 3 && n.textContent.trim()) || /^(BUTTON|A|INPUT|IMG)$/.test(e.tagName);
+                  return words && r.width < W * 0.9 && r.top < H * 3 && r.right > 0 && r.left < W && (r.left < 8 || r.right > W - 8)
+                         && s.position != 'fixed' && s.position != 'absolute' && !clipped(e); }).slice(0, 5).map(name);
   const broken = [...document.images].filter(i => i.complete && i.naturalWidth == 0 && shown(i)).map(i => i.src.slice(0, 100)).slice(0, 5);
   const cover = all.filter(e => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
                   return (s.position == 'fixed' || s.position == 'sticky') && r.width * Math.min(r.height, H) > W * H * 0.3 && r.top < H; }).slice(0, 3).map(name);
   return {title: document.title, width: W, height: H, page_width: d.scrollWidth, page_height: d.scrollHeight,
-          viewport_meta: !!document.querySelector('meta[name=viewport]'), wide, broken, covers: cover,
+          viewport_meta: !!document.querySelector('meta[name=viewport]'), wide, edge, broken, covers: cover,
           small_taps: taps.length, small_tap_examples: taps.slice(0, 5).map(e => name(e) + ' ' + Math.round(e.getBoundingClientRect().width) + 'x' + Math.round(e.getBoundingClientRect().height)),
           tiny_text: tiny.length, tiny_examples: tiny.slice(0, 3).map(e => name(e) + ' ' + getComputedStyle(e).fontSize)};
 }"""
 def step(page, line):
     verb, _, rest = line.strip().partition(" ")
     verb = verb.lower(); rest = rest.strip()
-    if verb in ("click", "tap"):
+    xy = re.fullmatch(r"(\d+)\s*,\s*(\d+)", rest)
+    if verb in ("click", "tap") and xy:
+        x, y = int(xy.group(1)), int(xy.group(2))
+        try:
+            if verb != "tap": raise ValueError
+            page.touchscreen.tap(x, y)              # phones and tablets take real taps
+        except Exception: page.mouse.click(x, y)
+    elif verb == "hold":
+        key, _, ms = rest.partition(" "); page.keyboard.down(key); page.wait_for_timeout(min(int(ms or 1000), 15000)); page.keyboard.up(key)
+    elif verb == "drag":
+        a, _, b = rest.partition(" "); (x1, y1), (x2, y2) = [tuple(int(v) for v in p_.split(",")) for p_ in (a, b)]
+        page.mouse.move(x1, y1); page.mouse.down(); page.mouse.move(x2, y2, steps=12); page.mouse.up()
+    elif verb in ("click", "tap"):
         target = page.get_by_text(rest, exact=False).first if not rest[:1] in "#.[" and "=" not in rest else page.locator(rest).first
         target.click(timeout=8000)
     elif verb == "type":
@@ -2000,6 +2016,7 @@ def test_page(url, devices="phone,tablet,desktop", steps="", see="true"):
         if not g["viewport_meta"]: problems.append("no <meta name=viewport>: phones will show it zoomed out")
         if g["small_taps"]: problems.append(f"{g['small_taps']} buttons or links under the 24px minimum to tap, like " + "; ".join(g["small_tap_examples"]))
         if g["tiny_text"]: problems.append(f"{g['tiny_text']} bits of text under 12px, like " + "; ".join(g["tiny_examples"]))
+        if g.get("edge"): problems.append("touching the screen edge, with no side margin (use 16px or more): " + "; ".join(g["edge"]))
         if g["broken"]: problems.append("broken images: " + ", ".join(g["broken"]))
         if g["covers"]: problems.append("fixed or sticky parts cover over 30% of the screen: " + ", ".join(g["covers"]))
         if g["console_errors"]: problems.append("console errors: " + " | ".join(g["console_errors"]))
@@ -2011,7 +2028,7 @@ def test_page(url, devices="phone,tablet,desktop", steps="", see="true"):
         put_line(f"  {DIM}{link(file_link(g['full_shot']), g['device'] + ' screenshot')}{R}")
         if str(see).lower() != "false": PENDING_SHOTS.append((g["device"], g["shot"]))
     return f"Checked {url}\n\n" + "\n\n".join(report) + ("\n\nThe screenshots of the first screen follow, so look at them too: spacing, overlap, "
-                                                          "cut-off text, things that look wrong." if PENDING_SHOTS else "")
+                                                          "cut-off text, things that look wrong, and every line of no-ai-slop's Never list (like a headline word in the accent color)." if PENDING_SHOTS else "")
 
 # ---- your phone: talk to it from Telegram, get scheduled reports there, and OK its actions with a tap ----
 TG_API = os.environ.get("BXZEX_TELEGRAM_API", "https://api.telegram.org")
@@ -2293,6 +2310,8 @@ SAFARI_TAB = '''on tabRef(w, t)
   end tell
 end tabRef'''
 
+SAFARI_OPENED = set()     # pages it opened itself this session: JavaScript in any other tab always asks
+
 def safari(action, url="", script="", tab=""):
     """Safari: list tabs, open a page, read a tab's text, or run JavaScript in a tab."""
     if not MAC: return "error: Safari control only works on a Mac"
@@ -2313,18 +2332,24 @@ end tell''') or "Safari has no open tabs"
             if not str(url).strip(): return "error: give the url to open"
             osa('''on run argv
   tell application "Safari"
-    activate
     if (count of windows) is 0 then make new document
-    set URL of current tab of front window to item 1 of argv
+    tell front window to set current tab to (make new tab with properties {URL:item 1 of argv})
   end tell
 end run''', str(url).strip())
-            return f"opened {url} in Safari"
+            SAFARI_OPENED.add(str(url).strip())
+            return f"opened {url} in a new Safari tab"
         if action in ("read", "run"):
             js = "document.title + '\\n' + location.href + '\\n\\n' + document.body.innerText" if action == "read" else str(script)
             if action == "run":
                 if not js.strip(): return "error: give the JavaScript to run"
                 if PLAN: return plan_block()
-                if not confirm("run JavaScript in Safari", js): return "The user declined."
+                here = osa(SAFARI_TAB + '''
+on run argv
+  set r to tabRef((item 1 of argv) as integer, (item 2 of argv) as integer)
+  tell application "Safari" to return URL of r
+end run''', str(w), str(t))
+                mine = here in SAFARI_OPENED                  # a tab it opened; any other tab is the user's, maybe signed in
+                if not confirm(f"run JavaScript in Safari · {here[:60]}", js, always_ask=not mine): return "The user declined."
             out = osa(SAFARI_TAB + '''
 on run argv
   set r to tabRef((item 2 of argv) as integer, (item 3 of argv) as integer)
@@ -2460,11 +2485,13 @@ TOOLS = [
          "You also get screenshots to look at. Use it to check anything you build or change, and again after fixing.",
          url="the page: https://site.com, localhost:5173, or an .html file or folder",
          devices="any of phone, small, big, android, tablet, ipad-mini, tablet-landscape, phone-landscape, desktop; default phone,tablet,desktop",
-         steps="optional actions before checking, one per line: click Menu · click #signup · type #email me@x.com · scroll 1200 · wait 1000 · press Enter",
+         steps="optional actions before checking, one per line: click Menu · click #signup · click 200,340 · tap 180,600 · type #email me@x.com · "
+               "press Space · hold ArrowRight 1500 · drag 100,500 300,500 · scroll 1200 · wait 1000",
          see="false to skip the screenshots, default true"),
 ] + ([
-    tool("safari", "Control Safari on this Mac: list its open tabs, open a page, read a tab's text, or run JavaScript in a tab (to click, fill in "
-         "forms or pull data out of a page that needs their login).", action="tabs, open, read or run",
+    tool("safari", "Control the user's own Safari on this Mac: list their open tabs, open a page in a new tab, read a tab's text, or run "
+         "JavaScript in a tab (to click, fill in forms or pull data out of a page that needs their login). To test pages or games you built, "
+         "use test_page instead, never their Safari.", action="tabs, open, read or run",
          url="for open: the address", script="for run: the JavaScript; the value of its last line comes back",
          tab="which tab like 1.2 (window.tab) from tabs, default the front tab"),
     tool("imessage", "Messages on this Mac: send an iMessage or text, read recent messages, or find someone's number or email in Contacts. "
@@ -2531,6 +2558,8 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - run_shell with background true: leave a server or long build running; check_job reads its output or stops it.
 - delegate (on the cloud card): hand a big self-contained job to a helper with fresh memory; it reports back.
 - remember: save a short note that you will still have in future conversations.
+- Anything you write for them to send or publish (emails, posts, page copy) reads like a person wrote it: load human-writing,
+  no em dashes, no buzzwords, no [placeholders] when you know the detail.
 - use_skill: load one of your skills (listed below) before a task it covers. Anything with a screen (a site, web app, mobile app,
   game or any UI) also gets no-ai-slop before you call it done, and a test_page check on phone and desktop.
 - generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes about a minute (use quality hd only when asked for high quality) and you are reloaded afterwards. Make one image per request unless asked for more.
@@ -2856,13 +2885,34 @@ def attach_files(text):
             except OSError: pass
     return text + "".join(extra)
 
+SKILL_STOP = set("""a an and or the of to in on for with from by at as is are be it its this that these those your you my me we our
+use using when what how into out up make making build building get set any all new one two more most own their them they can will
+not no do does without about over than then so very just also only each every like such some via per""".split())
+
+def skill_hint(text):
+    """Name the skills whose description matches the request, so the right ones get loaded instead of skipped."""
+    words = {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in SKILL_STOP}
+    if len(words) < 3 or text.startswith(("(", "By the way")): return ""
+    skills = [(name, {w for w in re.findall(r"[a-z0-9]+", (name.replace("-", " ") + " " + desc).lower()) if len(w) > 2 and w not in SKILL_STOP})
+              for name, desc, _ in list_skills()]
+    seen = {}
+    for _, keys in skills:
+        for w in keys: seen[w] = seen.get(w, 0) + 1
+    scored = []
+    for name, keys in skills:          # a word few skills use (pwa, remotion, stripe) says more than a common one (web, app)
+        score = sum(2 if seen[w] <= 2 else 1 for w in words & keys) + 2 * len(words & set(name.split("-")))
+        if score >= 2: scored.append((score, name))
+    best = [n for _, n in sorted(scored, reverse=True)[:4]]
+    return f"\n\n(Skills that may fit this: {', '.join(best)}. Load the ones that really do before you start.)" if best else ""
+
 def user_message(text):
+    hint = skill_hint(text)                          # kept apart so /rewind and /export show only what they typed
     text = attach_files(text)
     text, imgs = split_images(text)
-    if not imgs: return {"role": "user", "content": text}
+    if not imgs: return {"role": "user", "content": text, **({"_hint": hint} if hint else {})}
     for p in imgs: print(f"  {DIM}└ image {p}{R}")
     return {"role": "user", "content": [{"type": "text", "text": text or "What is in this image?"}]
-                                       + [image_part(p) for p in imgs]}
+                                       + [image_part(p) for p in imgs], **({"_hint": hint} if hint else {})}
 
 # ---- btw: keep typing while it works ----
 import select, termios, tty
@@ -3162,6 +3212,10 @@ def mend(msgs):
     Also leaves out the app's own notes on a message (keys starting with _), which the server doesn't need."""
     out = []
     for m in msgs:
+        if m.get("_hint"):                       # the skills that fit, added for the model only
+            c = m.get("content")
+            m = dict(m, content=c + m["_hint"] if isinstance(c, str) else
+                     [dict(p, text=p["text"] + m["_hint"]) if i == 0 and p.get("type") == "text" else p for i, p in enumerate(c or [])])
         if any(k.startswith("_") for k in m): m = {k: v for k, v in m.items() if not k.startswith("_")}
         if m.get("tool_calls") and not all(whole(c) for c in m["tool_calls"]):
             m = dict(m, tool_calls=[c if whole(c) else dict(c, function=dict(c["function"], arguments="{}")) for c in m["tool_calls"]])
