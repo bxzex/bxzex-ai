@@ -11,7 +11,7 @@ fail=0
 
 newer() {   # a copy of the app plus a fake "9.9.9" release for the update tests
   rm -rf "$T/bin" "$T/upd"; mkdir -p "$T/bin" "$T/upd/skills"
-  cp bxzex-ai bxzex-server install.sh "$T/bin/"; cp bxzex-server install.sh connectors.txt "$T/upd/"; cp skills/*.md "$T/upd/skills/"
+  cp bxzex-ai bxzex-server install.sh "$T/bin/"; cp bxzex-server install.sh connectors.txt "$T/upd/";
   sed "s/VERSION = \"$ver\"/VERSION = \"9.9.9\"/" bxzex-ai > "$T/upd/bxzex-ai"; echo "9.9.9 2" > "$T/upd/VERSION"
 }
 

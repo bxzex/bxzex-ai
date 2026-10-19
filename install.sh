@@ -16,7 +16,6 @@ LOG="$BXZEX_HOME/install.log"
 R=$'\033[0m'; D=$'\033[2m'; B=$'\033[1m'
 A=$'\033[38;5;39m'   # accent, replaced once a color is picked
 COLORS="blue red orange gold green cyan purple pink white"
-SKILLS="accessibility ai-agents ai-chat-app api-design ask-before-guessing auth-login background-jobs bash-scripting brand-naming browser-automation caching-cdn case-study charts-dataviz chat-bots client-proposal code-explainer code-review component-libraries connect-apps cron-jobs-web daily-briefing dashboard-design data-analysis database-postgres debugging deep-research delegate-work deploy-vercel design-direction design-from-image design-intake design-system docker documents edge-middleware email-writing env-secrets explain-teach feature-flags file-storage firewall-security-headers framework-upgrade frontend-build git-workflow github-cli google-workspace high-end-visual human-writing landing-page linux-automation local-business-sites mac-automation media-ffmpeg microcopy monorepo-tooling motion-animation new-skill nextjs-app no-ai-slop observability payments-stripe pdf-tools plan-project pricing-offers python-scripting react-components react-performance redesign-existing refactor-simplify resume-job-apply run-and-verify sales-outreach sandbox-safety scheduled-tasks security-check seo-basics serverless-functions slide-decks social-posts spreadsheets sql-database summarize task-tracking testing ui-component ui-design ui-polish user-research ux-audit ux-critique video-script web-design-review web-performance web-research web-scraping word-docs remotion-video game-design web-game-2d threejs-3d-game game-audio-assets game-online-features mobile-app-expo web-to-mobile-app app-store-release web-app-build mobile-ui-design"
 code_for() { case "$1" in blue) echo 39;; red) echo 196;; orange) echo 208;; gold) echo 220;; green) echo 46;; cyan) echo 51;;
              purple) echo 141;; pink) echo 205;; white) echo 255;; *) echo 39;; esac; }
 
@@ -120,7 +119,6 @@ fetch() {   # path inside the repo, destination
   if [ -n "$src" ]; then cp "$src/$1" "$2"; else curl -fsSL -o "$2" "$REPO/$1"; fi
 }
 for f in bxzex-ai bxzex-server; do fetch "$f" "$BXZEX_HOME/bin/$f"; chmod +x "$BXZEX_HOME/bin/$f"; done
-for k in $SKILLS; do fetch "skills/$k.md" "$BXZEX_HOME/skills/$k.md"; done
 fetch "connectors.txt" "$BXZEX_HOME/connectors.txt" || true      # the list of apps it can connect to
 
 python3 "$BXZEX_HOME/bin/bxzex-ai" --logo || true
@@ -131,7 +129,6 @@ printf '\n'
 pick_color
 python3 "$BXZEX_HOME/bin/bxzex-ai" --flyby || true
 ok "app"
-ok "skills"
 
 if [ "$OS" = Darwin ]; then ram=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 else ram=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1048576 )); fi

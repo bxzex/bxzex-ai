@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -3109,6 +3109,24 @@ def check_update(quiet=True):
     finally:
         wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
 
+def private_skills():
+    """The skills are private: they live in a private repo, and only an install whose config.json names it ("skills_repo")
+    and whose GitHub login (gh) can read it gets them. Every other install keeps only the skills its owner wrote."""
+    repo = load_config().get("skills_repo")
+    if not repo or not shutil.which("gh"): return {}
+    import io, tarfile
+    try:
+        r = subprocess.run(["gh", "api", f"repos/{repo}/tarball/main"], capture_output=True, timeout=180, stdin=subprocess.DEVNULL)
+        if r.returncode != 0 or not r.stdout: return {}
+        got = {}
+        with tarfile.open(fileobj=io.BytesIO(r.stdout)) as t:
+            for m in t.getmembers():
+                if m.isfile() and re.search(r"/skills/[a-z0-9-]+\.md$", m.name):
+                    got[os.path.basename(m.name)[:-3]] = t.extractfile(m).read().decode("utf-8", "replace")
+        return got
+    except Exception:
+        return {}
+
 def get_update(quiet, wait):
     global update_note
     def say(text):
@@ -3127,9 +3145,7 @@ def get_update(quiet, wait):
             compile(app, "bxzex-ai", "exec")                   # never install something that doesn't even parse
             if f'VERSION = "{latest[0]}"' not in app or not app.rstrip().endswith(END_MARK):   # cut off, or the download servers still hold the old copy
                 say(f"v{latest[0]} is on its way but hasn't reached the download servers yet. Try /update again in a few minutes"); return False
-            names = re.search(r'SKILLS="([^"]*)"', installer)
-            names = names.group(1).split() if names else []
-            skills = dict(zip(names, pool.map(lambda n: fetch(f"skills/{n}.md"), names)))
+            skills = private_skills()
         if not server.startswith("#!") or any(not v.startswith("---") for v in skills.values()):
             say("part of the download came back broken, nothing was changed. Try /update again"); return False
         if apps.startswith("# Apps"):

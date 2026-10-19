@@ -31,7 +31,7 @@ If your machine can run it, this app is still the one with no limits and no bill
 - **Listens.** Type `/v`, say what you want, and your words show up at the prompt ready to send.
 - **Remembers you.** Tell it something worth keeping and it's still there next week. It all sits in a plain text file you can read, edit or wipe.
 - **Connects to your apps.** Gmail, Calendar, Slack, GitHub, Notion, Drive, Sheets, Instagram, Stripe and 1,600 more, through Composio over MCP. Add it once with `/mcp add`, sign in to an app when it asks, and it can read and act there (it asks before anything that sends, posts or changes). Any other MCP server works the same way.
-- **Comes with skills.** 95 of them: design and UX, websites and apps, backends and deploying, AI and automation, documents and spreadsheets, writing, research and sales. It pulls in the right one when the job calls for it, and you can write your own.
+- **Skills.** Teach it with your own skill files and it pulls in the right one when the job calls for it.
 - **Looks how you want.** Nine color themes. It starts in white fading to blue, like the logo. Pick another during install or switch any time with `/color`.
 
 ## Check it before you run it
@@ -74,7 +74,7 @@ Open a terminal and paste this:
 curl -fsSL https://raw.githubusercontent.com/bxzex/bxzex-ai/main/install.sh | bash
 ```
 
-Pick your color, then let it work. It sets up everything and downloads the AI model, vision, voice, image generation and skills. That's about 21GB on a Mac and 23GB on Linux, so give it a while on slower internet. If your connection drops, paste the same line again and it picks up where it stopped.
+Pick your color, then let it work. It sets up everything and downloads the AI model, vision, voice, and image generation. That's about 21GB on a Mac and 23GB on Linux, so give it a while on slower internet. If your connection drops, paste the same line again and it picks up where it stopped.
 
 When it says READY, open a new terminal window and type:
 
@@ -172,59 +172,9 @@ Everything it knows about itself lives in four places inside `~/.bxzex-ai`, all 
 - **`tests/`** (in this repo) checks the whole app in a real terminal against a stand-in model: `bash tests/run.sh`.
 - **`commands/`** holds your own slash commands: save a prompt as `commands/name.md` and type `/name`.
 - **`chats/`** keeps every conversation, so nothing is lost when you close the window.
-- **`skills/`** holds one file per skill. Copy one, change the name and description at the top, write what you want it to know, and it has a new skill.
+- **`skills/`** holds one file per skill: a markdown file with a name and description at the top and what it should know below.
 
-The skills it ships with, 107 of them:
-
-- **Design and UX:** `ui-design`, `no-ai-slop`, `high-end-visual`, `design-direction`, `design-system`, `design-intake`, `design-from-image`, `ui-polish`, `ui-component`, `dashboard-design`, `redesign-existing`, `motion-animation`, `ux-audit`, `ux-critique`, `web-design-review`, `user-research`, `microcopy`, `accessibility`, `case-study`
-- **Building websites and apps:** `frontend-build`, `landing-page`, `local-business-sites`, `react-components`, `react-performance`, `component-libraries`, `nextjs-app`, `framework-upgrade`, `monorepo-tooling`, `web-performance`, `seo-basics`
-- **Web apps, mobile apps and PWAs:** `web-app-build`, `mobile-ui-design`, `mobile-app-expo`, `web-to-mobile-app`, `app-store-release`
-- **Games:** `game-design`, `web-game-2d`, `threejs-3d-game`, `game-audio-assets`, `game-online-features`
-- **Backend, data and shipping:** `api-design`, `serverless-functions`, `edge-middleware`, `database-postgres`, `sql-database`, `file-storage`, `auth-login`, `payments-stripe`, `background-jobs`, `cron-jobs-web`, `caching-cdn`, `feature-flags`, `firewall-security-headers`, `observability`, `deploy-vercel`, `github-cli`, `docker`, `env-secrets`
-- **AI and automation:** `ai-chat-app`, `ai-agents`, `chat-bots`, `browser-automation`, `web-scraping`, `scheduled-tasks`, `mac-automation`, `linux-automation`, `bash-scripting`, `python-scripting`, `sandbox-safety`
-- **Working like an agent:** `task-tracking`, `delegate-work`, `ask-before-guessing`, `run-and-verify`, `code-explainer`, `debugging`, `testing`, `refactor-simplify`, `code-review`, `security-check`, `git-workflow`, `plan-project`, `new-skill`
-- **Documents, data and media:** `documents`, `pdf-tools`, `word-docs`, `spreadsheets`, `slide-decks`, `charts-dataviz`, `data-analysis`, `media-ffmpeg`, `remotion-video`, `google-workspace`
-- **Writing, research and business:** `human-writing`, `email-writing`, `social-posts`, `video-script`, `sales-outreach`, `client-proposal`, `pricing-offers`, `brand-naming`, `resume-job-apply`, `web-research`, `deep-research`, `daily-briefing`, `summarize`, `explain-teach`
-
-## Graphics card or processor
-
-You can run it on either. It uses the graphics card when there is one, because that is much faster: the Mac's own chip, an NVIDIA card, or an AMD or Intel card on Linux. With no card it runs on the processor, which works on any machine with enough memory, only slower.
-
-Type `/device` to see which one it is on. `/device cpu` moves it to the processor, say when a game or a render needs the card, and `/device gpu` moves it back. It reloads the model and remembers your choice.
-
-To set it up for the processor from the start, put `BXZEX_DEVICE=cpu` in front of `bash` on the install line. That works on Mac, Linux and Windows.
-
-## How fast it is
-
-This is a big model running on a laptop. On a 24GB MacBook Air it writes around three words a second, and the lighter build runs at about the same pace there. The lighter build is about fitting in less memory, not about speed. Short answers land in under a minute. Jobs where it has to look several things up can take a few minutes. A Mac with a Pro or Max chip is quicker.
-
-It's slower than the big online assistants. In exchange, it's private and it's yours.
-
-## Use at your own risk
-
-BXZEX AI is provided as is, with no warranty of any kind. You use it entirely at your own risk.
-
-You are responsible for everything you do with it: what you ask it, what it writes, the images it makes, the commands you approve and anything you do with the results. bxzex is not responsible or liable for any of that, or for any loss, damage or legal trouble that comes from using it. Follow the laws where you live. If you don't agree, don't install it.
-
-## Be careful with it
-
-It's uncensored, and when it runs a command it runs it as you, with nothing fencing it in. Read what it's asking before you say yes. It offers an "always" option that stops it asking for the rest of the session. I'd leave that alone unless you're watching.
-
-Some things ask every time, even with "always" on: deleting files, `sudo`, killing programs, changing permissions, wiping a disk, force-pushing or resetting a git project, piping a download straight into a shell, and writing to system or settings files like `~/.ssh` and `~/.zshrc`.
-
-## Settings
-
-Optional. Set any of these before launching.
-
-| Setting | Default | What it changes |
-|---|---|---|
-| `BXZEX_VOICE_LANG` | `en` | The language you speak in, like `es`. Use `auto` to let it figure it out. |
-| `BXZEX_CTX` | `32768` | How much conversation it can hold at once. |
-| `BXZEX_PORT` | `8080` | The local port it uses. |
-| `BXZEX_DEVICE` | graphics card | Set to `cpu` to run on the processor for one launch. `/device` saves the choice for good. |
-| `BXZEX_LORA_SCALE` | `0.8` | How strongly image styles are applied. |
-
-The model stays in memory after you quit so the next launch is instant. To shut it down and get that memory back: `pkill llama-server`.
+The skills are private to bxzex's own installs and aren't in this repo. Write your own: copy the format of any markdown file with `name:` and `description:` at the top into `~/.bxzex-ai/skills/`, and it uses it.
 
 ## Remove it
 
