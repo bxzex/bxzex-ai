@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.5.3"
+VERSION = "1.5.4"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -975,6 +975,7 @@ TOOLS = [
 
 GUIDE = f"{APP_HOME}/BXZEX.md"      # what the assistant knows about itself; edit it to add your own instructions
 MEMORY = f"{APP_HOME}/memory.md"   # what it has been asked to remember, across sessions
+ABOUT = f"{APP_HOME}/about.md"     # who the user is, written by them; stays on this computer, empty on a fresh install
 DEFAULT_GUIDE = """# BXZEX AI
 
 You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own computer. Everything stays on this machine.
@@ -1011,8 +1012,9 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes about a minute (use quality hd only when asked for high quality) and you are reloaded afterwards. Make one image per request unless asked for more.
 
 ## Memory
-When the user tells you something lasting about themselves, their work or how they like things done,
-or asks you to remember something, call remember with one short sentence. Do not save passing details.
+Whenever you learn something lasting about the user (who they are, their work and projects, goals, people in their life,
+tools, how they like things done), call remember with one short sentence, without being asked. Do not save passing details.
+It also learns in the background between messages, so you know them better over time.
 
 ## Your instructions
 Anything written below this line is from the user. Follow it.
@@ -1027,9 +1029,53 @@ def read_text(path, limit):
     return text[-limit:] if len(text) > limit else text
 
 def remember(note):
+    note = " ".join(note.split()).lstrip("- ").strip()
+    if not note: return "nothing to save"
+    if note.lower() in read_text(MEMORY, 10**6).lower(): return "already saved"
     os.makedirs(APP_HOME, exist_ok=True)
-    with open(MEMORY, "a") as f: f.write(f"- {' '.join(note.split())}\n")
+    with open(MEMORY, "a") as f: f.write(f"- {note}\n")
     return "saved"
+
+# ---- learning about the user in the background ----
+# Every few messages it reads back the recent ones and saves what is new and lasting about the user, so it knows them
+# better over time without being told to remember. Only on a cloud card: on a laptop the extra pass would slow replies.
+LEARN_EVERY = 3
+learned = []          # notes saved since the last reply, shown dimly before the next one
+learning = threading.Lock()
+user_turns = 0
+
+def learn(msgs):
+    if not learning.acquire(blocking=False): return
+    try:
+        talk = []
+        for m in msgs[-16:]:
+            text = plain(m.get("content") or "") if m["role"] in ("user", "assistant") else ""
+            if text and not text.startswith(SUMMARY_HEAD): talk.append(f"{m['role'].upper()}: {text[:1500]}")
+        if not talk: return
+        known = (read_text(ABOUT, 8000) + "\n" + read_text(MEMORY, 8000)).strip()
+        ask = ("Here is what is already known about the user:\n" + (known or "(nothing yet)") + "\n\nHere is the latest part of a chat:\n"
+               + "\n".join(talk) + "\n\nList NEW lasting facts about the user that this chat shows and that are not already known: "
+               "who they are, their work, projects, goals, plans, people in their life, tools, likes and dislikes, how they want things done. "
+               "Only facts about the user, stated or clearly shown by them, not guesses and not things about the topic. One short sentence "
+               "each, on its own line starting with '- '. At most 4. If there is nothing new and lasting, reply with NONE.")
+        body = json.dumps({"model": MODEL_ID or loaded_model(), "messages": [{"role": "user", "content": ask}], "max_tokens": 250,
+                           "temperature": 0.2, "chat_template_kwargs": {"enable_thinking": False}}).encode()
+        req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=300) as r:
+            out = json.load(r)["choices"][0]["message"].get("content") or ""
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("- ") and 8 < len(line) < 240 and remember(line[2:]) == "saved": learned.append(line[2:].strip())
+    except Exception:
+        pass
+    finally:
+        learning.release()
+
+def maybe_learn():
+    global user_turns
+    user_turns += 1
+    if REMOTE and user_turns % LEARN_EVERY == 0 and load_config().get("learn", True):
+        threading.Thread(target=learn, args=(list(history),), daemon=True).start()
 
 def show_memory(arg=""):
     if arg.strip() == "clear":
@@ -1040,6 +1086,8 @@ def show_memory(arg=""):
     print(header("Memory"))
     print("\n".join(f"  {l}" for l in notes.splitlines()) if notes else f"  {DIM}nothing saved yet{R}")
     print(f"  {DIM}{MEMORY.replace(HOME, '~')} · /memory clear to wipe{R}")
+    if os.path.exists(ABOUT): print(f"  {DIM}it also reads what you wrote about yourself in {ABOUT.replace(HOME, '~')}{R}")
+    else: print(f"  {DIM}to tell it who you are, write it in {ABOUT.replace(HOME, '~')}{R}")
 
 SKILLS_DIR = f"{APP_HOME}/skills"   # one .md per skill; drop your own in to teach it something new
 
@@ -1090,7 +1138,9 @@ def refresh_system():
     if skills:
         parts.append("## Skills\nBefore starting a task that matches one of these, call use_skill with its name "
                      "and follow what it says:\n" + "\n".join(f"- {n}: {' '.join(d.split(':')[0].split()[:9])}" for n, d, _ in skills))   # short hints: every prompt token costs load time
-    notes = read_text(MEMORY, 3000)
+    me = read_text(ABOUT, 8000)
+    if me: parts.append("## About the user (they wrote this for you: it is true, use it)\n" + me)
+    notes = read_text(MEMORY, 8000 if REMOTE else 3000)
     if notes: parts.append("## What you remember about the user\n" + notes)
     SYSTEM = "\n\n".join(parts)
 
@@ -1123,7 +1173,8 @@ def system_prompt():
         "snippets before fetching whole pages. Keep answers short and plain.\n"
         "Never assume where the user lives, what their business is or any other personal detail in your work. "
         "Use such details only when they bring them up in this conversation or ask you to. What you remember "
-        "about them is background, not a brief. You do not know their name unless they tell you.")
+        "about them is background, not a brief. You do not know their name unless they tell you"
+        + (", or it is in About the user below. That section is from them: you know them, so use it when it helps." if os.path.exists(ABOUT) else "."))
 
 def run_tool(call):
     fn = call["function"]; name = fn["name"]
@@ -1624,6 +1675,7 @@ def run_turn(history):
     """Agent loop: keep calling the model until it answers without asking for a tool.
     Anything typed and sent while it works is passed to it as a "by the way" note."""
     if not ensure_server(): return      # e.g. still reloading after an image
+    while learned: print(f"{DIM}remembered: {learned.pop(0)}{R}")
     typed.start()
     try:
         global turn_tok
@@ -2253,6 +2305,7 @@ def turn(text):
     history.append(user_message(text))
     try:
         run_turn(history)
+        maybe_learn()                                # every few messages, what's new about the user is saved in the background
     except KeyboardInterrupt:
         close_open_calls(); print(f"\n{DIM}stopped · everything done so far is kept{R}")
     except Exception as e:                           # never lose the app or the chat over one bad step
