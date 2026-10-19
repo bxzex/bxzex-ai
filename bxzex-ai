@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1759,6 +1759,10 @@ def listen():
 UPDATE_URL = os.environ.get("BXZEX_UPDATE_URL", "https://raw.githubusercontent.com/bxzex/bxzex-ai/main")
 END_MARK = "# ---- end of bxzex-ai ----"
 update_note = ""      # shown in the status line once a newer version has been put in place
+reload_ready = False  # a newer version is in place: the app reloads itself at the prompt and carries on
+
+class Reload(Exception):
+    """Raised at the prompt once an update is in place. Carries whatever was typed in the box."""
 PARTS = 2 if MAC else 3   # which round of installer downloads this version expects (3: the repaired Linux voice engine)
 if "parts" in load_config() and int(load_config().get("parts") or 0) < PARTS:
     update_note = "one more step to finish this update: type /update full"
@@ -1798,10 +1802,11 @@ def check_update(quiet=True):
             tmp = os.path.join(here, f".{name}.new")
             with open(tmp, "w") as f: f.write(text)
             os.chmod(tmp, 0o755); os.replace(tmp, os.path.join(here, name))
-        update_note = f"updated to v{latest[0]} · quit and reopen to use it"
+        global reload_ready
+        update_note = f"updated to v{latest[0]} · reloading"; reload_ready = True
         if len(latest) > 1 and latest[1].isdigit() and int(latest[1]) > int(load_config().get("parts", 0) or 0):
             update_note += " · new features to download: /update full"
-        if not quiet: print(f"{GOLD}●{R} {BOLD}Updated to v{latest[0]}{R} {DIM}· quit and open bxzex-ai again to use it{R}")
+        if not quiet: print(f"{GOLD}●{R} {BOLD}Updated to v{latest[0]}{R} {DIM}· reloading, your chat stays{R}")
         return True
     except Exception:
         if not quiet: print(f"{DIM}couldn't check for updates right now{R}")
@@ -2059,6 +2064,7 @@ def ask(prefill=""):
         box.focus("", 0) if not buf else box.focus("".join(buf), pos)
         while True:
             try:
+                if reload_ready: raise Reload("".join(buf))
                 ready, _, _ = select.select([fd], [], [], 0.15)
             except InterruptedError:
                 ready = []
@@ -2190,7 +2196,9 @@ if len(sys.argv) > 1:
 
 # ---- interactive ----
 keys_mode()
-splash = splash_fits()
+try: RELOAD = json.loads(os.environ.pop("BXZEX_RELOAD", "") or "null") or {}
+except ValueError: RELOAD = {}
+splash = splash_fits() and not RELOAD
 if splash:
     began = time.time()
     print()
@@ -2202,14 +2210,36 @@ if splash:
     time.sleep(max(0, 1.2 - (time.time() - began)))      # long enough to be seen when the model is already loaded
     sys.stdout.write(f"\033[{len(CAR) + 2}A\r\033[J"); sys.stdout.flush()
 if not up: sys.exit(1)
-banner()
+if RELOAD:
+    fast, show_think, allow_all = bool(RELOAD.get("fast", fast)), bool(RELOAD.get("think")), bool(RELOAD.get("allow"))
+    print(f"{GOLD}●{R} {BOLD}Updated to v{VERSION}{R} {DIM}· carrying on where you were{R}")
+else:
+    banner()
 refresh_system()
 warm_up()
-if load_config().get("continue", True): start_menu()   # continue the last chat, start a new one, or pick an earlier one
+if RELOAD.get("chat") and os.path.exists(RELOAD["chat"]):
+    try:
+        with open(RELOAD["chat"]) as _f: history = json.load(_f).get("messages", [])
+        chat_file = RELOAD["chat"]; last_saved = chat_data()
+    except (OSError, ValueError): pass
+elif not RELOAD and load_config().get("continue", True): start_menu()   # continue the last chat, start a new one, or pick an earlier one
 threading.Thread(target=autosave, daemon=True).start()
 atexit.register(save_chat)
 if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version in the background each time it starts
     threading.Thread(target=check_update, daemon=True).start()
+def reload_app(typed_text=""):
+    """Start the new version in this same window, on the same chat, with the same settings. Nothing is lost."""
+    save_chat(); box.unpin()
+    if COOKED:
+        try: termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, COOKED)
+        except termios.error: pass
+    sys.stdout.flush()
+    state = {"chat": chat_file or "", "fast": fast, "think": show_think, "allow": allow_all, "typed": typed_text}
+    try:
+        os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)], dict(os.environ, BXZEX_RELOAD=json.dumps(state)))
+    except OSError:
+        keys_mode(); print(f"{DIM}couldn't reload by itself: quit and open bxzex-ai again to use the new version{R}")
+
 def close_open_calls():
     """After a stop or an error: keep the work done so far; only close calls that never got a result."""
     answered = {m.get("tool_call_id") for m in history if m["role"] == "tool"}
@@ -2247,12 +2277,14 @@ def own_command(cmd):
     print(f"  {DIM}└ exit code {p.returncode}{R}")
     history.append({"role": "user", "content": f"(I ran this myself: `{cmd}`)\nexit code {p.returncode}\n{clip(out, OUT_CHARS)}"})
 
-spoken = ""; last_break = 0
+spoken = RELOAD.get("typed", ""); last_break = 0
 while True:
     try:
         user = ask(spoken or typed.leftover); spoken = typed.leftover = ""
     except EOFError:
         break
+    except Reload as r:
+        reload_app(r.args[0] if r.args else ""); continue
     except KeyboardInterrupt:                        # one ctrl-c on an empty line could be a slip: quit on the second
         if time.time() - last_break < 2: break
         last_break = time.time(); print(f"{DIM}press ctrl-c again to quit, or type exit{R}"); continue
@@ -2260,7 +2292,9 @@ while True:
         if not user: continue
         if user in ("exit","quit"): break
         if user in ("/help", "/", "/?"): show_help(); continue
-        if user == "/update": check_update(quiet=False); continue
+        if user == "/update":
+            if check_update(quiet=False): reload_app()
+            continue
         if user == "/update full": full_update(); continue
         if user.startswith("/color"): choose_color(user[6:]); continue
         if user.startswith("/device"): choose_device(user[7:]); continue
