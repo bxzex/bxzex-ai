@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1857,10 +1857,159 @@ def show_mcp(arg=""):
 def plan_block():
     return "Plan mode is on, so nothing can be changed yet. Look around with the read-only tools, then write the plan and ask the user to turn plan mode off (/plan or shift-tab) to go ahead."
 
+# ---- test_page: open a site as a phone, tablet or desktop, find layout problems and look at it ----
+DEVICES = {"phone": ("iPhone 15", "webkit"), "iphone": ("iPhone 15", "webkit"), "small": ("iPhone SE (3rd gen)", "webkit"),
+           "big": ("iPhone 15 Pro Max", "webkit"), "android": ("Pixel 7", "chromium"), "tablet": ("iPad Pro 11", "webkit"),
+           "ipad": ("iPad Pro 11", "webkit"), "ipad-mini": ("iPad Mini", "webkit"), "tablet-landscape": ("iPad Pro 11 landscape", "webkit"),
+           "phone-landscape": ("iPhone 15 landscape", "webkit"), "desktop": ("", "chromium"), "laptop": ("", "chromium")}
+BROWSER_HOME = f"{APP_HOME}/browser"     # its own copy of the page checker, when this Python doesn't have one
+PENDING_SHOTS = []                      # screenshots the model should see, added after the tool results
+
+PAGE_CHECK = r'''
+import json, sys, time
+from playwright.sync_api import sync_playwright
+job = json.loads(sys.argv[1]); out = []
+LOOK = """() => {
+  const W = innerWidth, H = innerHeight, d = document.documentElement;
+  const name = e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (typeof e.className == 'string' && e.className.trim() ? '.' + e.className.trim().split(/\\s+/).slice(0, 2).join('.') : '')
+                   + ((e.innerText || e.alt || e.value || '').trim() ? ' "' + (e.innerText || e.alt || e.value).trim().slice(0, 30).replace(/\\s+/g, ' ') + '"' : '');
+  const shown = e => { const s = getComputedStyle(e), r = e.getBoundingClientRect(); return s.display != 'none' && s.visibility != 'hidden' && +s.opacity > 0 && r.width > 0 && r.height > 0; };
+  const all = [...document.querySelectorAll('body *')].filter(shown);
+  const clipped = e => { for (let a = e.parentElement; a && a != document.body; a = a.parentElement) if (getComputedStyle(a).overflowX != 'visible') return true; return false; };
+  const wide = d.scrollWidth <= W + 1 ? [] : all.filter(e => { const r = e.getBoundingClientRect(); return r.right > W + 1 && getComputedStyle(e).position != 'fixed' && !clipped(e); })
+                  .filter(e => !e.parentElement || e.parentElement.getBoundingClientRect().right <= W + 1).slice(0, 6)
+                  .map(e => name(e) + ' reaches ' + Math.round(e.getBoundingClientRect().right) + 'px');
+  const taps = [...document.querySelectorAll('a, button, input, select, textarea, [role=button], [onclick]')].filter(shown)
+                  .filter(e => { const r = e.getBoundingClientRect(); const inline = e.tagName == 'A' && /^(P|LI|SPAN|TD)$/.test(e.parentElement.tagName);
+                                 return !inline && (r.height < 20 || r.width < 24); });
+  const tiny = all.filter(e => [...e.childNodes].some(n => n.nodeType == 3 && n.textContent.trim()) && parseFloat(getComputedStyle(e).fontSize) < 12);
+  const broken = [...document.images].filter(i => i.complete && i.naturalWidth == 0 && shown(i)).map(i => i.src.slice(0, 100)).slice(0, 5);
+  const cover = all.filter(e => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
+                  return (s.position == 'fixed' || s.position == 'sticky') && r.width * Math.min(r.height, H) > W * H * 0.3 && r.top < H; }).slice(0, 3).map(name);
+  return {title: document.title, width: W, height: H, page_width: d.scrollWidth, page_height: d.scrollHeight,
+          viewport_meta: !!document.querySelector('meta[name=viewport]'), wide, broken, covers: cover,
+          small_taps: taps.length, small_tap_examples: taps.slice(0, 5).map(e => name(e) + ' ' + Math.round(e.getBoundingClientRect().width) + 'x' + Math.round(e.getBoundingClientRect().height)),
+          tiny_text: tiny.length, tiny_examples: tiny.slice(0, 3).map(e => name(e) + ' ' + getComputedStyle(e).fontSize)};
+}"""
+def step(page, line):
+    verb, _, rest = line.strip().partition(" ")
+    verb = verb.lower(); rest = rest.strip()
+    if verb in ("click", "tap"):
+        target = page.get_by_text(rest, exact=False).first if not rest[:1] in "#.[" and "=" not in rest else page.locator(rest).first
+        target.click(timeout=8000)
+    elif verb == "type":
+        sel, _, text = rest.partition(" "); page.locator(sel).first.fill(text, timeout=8000)
+    elif verb == "scroll": page.mouse.wheel(0, int(rest or 800))
+    elif verb == "wait": page.wait_for_timeout(min(int(rest or 1000), 15000))
+    elif verb in ("go", "open"): page.goto(rest, wait_until="load", timeout=45000)
+    elif verb == "press": page.keyboard.press(rest)
+    page.wait_for_timeout(700)
+with sync_playwright() as p:
+    for dev, (profile, engine) in job["devices"].items():
+        got = {"device": dev, "profile": profile or "desktop 1440x900", "engine": engine, "console_errors": [], "failed_requests": []}
+        try:
+            browser = getattr(p, engine).launch()
+            ctx = browser.new_context(**(p.devices[profile] if profile else {"viewport": {"width": 1440, "height": 900}}))
+            page = ctx.new_page()
+            page.on("console", lambda m, g=got: m.type == "error" and len(g["console_errors"]) < 8 and g["console_errors"].append(m.text[:200]))
+            page.on("pageerror", lambda e, g=got: len(g["console_errors"]) < 8 and g["console_errors"].append("page error: " + str(e)[:200]))
+            page.on("requestfailed", lambda r, g=got: len(g["failed_requests"]) < 8 and g["failed_requests"].append(f"{r.url[:120]} ({r.failure})"))
+            page.on("response", lambda r, g=got: r.status >= 400 and len(g["failed_requests"]) < 8 and g["failed_requests"].append(f"{r.url[:120]} ({r.status})"))
+            t = time.time()
+            res = page.goto(job["url"], wait_until="load", timeout=45000)
+            try: page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception: pass
+            got["status"] = res.status if res else None; got["load_seconds"] = round(time.time() - t, 1)
+            for line in job["steps"]:
+                try: step(page, line)
+                except Exception as e: got.setdefault("step_errors", []).append(f"{line}: {str(e).splitlines()[0][:160]}")
+            got.update(page.evaluate(LOOK))
+            page.screenshot(path=job["shots"] + f"-{dev}.png")
+            page.screenshot(path=job["shots"] + f"-{dev}-full.png", full_page=True)
+            got["shot"] = job["shots"] + f"-{dev}.png"; got["full_shot"] = job["shots"] + f"-{dev}-full.png"
+            browser.close()
+        except Exception as e:
+            got["error"] = str(e).splitlines()[0][:300]
+        out.append(got)
+print(json.dumps(out))
+'''
+
+def checker_python():
+    """A Python that has the page checker (Playwright), or "" if none does yet."""
+    for py in (sys.executable, f"{BROWSER_HOME}/bin/python"):
+        if os.path.exists(py) and subprocess.run([py, "-c", "import playwright.sync_api"], capture_output=True).returncode == 0: return py
+    return ""
+
+def install_checker():
+    if not confirm("install the page checker", f"python3 -m venv {BROWSER_HOME.replace(HOME, '~')}\npip install playwright\n"
+                   "playwright install chromium webkit\n\nThe browsers for checking sites as a phone, tablet and desktop: about 400 MB, once."):
+        return ""
+    global tool_wait
+    for cmd in ([sys.executable, "-m", "venv", BROWSER_HOME], [f"{BROWSER_HOME}/bin/pip", "install", "-q", "playwright"],
+                [f"{BROWSER_HOME}/bin/python", "-m", "playwright", "install", "chromium", "webkit"]):
+        if tool_wait: tool_wait.label = "Installing the page checker"
+        r = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if r.returncode != 0: raise RuntimeError(f"couldn't install the page checker: {(r.stderr or r.stdout).strip()[-300:]}")
+    if not MAC: subprocess.run([f"{BROWSER_HOME}/bin/python", "-m", "playwright", "install-deps"], capture_output=True)   # needs sudo; tried quietly
+    return f"{BROWSER_HOME}/bin/python"
+
+def test_page(url, devices="phone,tablet,desktop", steps="", see="true"):
+    """Open a page as real devices would (Safari's engine for iPhone and iPad), measure what breaks and take screenshots."""
+    url = str(url).strip()
+    if os.path.exists(os.path.expanduser(url)):
+        url = "file://" + os.path.abspath(os.path.expanduser(url)) + ("/index.html" if os.path.isdir(os.path.expanduser(url)) else "")
+    elif not re.match(r"[a-z]+://", url): url = ("http://" if re.match(r"(localhost|127\.|0\.0\.0\.0)", url) else "https://") + url
+    want = [d.strip().lower() for d in re.split(r"[,\s]+", str(devices)) if d.strip()] or ["phone", "tablet", "desktop"]
+    unknown = [d for d in want if d not in DEVICES]
+    if unknown: return f"error: unknown device {', '.join(unknown)}. Use any of: {', '.join(DEVICES)}"
+    py = checker_python() or install_checker()
+    if not py: return "The user declined installing the page checker."
+    folder = os.path.join(pictures_dir(), "checks"); os.makedirs(folder, exist_ok=True)
+    host = re.sub(r"[^a-z0-9]+", "-", urllib.parse.urlparse(url).netloc.lower() or "file").strip("-")
+    shots = os.path.join(folder, f"{host}-{datetime.datetime.now():%Y%m%d-%H%M%S}")
+    job = {"url": url, "devices": {d: DEVICES[d] for d in dict.fromkeys(want)}, "steps": [s for s in str(steps).lstrip("\0").splitlines() if s.strip()], "shots": shots}
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f: f.write(PAGE_CHECK); script = f.name
+    try:
+        r = subprocess.run([py, script, json.dumps(job)], capture_output=True, text=True, timeout=60 + 60 * len(job["devices"]), stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return "error: the page took too long to check"
+    finally:
+        os.unlink(script)
+    try: found = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError): return f"error: the page checker failed: {(r.stderr or r.stdout).strip()[-600:]}"
+    if any("Executable doesn't exist" in g.get("error", "") for g in found) and not str(steps).startswith("\0"):
+        if not confirm("download the browsers for checking pages", f"{py} -m playwright install chromium webkit\n\nAbout 400 MB, once."):
+            return "The user declined downloading the browsers."
+        r = subprocess.run([py, "-m", "playwright", "install", "chromium", "webkit"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if r.returncode != 0: return f"error: couldn't download the browsers: {(r.stderr or r.stdout).strip()[-300:]}"
+        return test_page(url, devices, "\0" + str(steps), see)
+    report = []
+    for g in found:
+        head = f"## {g['device']} ({g['profile']}, {'Safari engine' if g['engine'] == 'webkit' else 'Chrome engine'})"
+        if g.get("error"): report.append(f"{head}\ncouldn't open it: {g['error']}"); continue
+        problems = []
+        if g.get("status") and g["status"] >= 400: problems.append(f"the page answered {g['status']}")
+        if g["page_width"] > g["width"] + 1: problems.append(f"sideways scroll: the page is {g['page_width']}px wide on a {g['width']}px screen. Too wide: " + "; ".join(g["wide"]))
+        if not g["viewport_meta"]: problems.append("no <meta name=viewport>: phones will show it zoomed out")
+        if g["small_taps"]: problems.append(f"{g['small_taps']} buttons or links under the 24px minimum to tap, like " + "; ".join(g["small_tap_examples"]))
+        if g["tiny_text"]: problems.append(f"{g['tiny_text']} bits of text under 12px, like " + "; ".join(g["tiny_examples"]))
+        if g["broken"]: problems.append("broken images: " + ", ".join(g["broken"]))
+        if g["covers"]: problems.append("fixed or sticky parts cover over 30% of the screen: " + ", ".join(g["covers"]))
+        if g["console_errors"]: problems.append("console errors: " + " | ".join(g["console_errors"]))
+        if g["failed_requests"]: problems.append("failed requests: " + " | ".join(g["failed_requests"]))
+        if g.get("step_errors"): problems.append("steps that failed: " + " | ".join(g["step_errors"]))
+        report.append(f"{head}\n\"{g['title']}\" · {g['width']}x{g['height']} screen · page {g['page_height']}px tall · loaded in {g['load_seconds']}s\n"
+                      + ("\n".join(f"- {p_}" for p_ in problems) if problems else "- no layout problems found")
+                      + f"\nscreenshot: {g['shot']} · whole page: {g['full_shot']}")
+        put_line(f"  {DIM}{link(file_link(g['full_shot']), g['device'] + ' screenshot')}{R}")
+        if str(see).lower() != "false": PENDING_SHOTS.append((g["device"], g["shot"]))
+    return f"Checked {url}\n\n" + "\n\n".join(report) + ("\n\nThe screenshots of the first screen follow, so look at them too: spacing, overlap, "
+                                                          "cut-off text, things that look wrong." if PENDING_SHOTS else "")
+
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
               "list_files": list_files, "search_files": search_files,
-              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task: one_helper(1, str(task)), "schedule_task": schedule_task,
+              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task: one_helper(1, str(task)), "schedule_task": schedule_task, "test_page": test_page,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
               "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
 
@@ -1895,6 +2044,13 @@ TOOLS = [
            "memory. It can read, search and run read-only commands, then returns a short report. Several delegate calls in one reply run at "
            "the same time, so split big research into 2 or 3 parts. Give each everything it needs in the task.", task="the full task, with all the details")]
      if REMOTE else []) + [
+    tool("test_page", "Open a website or local app as an iPhone, Android phone, iPad or desktop would (the iPhone and iPad use Safari's engine) "
+         "and check it: sideways scrolling, things too wide, buttons too small to tap, tiny text, broken images, console errors, failed requests. "
+         "You also get screenshots to look at. Use it to check anything you build or change, and again after fixing.",
+         url="the page: https://site.com, localhost:5173, or an .html file or folder",
+         devices="any of phone, small, big, android, tablet, ipad-mini, tablet-landscape, phone-landscape, desktop; default phone,tablet,desktop",
+         steps="optional actions before checking, one per line: click Menu · click #signup · type #email me@x.com · scroll 1200 · wait 1000 · press Enter",
+         see="false to skip the screenshots, default true"),
     tool("schedule_task", "Do a task later or again and again on its own, even with the app closed: every morning, every weekday, every hour, once "
          "at a time. Each run's report is saved and sent to them as a notification. Also lists or removes scheduled tasks.",
          action="add, list or remove, default add", when="daily 08:00, weekdays 9am, mon,thu 18:00, every 30 minutes, hourly, or once 2026-10-20 15:00",
@@ -2147,7 +2303,7 @@ def system_prompt():
 # what the loader says while each tool works, so nothing ever looks frozen (images draw their own)
 RUNNING = {"run_shell": "Running", "check_job": "Checking the job", "web_search": "Searching the web", "fetch_page": "Opening page", "read_file": "Reading",
            "list_files": "Looking through files", "search_files": "Searching files", "write_file": "Saving", "edit_file": "Saving",
-           "use_skill": "Loading skill", "schedule_task": "Scheduling"}
+           "use_skill": "Loading skill", "schedule_task": "Scheduling", "test_page": "Checking the page"}
 tool_wait = None; tool_label = ""
 LAST_TOOLS = []     # (call shown, full output) for this reply, for ctrl-o
 
@@ -2631,7 +2787,7 @@ stream_error = ""   # set when the server reports a failure instead of an answer
 DOING = {"update_todos": "Planning", "ask_user": "Writing a question", "delegate": "Briefing a helper",
          "generate_image": "Writing the image prompt", "write_file": "Writing file", "edit_file": "Editing file",
          "list_files": "Looking through files", "search_files": "Searching files", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
-         "read_file": "Opening file", "use_skill": "Loading skill", "remember": "Saving to memory", "schedule_task": "Scheduling"}
+         "read_file": "Opening file", "use_skill": "Loading skill", "remember": "Saving to memory", "schedule_task": "Scheduling", "test_page": "Setting up the check"}
 
 def lines(resp):
     """The reply's lines, ending quietly if the connection drops halfway (what arrived is kept)."""
@@ -2778,6 +2934,13 @@ def run_turn(history):
                         history.append({"role": "tool", "tool_call_id": call["id"], "content": REPEAT})
                         print(f"  {DIM}└ skipped: the same call a third time{R}"); continue
                     history.append({"role": "tool", "tool_call_id": call["id"], "content": run_tool(call) if whole(call) else CUT_OFF})
+                if PENDING_SHOTS:                          # screenshots from test_page, for it to look at
+                    parts = [{"type": "text", "text": "(Screenshots from test_page: " + ", ".join(d for d, _ in PENDING_SHOTS) + ", in that order.)"}]
+                    for _, shot in PENDING_SHOTS:
+                        try: parts.append(image_part(shot))
+                        except OSError: pass
+                    PENDING_SHOTS.clear()
+                    history.append({"role": "user", "content": parts})
                 label = "Reading results"
             else:
                 history.append({"role": "assistant", "content": text})
@@ -3145,7 +3308,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/rewind", "go back to an earlier message · also esc esc"), ("/last", "full output of the last tools · also ctrl-o"),
             ("/say", "read replies out loud"), ("/schedule", "tasks it does on its own at set times"),
             ("/commit", "commit your changes with a message it writes"), ("/review", "review your changes for bugs before you push"),
-            ("/hooks", "your own commands before or after its tools"), ("/notify", "notifications when it finishes in the background"),
+            ("/hooks", "your own commands before or after its tools"), ("/check", "check a site on phone, tablet and desktop · /check localhost:5173"), ("/notify", "notifications when it finishes in the background"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
@@ -3675,6 +3838,11 @@ while True:
                  "commit messages are written here. Stage only the files that belong to this change (never .env files, keys or other secrets; "
                  "ask me if something looks private), then commit with a short message in that style saying what changed and why. "
                  "Don't push unless I say so." + (f" Also: {user[7:].strip()}" if user[7:].strip() else "")); continue
+        if user.split()[0] == "/check":
+            if not user[6:].strip(): print(f"{DIM}/check <url> checks a site on phone, tablet and desktop · /check localhost:5173 · /check bxzex.com android{R}"); continue
+            turn(f"Check {user[6:].strip()} on phones, tablets and desktop with test_page (use the devices I named, if any). Look at the "
+                 "screenshots as well as the numbers. Tell me what's broken or looks off on each, worst first. If it's my own project and you can "
+                 "find its code here, offer to fix it."); continue
         if user.split()[0] == "/review":
             turn("Review my code changes before I push them. Look at git diff and git diff --staged; if both are empty, review the commits on "
                  "this branch that aren't on main or master (git log and git diff <base>...HEAD). Read the code around each change. Look for real "
