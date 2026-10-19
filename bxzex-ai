@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.9.2"
+VERSION = "1.10.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1577,8 +1577,9 @@ def run_schedule(sid):
     if "once" in item: ticker()
     if not quiet:
         notify(f"{AI_NAME} · {item['name']}", " ".join(re.sub(r"[*#`>|_]", "", result).split()))
-        try: phone_send(f"{item['name']}\n\n{result}")
-        except Exception as e: log_error(type(e), e, e.__traceback__)
+        for send in (phone_send, im_send):
+            try: send(f"{item['name']}\n\n{result}")
+            except Exception as e: log_error(type(e), e, e.__traceback__)
 
 def schedule_task(action="add", when="", task="", name="", can_act="false", id=""):
     action = str(action).strip().lower()
@@ -2099,6 +2100,7 @@ def phone_send(text, **extra):
 
 def phone_choose(question, choices, detail=""):
     """Buttons on the phone. Waits up to 15 minutes for a tap and returns the choice's number, or None."""
+    if CHANNEL == "imessage": return im_choose(question, choices, detail)
     nonce = f"{random.randrange(10**8)}"
     sent = phone_send(f"{question}\n\n{detail[:1800]}" if detail else question,
                       reply_markup={"inline_keyboard": [[{"text": c[:40], "callback_data": f"{nonce}:{i}"}] for i, c in enumerate(choices)]})
@@ -2190,10 +2192,13 @@ def phone_loop():
                 with open(chat_path, "w") as f: json.dump(history[-200:], f)
             except OSError: pass
 
-def phone_service(on=True):
-    """Keep the phone bridge running in the background (launchd on a Mac, a user service on Linux)."""
+def phone_service(on=True): return bridge_service(on, "phone")
+
+def bridge_service(on=True, kind="phone"):
+    """Keep a phone bridge (Telegram or iMessage) running in the background (launchd on a Mac, a user service on Linux)."""
     if os.environ.get("BXZEX_NO_TICKER"): return ""
-    me = [sys.executable, os.path.abspath(__file__), "--phone"]
+    PHONE_LABEL = IM_LABEL if kind == "imessage" else "com.bxzex.ai.phone"
+    me = [sys.executable, os.path.abspath(__file__), f"--{kind}"]
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": HOME}
     if "BXZEX_HOME" in os.environ: env["BXZEX_HOME"] = APP_HOME
     try:
@@ -2207,9 +2212,10 @@ def phone_service(on=True):
             os.makedirs(os.path.dirname(plist), exist_ok=True)
             with open(plist, "wb") as f:
                 f.write(plistlib.dumps({"Label": PHONE_LABEL, "ProgramArguments": me, "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 20,
-                                        "EnvironmentVariables": env, "StandardOutPath": f"{APP_HOME}/phone.log", "StandardErrorPath": f"{APP_HOME}/phone.log"}))
+                                        "EnvironmentVariables": env, "StandardOutPath": f"{APP_HOME}/{kind}.log", "StandardErrorPath": f"{APP_HOME}/{kind}.log"}))
             r = subprocess.run(["launchctl", "bootstrap", where, plist], capture_output=True, text=True)
             return "" if r.returncode == 0 else f"couldn't start it in the background: {r.stderr.strip()[:160]}"
+        if kind == "imessage": return "iMessage only works on a Mac"
         unit = f"{HOME}/.config/systemd/user/bxzex-phone.service"
         if not shutil.which("systemctl"): return "this computer has no systemd: start it yourself with  bxzex-ai --phone &"
         if not on:
@@ -2227,8 +2233,11 @@ def phone_service(on=True):
         log_error(type(e), e, e.__traceback__); return f"couldn't start it: {e}"
 
 def restart_phone():
-    """After an update the bridge starts again, so it runs the new version."""
-    if not (load_config().get("phone") or {}).get("chat") or os.environ.get("BXZEX_NO_TICKER"): return
+    """After an update the bridges start again, so they run the new version."""
+    if os.environ.get("BXZEX_NO_TICKER"): return
+    if MAC and (load_config().get("imessage") or {}).get("to"):
+        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{IM_LABEL}"], capture_output=True)
+    if not (load_config().get("phone") or {}).get("chat"): return
     if MAC: subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{PHONE_LABEL}"], capture_output=True)
     elif shutil.which("systemctl"): subprocess.run(["systemctl", "--user", "restart", "bxzex-phone"], capture_output=True)
 
@@ -2429,7 +2438,10 @@ def imessage(action, to="", text="", limit="10", who=""):
             to, text = str(to).strip(), str(text).strip()
             if not to or not text: return "error: give who to send to (a phone number or email) and the text"
             if PLAN: return plan_block()
+            now = time.time(); SENT_TO_OTHERS[:] = [t_ for t_ in SENT_TO_OTHERS if now - t_ < 3600]
+            if len(SENT_TO_OTHERS) >= 20: return "error: 20 messages to other people in the last hour already. Wait, so iMessage never sees this as spam."
             if not confirm(f"send a message to {to}", text, always_ask=True): return "The user declined. Nothing was sent."
+            SENT_TO_OTHERS.append(now)
             osa('''on run argv
   tell application "Messages"
     try
@@ -2481,6 +2493,160 @@ end run''', name) or f"nobody named {name} in Contacts"
         if re.search(r"-1743|not authori[sz]ed|not allowed", str(e)):
             return "error: this terminal isn't allowed to control Messages or Contacts. Tell the user: System Settings > Privacy & Security > Automation > their terminal app > turn on Messages and Contacts."
         return f"error: {e}"
+
+# ---- iMessage instead of Telegram: text your own number and it answers from this Mac ----
+IM_PREFIX = "BXZEX AI: "         # every message it sends starts with this, so it never answers itself
+IM_LABEL = "com.bxzex.ai.imessage"
+CHANNEL = "telegram"             # which one a phone bridge process talks through
+IM_QUEUE = []
+SENT_TO_OTHERS = []              # when it texted someone else, for the hourly cap
+
+IM_SEND = '''on run argv
+  tell application "Messages"
+    try
+      set s to 1st account whose service type = iMessage
+      send (item 2 of argv) to participant (item 1 of argv) of s
+    on error
+      set s to 1st account whose service type = SMS
+      send (item 2 of argv) to participant (item 1 of argv) of s
+    end try
+  end tell
+end run'''
+
+def my_handles():
+    """This Mac's own iMessage addresses: its phone number and Apple ID emails."""
+    r = subprocess.run(["defaults", "read", "com.apple.madrid", "IMD-IDS-Aliases"], capture_output=True, text=True)
+    return sorted(set(re.findall(r"\+\d{10,15}|[\w.+-]+@[\w-]+\.[\w.]+", r.stdout)), key=lambda h: (not h.startswith("+"), h))
+
+def im_send(text):
+    conf = load_config().get("imessage") or {}
+    if not conf.get("to"): return None
+    body = IM_PREFIX + plain_text(text).strip()
+    for i in range(0, len(body), 2500): osa(IM_SEND, conf["to"], body[i:i + 2500])
+    return True
+
+def im_rows(after):
+    """New messages they sent to their own chat after this row, oldest first."""
+    import sqlite3
+    conf = load_config().get("imessage") or {}
+    ids = conf.get("handles") or []
+    if not ids: return []
+    db = sqlite3.connect(f"file:{MESSAGES_DB}?mode=ro", uri=True)
+    try:
+        rows = db.execute(f"""select m.ROWID, m.text, m.attributedBody from message m
+            join chat_message_join j on j.message_id = m.ROWID join chat c on c.ROWID = j.chat_id
+            where c.chat_identifier in ({','.join('?' * len(ids))}) and m.is_from_me = 0 and m.ROWID > ? order by m.ROWID""",
+            [*ids, after]).fetchall()
+    finally:
+        db.close()
+    got = []
+    for rid, t, b in rows:
+        text = message_text(t, b).strip().lstrip("￼").strip()
+        if text and not text.startswith(IM_PREFIX.strip()): got.append((rid, text))
+        elif not text or text.startswith(IM_PREFIX.strip()): got.append((rid, ""))     # its own reply: skipped, but counted
+    return got
+
+def im_last():
+    return (load_config().get("imessage") or {}).get("last", 0)
+
+def im_mark(rid):
+    save_config(imessage=dict(load_config().get("imessage") or {}, last=max(rid, im_last())))
+
+def im_choose(question, choices, detail=""):
+    """Asked by text: they reply with the number or the word. Waits up to 15 minutes."""
+    im_send(f"{question}\n\n{detail[:1500]}\n\nReply " + " or ".join(f"{i + 1} for {c}" for i, c in enumerate(choices)) if detail else
+            f"{question}\n\nReply " + " or ".join(f"{i + 1} for {c}" for i, c in enumerate(choices)))
+    end = time.time() + 900
+    yes = {"y", "yes", "yeah", "yep", "ok", "okay", "sure", "do it", "go"}; no = {"n", "no", "nope", "stop", "cancel", "don't", "dont"}
+    while time.time() < end:
+        try: rows = im_rows(im_last())
+        except Exception: rows = []
+        for rid, text in rows:
+            im_mark(rid)
+            if not text: continue
+            word = text.lower().strip(" .!")
+            pick = None
+            if word.isdigit() and 1 <= int(word) <= len(choices): pick = int(word) - 1
+            else:
+                for i, c in enumerate(choices):
+                    if word == c.lower() or (c.lower() == "yes" and word in yes) or (c.lower() == "no" and word in no): pick = i
+            if pick is not None: return pick
+            IM_QUEUE.append(text)                           # something else: answered after this
+        time.sleep(2)
+    im_send("No answer in 15 minutes, so I skipped it.")
+    return None
+
+def imessage_loop():
+    """Runs on its own (started by the system): answers what you text to your own number, one at a time."""
+    global PHONE, CHANNEL, history
+    conf = load_config().get("imessage") or {}
+    if not conf.get("to"): print("iMessage isn't set up: run /imessage in the app"); return
+    CHANNEL = "imessage"
+    try: im_rows(im_last())
+    except Exception as e:
+        print(f"can't read Messages: {e}. Give Full Disk Access to {os.path.realpath(sys.executable)}"); time.sleep(60); return
+    chat_path = f"{APP_HOME}/imessage-chat.json"
+    try:
+        with open(chat_path) as f: history = json.load(f)
+    except (OSError, ValueError): history = []
+    if load_config().get("mcp"): connect_mcp()
+    refresh_skills(); refresh_system()
+    while True:
+        if IM_QUEUE: todo = [IM_QUEUE.pop(0)]
+        else:
+            try: rows = im_rows(im_last())
+            except Exception: time.sleep(5); continue
+            todo = []
+            for rid, text in rows:
+                im_mark(rid)
+                if text: todo.append(text)
+            if not todo: time.sleep(2); continue
+        for text in todo:
+            if text.lower() in ("/new", "new chat"): history = []; im_send("New chat."); continue
+            PHONE = conf["to"]; start = len(history); done = threading.Event()
+            def note():                                  # no typing dots in iMessage: say so once if it takes a while
+                if not done.wait(25): im_send("On it…")
+            threading.Thread(target=note, daemon=True).start()
+            try:
+                msg = user_message(text)
+                msg["_hint"] = msg.get("_hint", "") + "\n\n(Sent by text message from their phone: keep the reply short, plain text, no tables.)"
+                history.append(msg); run_turn(history)
+                reply = "\n\n".join(m["content"] for m in history[start:] if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip())
+            except Exception as e:
+                log_error(type(e), e, e.__traceback__); close_open_calls(); reply = f"Something went wrong: {e}"
+            finally:
+                done.set(); PHONE = None
+            PENDING_SHOTS.clear()
+            try: im_send(reply or "Done.")
+            except Exception as e: log_error(type(e), e, e.__traceback__)
+            try:
+                with open(chat_path, "w") as f: json.dump(history[-200:], f)
+            except OSError: pass
+
+def setup_imessage(arg=""):
+    arg = arg.strip()
+    if not MAC: print(f"{DIM}iMessage only works on a Mac{R}"); return
+    if arg == "off":
+        bridge_service(False, "imessage"); save_config(imessage={}); print(f"{DIM}iMessage bridge off{R}"); return
+    conf = load_config().get("imessage") or {}
+    if conf.get("to") and arg != "again":
+        print(header("iMessage"))
+        print(f"  {DIM}on: text {conf['to']} (yourself) from your phone and it answers from this Mac · /imessage again · /imessage off{R}"); return
+    handles = my_handles()
+    if not handles: print(f"{DIM}this Mac isn't signed in to iMessage (Messages > Settings > iMessage){R}"); return
+    import sqlite3
+    try:
+        db = sqlite3.connect(f"file:{MESSAGES_DB}?mode=ro", uri=True); last = db.execute("select max(ROWID) from message").fetchone()[0] or 0; db.close()
+    except sqlite3.Error:
+        print(f"{DIM}it can't read Messages yet: System Settings > Privacy & Security > Full Disk Access > turn on your terminal app "
+              f"and {os.path.realpath(sys.executable)}, then try /imessage again{R}"); return
+    to = next((h for h in handles if h.startswith("+")), handles[0])
+    save_config(imessage={"to": to, "handles": handles, "last": last})
+    trouble = bridge_service(True, "imessage")
+    try: im_send("Texting from your phone is on. Text this chat and I answer from your Mac. Only messages you send to yourself count.")
+    except Exception as e: trouble = (trouble + " " if trouble else "") + f"couldn't send the first message: {e}"
+    print(f"{GOLD}●{R} {BOLD}iMessage connected{R} {DIM}· text {to} (yourself) from your phone · it only reads your chat with yourself{R}"
+          + (f"\n  {DIM}{trouble}{R}" if trouble else ""))
 
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
@@ -3862,7 +4028,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/commit", "commit your changes with a message it writes"), ("/review", "review your changes for bugs before you push"),
             ("/hooks", "your own commands before or after its tools"), ("/check", "check a site on phone, tablet and desktop · /check localhost:5173"), ("/notify", "notifications when it finishes in the background"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
-            ("/phone", "use it from your phone through Telegram"), ("/cost", "what the cloud card has cost"), ("/export", "save this chat as a document"),
+            ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"), ("/cost", "what the cloud card has cost"), ("/export", "save this chat as a document"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -4196,6 +4362,8 @@ if sys.argv[1:2] == ["--tick"]:
     tick(); sys.exit(0)
 if sys.argv[1:2] == ["--phone"]:             # the phone bridge, kept running by the system
     phone_loop(); sys.exit(0)
+if sys.argv[1:2] == ["--imessage"]:          # the iMessage bridge, kept running by the system
+    imessage_loop(); sys.exit(0)
 if sys.argv[1:2] == ["--ticker"]:            # set the system timer on or off to match what's scheduled
     print(ticker() or "ok"); sys.exit(0)
 if sys.argv[1:2] == ["--run-schedule"] and len(sys.argv) > 2:
@@ -4389,6 +4557,7 @@ while True:
         if user.startswith("/hooks"): show_hooks(user[6:]); continue
         if user.startswith("/warm"): keep_warm(user[5:]); continue
         if user.startswith("/phone"): setup_phone(user[6:]); continue
+        if user.startswith("/imessage"): setup_imessage(user[9:]); continue
         if user == "/cost": show_cost(); continue
         if user.startswith("/export"): export_chat(user[7:]); continue
         if user == "/notify":
