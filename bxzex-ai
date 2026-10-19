@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2235,8 +2235,8 @@ def bridge_service(on=True, kind="phone"):
 def restart_phone():
     """After an update the bridges start again, so they run the new version."""
     if os.environ.get("BXZEX_NO_TICKER"): return
-    if MAC and (load_config().get("imessage") or {}).get("to"):
-        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{IM_LABEL}"], capture_output=True)
+    if MAC and (load_config().get("imessage") or {}).get("to"):     # whatever keeps it running (launchd or a loop) starts it again
+        subprocess.run(["pkill", "-f", "bxzex-ai --imessage"], capture_output=True)
     if not (load_config().get("phone") or {}).get("chat"): return
     if MAC: subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{PHONE_LABEL}"], capture_output=True)
     elif shutil.which("systemctl"): subprocess.run(["systemctl", "--user", "restart", "bxzex-phone"], capture_output=True)
