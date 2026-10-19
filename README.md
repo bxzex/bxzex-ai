@@ -30,6 +30,7 @@ If your machine can run it, this app is still the one with no limits and no bill
 - **Does things on your computer.** It can run commands and read or write files. It shows you exactly what it wants to do and waits for your yes first.
 - **Listens.** Type `/v`, say what you want, and your words show up at the prompt ready to send.
 - **Remembers you.** Tell it something worth keeping and it's still there next week. It all sits in a plain text file you can read, edit or wipe.
+- **Connects to your apps.** Gmail, Calendar, Slack, GitHub, Notion, Drive, Sheets, Instagram, Stripe and 1,600 more, through Composio over MCP. Add it once with `/mcp add`, sign in to an app when it asks, and it can read and act there (it asks before anything that sends, posts or changes). Any other MCP server works the same way.
 - **Comes with skills.** 95 of them: design and UX, websites and apps, backends and deploying, AI and automation, documents and spreadsheets, writing, research and sales. It pulls in the right one when the job calls for it, and you can write your own.
 - **Looks how you want.** Nine color themes. It starts in white fading to blue, like the logo. Pick another during install or switch any time with `/color`.
 
@@ -118,6 +119,7 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/todos` | Its to-do list for the job it's on. On bigger jobs it keeps one and ticks steps off as it goes. |
 | `/jobs` | Commands it left running in the background, like a dev server. They stop when you quit. |
 | `/context` | How full the chat is. |
+| `/mcp` | Connected tool servers and apps. `/mcp add <name> <url> Header:value` adds one. |
 | `/undo` | Put back the last file it wrote or edited. |
 | `/compact` | Fold the chat so far into a short summary to make room. |
 | `/init` | It looks around the folder you're in and writes a `BXZEX.md` about the project, which it reads every time you work there. |

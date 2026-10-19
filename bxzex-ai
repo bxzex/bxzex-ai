@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1073,6 +1073,117 @@ def delegate(task):
     finally:
         helping = False
 
+# ---- MCP: tools from other servers, like Composio for connecting apps (Gmail, Slack, GitHub, Calendar...) ----
+# Servers live in config.json under "mcp": {"name": {"url": ..., "headers": {...}}}, on this computer only.
+MCP = {}            # tool name the model sees -> (server, real tool name)
+MCP_STATUS = {}     # server -> "ok: N tools" or the error
+mcp_sessions = {}   # server -> Mcp-Session-Id
+
+def mcp_rpc(server, method, params=None, note=False):
+    conf = load_config().get("mcp", {}).get(server) or {}
+    body = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+    if not note: body["id"] = int(time.time() * 1000) % 10**9
+    head = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream", **(conf.get("headers") or {})}
+    if server in mcp_sessions: head["Mcp-Session-Id"] = mcp_sessions[server]
+    req = urllib.request.Request(conf["url"], json.dumps(body).encode(), head)
+    with urllib.request.urlopen(req, timeout=120) as r:
+        sid = r.headers.get("Mcp-Session-Id")
+        if sid: mcp_sessions[server] = sid
+        raw = r.read().decode("utf-8", "ignore")
+    if note: return None
+    found = None
+    for line in raw.splitlines():                     # either plain JSON or a stream of "data:" events
+        line = line.strip()
+        if line.startswith("data:"): line = line[5:].strip()
+        if line.startswith("{"):
+            try: msg = json.loads(line)
+            except ValueError: continue
+            if msg.get("id") == body["id"] or "result" in msg or "error" in msg: found = msg
+    if found is None:
+        try: found = json.loads(raw)
+        except ValueError: raise RuntimeError("the server's answer couldn't be read")
+    if "error" in found: raise RuntimeError(str(found["error"].get("message", found["error"]))[:300])
+    return found.get("result") or {}
+
+def mcp_name(server, tool_name):
+    return re.sub(r"[^A-Za-z0-9_-]", "_", f"{server}__{tool_name}")[:64]
+
+def connect_mcp():
+    """Start every MCP server in config.json and add its tools to the ones the model can call."""
+    for server, conf in (load_config().get("mcp") or {}).items():
+        if not isinstance(conf, dict) or not conf.get("url"): continue
+        try:
+            mcp_sessions.pop(server, None)
+            mcp_rpc(server, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
+                                           "clientInfo": {"name": "bxzex-ai", "version": VERSION}})
+            try: mcp_rpc(server, "notifications/initialized", note=True)
+            except Exception: pass
+            tools, cursor = [], None
+            while True:
+                got = mcp_rpc(server, "tools/list", {"cursor": cursor} if cursor else {})
+                tools += got.get("tools") or []
+                cursor = got.get("nextCursor")
+                if not cursor or len(tools) > 200: break
+            for t in tools:
+                name = mcp_name(server, t["name"])
+                MCP[name] = (server, t["name"])
+                schema = t.get("inputSchema") or {"type": "object", "properties": {}}
+                TOOLS.append({"type": "function", "function": {"name": name, "description": f"[{server}] " + (t.get("description") or "")[:900],
+                                                                "parameters": schema}})
+            MCP_STATUS[server] = f"connected · {len(tools)} tools"
+        except Exception as e:
+            MCP_STATUS[server] = f"couldn't connect: {str(e)[:160]}"
+
+READ_ONLY_MCP = re.compile(r"(?i)search|get_tool_schemas|list|fetch|get_|read|wait_for|manage_connections")
+
+def mcp_call(name, args):
+    server, real = MCP[name]
+    acts = not READ_ONLY_MCP.search(real) or "EXECUTE" in real.upper()
+    if acts:
+        if PLAN: return plan_block()
+        shown = json.dumps(args, indent=1)[:3000]
+        if not confirm(f"{server}: {real}", shown): return "The user declined this action."
+    try: res = mcp_rpc(server, "tools/call", {"name": real, "arguments": args})
+    except Exception as e:
+        if "session" in str(e).lower():               # the server forgot us: connect again once
+            mcp_sessions.pop(server, None); connect_again(server)
+            res = mcp_rpc(server, "tools/call", {"name": real, "arguments": args})
+        else: raise
+    parts = []
+    for item in res.get("content") or []:
+        if item.get("type") == "text": parts.append(item.get("text", ""))
+        else: parts.append(f"[{item.get('type')}]")
+    out = "\n".join(parts) or json.dumps(res)[:4000]
+    for url in dict.fromkeys(re.findall(r"https://[^\s\"'<>)\\]+", out)):   # a sign-in link for an app: make it clickable here
+        if re.search(r"(?i)connect|auth|oauth|link", url): print(f"  {GOLD}{link(url, 'open this link to connect the app')}{R} {DIM}· {url[:80]}{R}")
+    return ("error: " if res.get("isError") else "") + clip(out, OUT_CHARS)
+
+def connect_again(server):
+    mcp_rpc(server, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "bxzex-ai", "version": VERSION}})
+
+def show_mcp(arg=""):
+    words = arg.split()
+    if words[:1] == ["add"] and len(words) >= 3:
+        name, url = words[1], words[2]
+        headers = {}
+        for h in words[3:]:
+            if ":" in h: k, v = h.split(":", 1); headers[k.strip()] = v.strip()
+        mcp = load_config().get("mcp") or {}; mcp[name] = {"url": url, "headers": headers}; save_config(mcp=mcp)
+        try: os.chmod(CONFIG, 0o600)
+        except OSError: pass
+        print(f"{DIM}added {name} · it connects the next time bxzex-ai opens{R}"); return
+    if words[:1] == ["remove"] and len(words) == 2:
+        mcp = load_config().get("mcp") or {}; mcp.pop(words[1], None); save_config(mcp=mcp)
+        print(f"{DIM}removed {words[1]}{R}"); return
+    print(header("Connected tools (MCP)"))
+    servers = load_config().get("mcp") or {}
+    if not servers: print(f"  {DIM}none yet{R}")
+    for server in servers:
+        print(f"  {GOLD}{server}{R}  {DIM}{MCP_STATUS.get(server, 'connecting…')}{R}")
+        names = [real for n, (sv, real) in MCP.items() if sv == server]
+        if names: print(f"    {DIM}{', '.join(names)[:W() * 2]}{R}")
+    print(f"  {DIM}/mcp add <name> <url> [Header:value] · /mcp remove <name> · kept in {CONFIG.replace(HOME, '~')} on this computer only{R}")
+
 def plan_block():
     return "Plan mode is on, so nothing can be changed yet. Look around with the read-only tools, then write the plan and ask the user to turn plan mode off (/plan or shift-tab) to go ahead."
 
@@ -1140,6 +1251,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - /update: get the newest version of the app. It also checks by itself each time it starts.
 - /image <description>: make a picture straight from their words, without you. If they ask you for a picture in conversation, use generate_image.
 - /plan or shift-tab: plan mode. You only look around and write a plan; changes are blocked until they turn it off.
+- /mcp: their connected tool servers, like Composio for their apps (Gmail, Calendar, Slack, GitHub...).
 - /todos: your to-do list. /jobs: commands you left running. /context: how full the chat is.
 - Their own commands: a prompt saved as ~/.bxzex-ai/commands/name.md runs with /name.
 - /undo: put back the last file you wrote or edited.
@@ -1290,6 +1402,13 @@ def refresh_system():
     for notes_file in ("BXZEX.md", "AGENTS.md"):
         here = read_text(os.path.join(os.getcwd(), notes_file), 3000)
         if here: parts.append(f"## Notes for this folder ({notes_file})\n" + here)
+    if MCP:
+        servers = sorted({sv for sv, _ in MCP.values()})
+        parts.append("## Connected tools\nYou also have tools from: " + ", ".join(servers) + ". "
+                     + ("With composio you can use the user's own apps (Gmail, Calendar, Slack, GitHub, Notion, Drive and hundreds more): "
+                        "load the connect-apps skill, search for the right tool first, connect the app when needed (give them the link it returns "
+                        "and wait), then run it. Never guess tool names. Every app that can be connected is listed in ~/.bxzex-ai/connectors.txt."
+                        if "composio" in servers else ""))
     if PLAN: parts.append("## Plan mode is on\nOnly look around and plan. Nothing can be changed until the user turns it off.")
     skills = list_skills()
     if skills:
@@ -1350,12 +1469,12 @@ def run_tool(call):
     if not isinstance(args, dict): return "error: arguments must be a JSON object with the tool's named fields"
     shown = " ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " ")
     print(f"{TEAL}◆{R} {BOLD}{name}{R}{DIM}({shown[:W()-len(name)-6]}){R}")
-    if name not in TOOL_FUNCS: return f"error: no tool named {name}"
+    if name not in TOOL_FUNCS and name not in MCP: return f"error: no tool named {name}"
     global tool_wait, tool_label
-    tool_label = RUNNING.get(name, "")
+    tool_label = RUNNING.get(name, "Working with " + MCP[name][0] if name in MCP else "")
     if tool_label: sys.stdout.write("\033[?25l"); tool_wait = Waiting(tool_label)
     try:
-        out = str(TOOL_FUNCS[name](**args))
+        out = mcp_call(name, args) if name in MCP else str(TOOL_FUNCS[name](**args))
     except Exception as e:
         out = f"error: {e}"
     finally:
@@ -2032,7 +2151,7 @@ def get_update(quiet, wait):
         here = os.path.dirname(os.path.realpath(__file__))
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(8) as pool:                    # every file at once: one by one took half a minute
-            app, server, installer = pool.map(fetch, ["bxzex-ai", "bxzex-server", "install.sh"])
+            app, server, installer, apps = pool.map(fetch, ["bxzex-ai", "bxzex-server", "install.sh", "connectors.txt"])
             compile(app, "bxzex-ai", "exec")                   # never install something that doesn't even parse
             if f'VERSION = "{latest[0]}"' not in app or not app.rstrip().endswith(END_MARK):   # cut off, or the download servers still hold the old copy
                 say(f"v{latest[0]} is on its way but hasn't reached the download servers yet. Try /update again in a few minutes"); return False
@@ -2041,6 +2160,8 @@ def get_update(quiet, wait):
             skills = dict(zip(names, pool.map(lambda n: fetch(f"skills/{n}.md"), names)))
         if not server.startswith("#!") or any(not v.startswith("---") for v in skills.values()):
             say("part of the download came back broken, nothing was changed. Try /update again"); return False
+        if apps.startswith("# Apps"):
+            with open(f"{APP_HOME}/connectors.txt", "w") as f: f.write(apps)
         os.makedirs(SKILLS_DIR, exist_ok=True)
         for n, text in skills.items():
             with open(os.path.join(SKILLS_DIR, f"{n}.md"), "w") as f: f.write(text)
@@ -2212,6 +2333,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/device", "run on the graphics card or the processor · /device cpu"),
             ("/plan", "plan mode: it only looks and plans · also shift-tab"), ("/todos", "its to-do list"),
             ("/jobs", "commands running in the background"), ("/context", "how full the chat is"),
+            ("/mcp", "connected tools and apps · /mcp add name url"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -2511,6 +2633,11 @@ if RELOAD:
 else:
     banner()
 refresh_system()
+if load_config().get("mcp"):                    # connected apps: their tools join in a second or two
+    def _mcp():
+        connect_mcp()
+        if MCP: refresh_system()
+    threading.Thread(target=_mcp, daemon=True).start()
 warm_up()
 if RELOAD.get("chat") and os.path.exists(RELOAD["chat"]):
     try:
@@ -2608,6 +2735,7 @@ while True:
             continue
         if user=="/jobs": show_jobs(); continue
         if user=="/context": show_context(); continue
+        if user.startswith("/mcp"): show_mcp(user[4:]); continue
         if user.split()[0] in custom_commands():
             name, _, rest = user.partition(" ")
             text = read_text(custom_commands()[name], 20000)
