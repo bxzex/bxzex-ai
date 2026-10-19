@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2049,14 +2049,52 @@ def tg(method, token=None, timeout=30, **params):
     if not got.get("ok"): raise RuntimeError(got.get("description") or "Telegram didn't answer")
     return got["result"]
 
+def tg_html(md):
+    """Its replies are written in Markdown; Telegram shows its own HTML instead, so **bold** never arrives as stars."""
+    esc = lambda t: t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    out, code = [], None
+    for line in md.split("\n"):
+        if line.strip().startswith("```"):
+            if code is None: code = []
+            else: out.append("<pre>" + esc("\n".join(code)) + "</pre>"); code = None
+            continue
+        if code is not None: code.append(line); continue
+        if re.match(r"\s*\|?\s*:?-{3,}", line) and "|" in line: continue                 # a table's divider row
+        if line.count("|") >= 2:                                                          # a table row: cells side by side
+            line = "  ·  ".join(c.strip() for c in line.strip().strip("|").split("|"))
+        parts = re.split(r"(`[^`\n]+`)", line)
+        line = "".join(f"<code>{esc(p[1:-1])}</code>" if p.startswith("`") and p.endswith("`") and len(p) > 1 else esc(p) for p in parts)
+        line = re.sub(r"^\s{0,3}#{1,6}\s+(.+)$", r"<b>\1</b>", line)
+        line = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", line)
+        line = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", line)
+        line = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', line)
+        line = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
+        out.append(line)
+    if code is not None: out.append("<pre>" + esc("\n".join(code)) + "</pre>")
+    return "\n".join(out)
+
+def plain_text(md):
+    """The same reply with the Markdown marks taken out, for when Telegram won't take the formatted one."""
+    t = re.sub(r"```\w*\n?", "", md)
+    t = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: m.group(1) or m.group(2), t)
+    t = re.sub(r"`([^`\n]+)`", r"\1", t)
+    t = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", t)
+    return re.sub(r"(?m)^(\s*)[-*+]\s+", r"\1• ", t)
+
 def phone_send(text, **extra):
     """Send to your phone, in pieces Telegram accepts. Returns the last message sent."""
     conf = load_config().get("phone") or {}
     if not conf.get("chat"): return None
     text = text.strip() or "(empty)"; last = None
-    for i in range(0, len(text), 3900):
-        last = tg("sendMessage", chat_id=conf["chat"], text=text[i:i + 3900], disable_web_page_preview=True,
-                  **(extra if i + 3900 >= len(text) else {}))
+    pieces, piece = [], ""
+    for para in text.split("\n\n"):                  # split between paragraphs so formatting is never cut in half
+        if piece and len(piece) + len(para) > 3000: pieces.append(piece); piece = ""
+        piece = (piece + "\n\n" + para) if piece else para
+    pieces.append(piece)
+    for i, part in enumerate(pieces):
+        more = extra if i == len(pieces) - 1 else {}
+        try: last = tg("sendMessage", chat_id=conf["chat"], text=tg_html(part)[:4096], parse_mode="HTML", disable_web_page_preview=True, **more)
+        except RuntimeError: last = tg("sendMessage", chat_id=conf["chat"], text=plain_text(part)[:4096], disable_web_page_preview=True, **more)
     return last
 
 def phone_choose(question, choices, detail=""):
@@ -2137,7 +2175,9 @@ def phone_loop():
             threading.Thread(target=typing, daemon=True).start()
             start = len(history)
             try:
-                history.append(user_message(text)); run_turn(history)
+                msg = user_message(text)
+                msg["_hint"] = msg.get("_hint", "") + "\n\n(Sent from their phone: keep the reply short and easy to read on a small screen.)"
+                history.append(msg); run_turn(history)
                 reply = "\n\n".join(m["content"] for m in history[start:] if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip())
             except Exception as e:
                 log_error(type(e), e, e.__traceback__); close_open_calls(); reply = f"Something went wrong: {e}"
