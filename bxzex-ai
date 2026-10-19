@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.10.1"
+VERSION = "1.11.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2134,6 +2134,41 @@ def phone_photo(file_id):
     subprocess.run(["curl", "-sS", "-o", path, f"{TG_API}/file/bot{token}/{f['file_path']}"], capture_output=True)
     return path
 
+# ---- a password for the phone bridges: nothing runs until it's sent, and it locks again after 12 quiet hours ----
+LOCK_HOURS = 12
+
+def lock_conf(): return load_config().get("bridge_lock") or {}
+
+def set_bridge_password(pw):
+    import hashlib
+    salt = os.urandom(16).hex()
+    save_config(bridge_lock={"salt": salt, "hash": hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), 200000).hex(), "fails": []})
+    try: os.chmod(CONFIG, 0o600)
+    except OSError: pass
+
+def bridge_gate(kind, text):
+    """None when the message may go through. Otherwise the reply to send back (or "" to say nothing)."""
+    import hashlib, hmac
+    lock = lock_conf()
+    if not lock.get("hash"): return None
+    conf = load_config().get(kind) or {}; now = time.time()
+    if text.strip().lower() == "/lock":
+        save_config(**{kind: dict(conf, until=0)}); return "Locked. Send your password to use it again."
+    if conf.get("until", 0) > now:
+        save_config(**{kind: dict(conf, until=now + LOCK_HOURS * 3600)})       # 12 hours from the last message
+        return None
+    fails = [t for t in lock.get("fails", []) if now - t < 3600]
+    if len(fails) >= 8: return ""                                              # too many wrong tries: quiet for an hour
+    tried = hashlib.pbkdf2_hmac("sha256", text.strip().encode(), bytes.fromhex(lock["salt"]), 200000).hex()
+    if hmac.compare_digest(tried, lock["hash"]):
+        save_config(**{kind: dict(conf, until=now + LOCK_HOURS * 3600)}, bridge_lock=dict(lock, fails=[]))
+        return f"Unlocked. It stays open until {LOCK_HOURS} hours after your last message. /lock locks it now."
+    fails.append(now); save_config(bridge_lock=dict(lock, fails=fails))
+    if len(fails) >= 8:
+        notify(AI_NAME, f"8 wrong passwords on {kind}. It's ignoring messages there for an hour.")
+        return "Too many wrong tries. Locked for an hour."
+    return "Locked. Send your password to use it."
+
 def phone_loop():
     """Runs on its own (started by the system): answers what you send from your phone, one message at a time."""
     global PHONE, history
@@ -2163,6 +2198,13 @@ def phone_loop():
                 try: text = (text + " " + phone_photo(msg["photo"][-1]["file_id"])).strip()
                 except Exception: pass
             if not text: continue
+            gate = bridge_gate("phone", text)
+            if gate is not None:
+                if gate.startswith("Unlocked") or gate.startswith("Too many"):
+                    try: tg("deleteMessage", chat_id=conf["chat"], message_id=msg["message_id"])
+                    except Exception: pass
+                if gate: phone_send(gate)
+                continue
             if text in ("/start", "/help"):
                 phone_send(f"{AI_NAME} on your computer. Write anything and it works on it there. /new starts a fresh chat."); continue
             if text == "/new":
@@ -2602,6 +2644,10 @@ def imessage_loop():
                 if text: todo.append(text)
             if not todo: time.sleep(2); continue
         for text in todo:
+            gate = bridge_gate("imessage", text)
+            if gate is not None:
+                if gate: im_send(gate)
+                continue
             if text.lower() in ("/new", "new chat"): history = []; im_send("New chat."); continue
             PHONE = conf["to"]; start = len(history); done = threading.Event()
             def note():                                  # no typing dots in iMessage: say so once if it takes a while
@@ -4028,7 +4074,8 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/commit", "commit your changes with a message it writes"), ("/review", "review your changes for bugs before you push"),
             ("/hooks", "your own commands before or after its tools"), ("/check", "check a site on phone, tablet and desktop · /check localhost:5173"), ("/notify", "notifications when it finishes in the background"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
-            ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"), ("/cost", "what the cloud card has cost"), ("/export", "save this chat as a document"),
+            ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"),
+            ("/password", "a password your phone has to send before it can use it"), ("/cost", "what the cloud card has cost"), ("/export", "save this chat as a document"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -4558,6 +4605,11 @@ while True:
         if user.startswith("/warm"): keep_warm(user[5:]); continue
         if user.startswith("/phone"): setup_phone(user[6:]); continue
         if user.startswith("/imessage"): setup_imessage(user[9:]); continue
+        if user.startswith("/password"):
+            if user[9:].strip() == "off": save_config(bridge_lock={}); print(f"{DIM}no password on the phone bridges any more{R}"); continue
+            pw = line_input(f"  {GOLD}❯{R} new password for Telegram and iMessage: ").strip()
+            if len(pw) < 6: print(f"{DIM}use at least 6 characters{R}"); continue
+            set_bridge_password(pw); RAW.write("\033[1A\r\033[K"); print(f"{GOLD}●{R} {BOLD}Password set{R} {DIM}· send it from your phone to unlock · /lock there locks it · /password off removes it{R}"); continue
         if user == "/cost": show_cost(); continue
         if user.startswith("/export"): export_chat(user[7:]); continue
         if user == "/notify":
