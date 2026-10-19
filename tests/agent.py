@@ -20,6 +20,11 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+        if body.get("stream") is False:                  # a helper: the whole reply at once
+            d = SCRIPT.pop(0) if SCRIPT else {"content": "extra"}
+            msg = {"content": d.get("content", ""), "tool_calls": [{k: v for k, v in t.items() if k != "index"} for t in d.get("tool_calls", [])]}
+            b = json.dumps({"choices": [{"message": msg}]}).encode()
+            self.wfile.write(b); return
         if not body.get("stream"): return
         GOT.append(body["messages"])
         d = SCRIPT.pop(0) if SCRIPT else {"content": "extra"}
@@ -50,7 +55,7 @@ tools = {m["tool_call_id"]: m["content"] for msgs in GOT for m in msgs if m["rol
 print("todos shown:", "▸ ask the user" in plain and "✓ look around" in plain)
 print("ask_user answer:", tools.get("cask_user"))
 print("background job:", "job-is-alive" in (tools.get("ccheck_job") or ""), "| still running:", "still running" in (tools.get("ccheck_job") or ""))
-print("helper:", "helper started" in plain and "helper finished" in plain, "| report:", (tools.get("cdelegate") or "")[:40])
+print("helper:", "◆ helper 1" in plain and "└ helper 1:" in plain, "| report:", (tools.get("cdelegate") or "")[:40])
 print("plan mode blocked write:", "Plan mode is on" in (tools.get("cwrite_file") or ""), "| x.txt exists:", os.path.exists(home + "/x.txt"))
 print("/jobs:", "Background jobs" in plain, "| /context:", "% · about" in plain, "| plan status:", "plan mode · it only looks" in plain)
 print("custom /hello:", any(m.get("content") == "Say hello to world" for msgs in GOT for m in msgs))

@@ -2,6 +2,7 @@
 # Runs every test against a fake model server in a real terminal (a pty), with throwaway folders.
 # Nothing touches ~/.bxzex-ai or a real model.   bash tests/run.sh   (about two minutes)
 set -u
+export BXZEX_NO_TICKER=1   # never touch the real system timer or send notifications
 cd "$(dirname "$0")/.."
 APP="$PWD/bxzex-ai"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -36,6 +37,7 @@ run busy_typing "$APP" "$(home)"
 run input_box "$APP" "$(home)"
 run learner "$APP" "$(home)"
 run agent "$APP" "$(home)"
+run workflow "$APP" "$(home)"
 run ui "$APP" "$(home)" "$PWD/connectors.txt"
 newer; run update_reload "$T/bin/bxzex-ai" "$(home)" "$T/upd"
 newer; run loaders "$T/bin/bxzex-ai" "$(home)" "$T/upd"

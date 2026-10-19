@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -438,7 +438,7 @@ def choose_device(arg=""):
     ensure_server()
 
 # ---- tools ----
-import base64, datetime, difflib, fnmatch, html, http.client, shlex, tempfile, threading, urllib.parse
+import base64, concurrent.futures, datetime, difflib, fnmatch, html, http.client, shlex, tempfile, threading, urllib.parse
 
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"}
 PAGE_CHARS = 20000 if REMOTE else 6000   # a laptop reads ~20 tok/s, so every 1k chars of tool output costs ~12s; a cloud card reads fast
@@ -460,9 +460,10 @@ def page_text(raw):
 
 def http_get(url):
     # curl, not urllib: this Python has no CA bundle installed, curl uses the system one
-    p = subprocess.run(["curl", "-sL", "--compressed", "--max-time", "25", "--max-filesize", "3000000",
-                        "-A", UA["User-Agent"], url], capture_output=True)
-    if p.stdout: return p.stdout.decode("utf-8", "ignore")
+    if shutil.which("curl"):
+        p = subprocess.run(["curl", "-sL", "--compressed", "--max-time", "25", "--max-filesize", "3000000",
+                            "-A", UA["User-Agent"], url], capture_output=True)
+        if p.stdout: return p.stdout.decode("utf-8", "ignore")
     try:                                             # second try with Python's own downloader
         with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=25) as r:
             return r.read(3_000_000).decode("utf-8", "ignore")
@@ -679,6 +680,7 @@ def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
     busy = typed.th is not None
     typed.stop()                      # hand the keyboard back for the question
     sys.stdout.write("\033[?25h")
+    ping_if_away(f"needs your OK: {what}")
     print(f"{GOLD}?{R} {BOLD}Allow: {what}{R}")
     width = max(20, W() - 6)
     shown = [part[i:i + width] for part in detail.splitlines() or [""] for i in range(0, max(1, len(part)), width)]
@@ -1124,6 +1126,7 @@ def ask_user(question, options=""):
     busy = typed.th is not None
     typed.stop()
     try:
+        ping_if_away(f"has a question: {question}")
         print(f"{GOLD}?{R} {BOLD}{question}{R}")
         rows = [(o, "") for o in picks] + [("Type my own answer", "")]
         at = menu(rows, hint="↑↓ to move · enter to pick · esc to skip")
@@ -1181,32 +1184,477 @@ def show_jobs():
         print(f"  {GOLD}{n}{R}  {state}  {cmd[:W() - 24]}")
     print(f"  {DIM}logs in {APP_HOME.replace(HOME, '~')}/jobs · they stop when you quit{R}")
 
-helping = False
-def delegate(task):
-    """A helper with its own fresh memory works on one self-contained job and reports back."""
-    global helping
-    if helping: return "error: a helper can't start another helper. Do this part yourself."
-    helping = True
-    sub = [{"role": "user", "content": str(task) + "\n\nWork on this on your own with your tools. Don't ask me questions. "
-            "When you're done, reply with a short report of what you found or did, with the exact file paths, links and numbers."}]
-    print(f"  {DIM}┌ helper started{R}")
+out_lock = threading.Lock()
+def put_line(text):
+    """Print one whole line from any thread, over whatever loader is on the current line."""
+    with out_lock:
+        sys.stdout.write(f"\r\033[K{text}\n"); sys.stdout.flush()
+
+# ---- helpers: several look-only workers at once, each with its own fresh memory ----
+HELPER_TOOLS = {"web_search", "fetch_page", "read_file", "list_files", "search_files", "use_skill", "run_shell"}
+HELPERS_AT_ONCE = 3
+helper_stop = threading.Event()
+
+def ask_model(messages, tools):
+    """One quiet model call that returns the whole reply at once. Nothing is drawn, so several can run side by side."""
+    body = json.dumps({"model": MODEL_ID if awake() else loaded_model(), "messages": [{"role": "system", "content": SYSTEM}] + mend(messages),
+                       "tools": tools, "max_tokens": reply_room(), "temperature": 0.7, "stream": False,
+                       "chat_template_kwargs": {"enable_thinking": not fast}}).encode()
+    req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=1800) as r: msg = json.load(r)["choices"][0]["message"]
+    return (msg.get("content") or "").strip(), msg.get("tool_calls") or []
+
+def helper_tools():
+    return [t for t in TOOLS if t["function"]["name"] in HELPER_TOOLS
+            or t["function"]["name"] in MCP and not mcp_acts(MCP[t["function"]["name"]][1], {})]
+
+def helper_tool(n, call):
+    """A helper only looks: reading, searching, read-only commands and reading from apps. Nothing it does asks the user."""
+    fn = call["function"]; name = fn["name"]
+    try: args = json.loads(fn.get("arguments") or "{}")
+    except ValueError: return "error: arguments were not valid JSON"
+    if not isinstance(args, dict): return "error: arguments must be a JSON object with the tool's named fields"
+    shown = " ".join(str(v) for v in args.values()).replace("\n", " ")
+    put_line(f"  {DIM}┊ helper {n} · {name}({shown[:max(10, W() - len(name) - 22)]}){R}")
+    looks = (not mcp_acts(MCP[name][1], args)) if name in MCP else name in HELPER_TOOLS and not (
+        name == "run_shell" and (not only_looks(str(args.get("command", ""))) or str(args.get("background")).lower() == "true"))
+    if not looks: return "error: helpers can only look (read, search, list, read-only commands). Put what should be done in your report."
+    blocked = hooks_before(name, args)
+    if blocked: return blocked
+    try: out = mcp_call(name, args) if name in MCP else str(TOOL_FUNCS[name](**args))
+    except Exception as e: out = f"error: {e}"
+    return out + hooks_after(name, args, out)
+
+def one_helper(n, task):
+    sub = [{"role": "user", "content": str(task) + "\n\nWork on this on your own with your tools. Don't ask me questions. You can only look: "
+            "read, search, list and run read-only commands. When you're done, reply with a short report of what you found, with the exact "
+            "file paths, links and numbers, and anything that should be changed."}]
+    tools = helper_tools(); recent = []
+    for _ in range(30):
+        if helper_stop.is_set(): return "stopped before it finished"
+        try: text, calls = ask_model(sub, tools)
+        except Exception as e: return f"the helper hit an error: {getattr(e, 'reason', e)}"
+        if not calls: return text or "the helper finished without a report"
+        sub.append({"role": "assistant", "content": text, "tool_calls": calls})
+        for i, call in enumerate(calls):
+            call["id"] = call.get("id") or f"h{n}_{len(sub)}_{i}"
+            recent.append((call["function"]["name"], call["function"].get("arguments")))
+            out = REPEAT if circling(recent) else helper_tool(n, call)
+            sub.append({"role": "tool", "tool_call_id": call["id"], "content": clip(out, OUT_CHARS)})
+    return "the helper used all its steps. What it last said: " + (sub[-1].get("content") or "")[:2000]
+
+def run_helpers(calls):
+    """Every delegate call in one reply runs at the same time. Returns {call id: report}."""
+    jobs = []
+    for call in calls:
+        try: task = json.loads(call["function"]["arguments"] or "{}").get("task", "")
+        except (ValueError, AttributeError): task = ""
+        jobs.append((call["id"], str(task)))
+    n = len(jobs)
+    for i, (_, task) in enumerate(jobs, 1):
+        print(f"{TEAL}◆{R} {BOLD}helper {i}{R}{DIM}({' '.join(task.split())[:max(10, W() - 16)]}){R}")
+    helper_stop.clear(); got = {}
+    sys.stdout.write("\033[?25l")
+    wait = Waiting("Helper working" if n == 1 else f"{n} helpers working")
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=HELPERS_AT_ONCE)
+    runs = {pool.submit(one_helper, i, task): cid for i, (cid, task) in enumerate(jobs, 1)}
     try:
-        recent = []
-        for _ in range(30):
-            text, calls = stream(sub, "Helper working")
-            if stream_error and not text and not calls: return f"the helper hit an error: {stream_error}"
-            if not calls:
-                print(f"  {DIM}└ helper finished{R}")
-                return text or "the helper finished without a report"
-            sub.append({"role": "assistant", "content": text, "tool_calls": calls})
-            for i, call in enumerate(calls):
-                call["id"] = call["id"] or f"h{len(sub)}_{i}"
-                recent.append((call["function"]["name"], call["function"].get("arguments")))
-                out = REPEAT if circling(recent) else (run_tool(call) if whole(call) else CUT_OFF)
-                sub.append({"role": "tool", "tool_call_id": call["id"], "content": out})
-        return "the helper used all its steps. What it last said: " + (sub[-1].get("content") or "")[:2000]
+        for f in concurrent.futures.as_completed(runs):
+            got[runs[f]] = f.result()
+            if n > 1: wait.label = f"{n} helpers working · {len(got)} done"
+    except KeyboardInterrupt:
+        helper_stop.set(); raise
     finally:
-        helping = False
+        wait.stop(); pool.shutdown(wait=False); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+    for i, (cid, _) in enumerate(jobs, 1):
+        out = got[cid]; LAST_TOOLS.append((f"helper {i}", out))
+        rows = [l for l in out.splitlines() if l.strip()]
+        more = f" (+{len(rows) - 1} lines · ctrl-o)" if len(rows) > 1 else ""
+        print(f"  {DIM}└ helper {i}: {(rows[0] if rows else '(empty)')[:max(10, W() - len(more) - 18)]}{more}{R}")
+    print()
+    return got
+
+# ---- hooks: your own commands that run before or after its tools, or when a reply is done ----
+# config.json "hooks": [{"on": "before" | "after" | "done", "tool": "edit_file|write_file", "run": "a shell command"}]
+# A "before" hook that exits with an error blocks the tool, and what it printed is given as the reason.
+def hooks(event):
+    return [h for h in (load_config().get("hooks") or []) if isinstance(h, dict) and h.get("on") == event and h.get("run")]
+
+def hook_matches(h, name):
+    pattern = h.get("tool") or "*"
+    if pattern == "*": return True
+    try: return re.fullmatch(pattern, name) is not None
+    except re.error: return pattern == name
+
+def run_hook(h, env):
+    try:
+        p = subprocess.run(h["run"], shell=True, capture_output=True, text=True, errors="replace", timeout=60,
+                           stdin=subprocess.DEVNULL, env=dict(os.environ, **env), start_new_session=True)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return 1, "the hook took over 60 seconds and was stopped"
+    except OSError as e:
+        return 1, str(e)
+
+def hook_env(name, args, out=""):
+    return {"BXZEX_TOOL": name, "BXZEX_ARGS": json.dumps(args)[:100000], "BXZEX_FILE": str(args.get("path", "")),
+            "BXZEX_COMMAND": str(args.get("command", "")), "BXZEX_RESULT": out[:20000]}
+
+def hooks_before(name, args):
+    for h in hooks("before"):
+        if not hook_matches(h, name): continue
+        code, said = run_hook(h, hook_env(name, args))
+        if code != 0:
+            put_line(f"  {DIM}⚑ blocked by your hook: {h['run'][:max(10, W() - 30)]}{R}")
+            return f"Blocked by the user's hook (`{h['run']}`): {clip(said, 2000) or 'no reason given'}"
+    return ""
+
+def hooks_after(name, args, out):
+    extra = []
+    for h in hooks("after"):
+        if not hook_matches(h, name): continue
+        code, said = run_hook(h, hook_env(name, args, out))
+        put_line(f"  {DIM}⚑ hook · {h['run'][:max(10, W() - 30)]} · {'ok' if code == 0 else f'exit {code}'}{R}")
+        if said or code: extra.append(f"[the user's hook `{h['run']}` ran after this · exit {code}]\n{clip(said, 2000)}")
+    return ("\n\n" + "\n".join(extra)) if extra else ""
+
+def hooks_done(reply, took):
+    for h in hooks("done"):
+        threading.Thread(target=run_hook, args=(h, {"BXZEX_REPLY": reply[:20000], "BXZEX_SECONDS": str(int(took))}), daemon=True).start()
+
+def show_hooks(arg=""):
+    arg = arg.strip(); items = load_config().get("hooks") or []
+    if arg.startswith("add "):
+        parts = arg[4:].strip().split(None, 1)
+        on = parts[0] if parts else ""
+        if on == "done" and len(parts) == 2: tool_, run = "*", parts[1]
+        elif on in ("before", "after") and len(parts) == 2 and len(parts[1].split(None, 1)) == 2: tool_, run = parts[1].split(None, 1)
+        else: print(f"{DIM}/hooks add before|after <tool> <command>  ·  /hooks add done <command>{R}"); return
+        items.append({"on": on, "tool": tool_, "run": run}); save_config(hooks=items)
+        print(f"{DIM}saved: {on} {'' if on == 'done' else tool_ + ' '}→ {run}{R}"); return
+    if arg.startswith(("remove", "rm")):
+        try: n = int(arg.split()[1]); gone = items.pop(n - 1)
+        except (IndexError, ValueError): print(f"{DIM}/hooks remove <number>{R}"); return
+        save_config(hooks=items); print(f"{DIM}removed: {gone.get('run')}{R}"); return
+    print(header("Hooks"))
+    for i, h in enumerate(items, 1):
+        print(f"  {GOLD}{i}{R}  {h.get('on'):<6} {DIM}{h.get('tool', '*') if h.get('on') != 'done' else ''}{R}  {h.get('run')}")
+    if not items: print(f"  {DIM}none yet{R}")
+    print(f"  {DIM}/hooks add after edit_file|write_file npx prettier --write \"$BXZEX_FILE\"     format every file it changes")
+    print(f"  /hooks add before run_shell ! echo \"$BXZEX_COMMAND\" | grep -q 'git push'        a failing before-hook blocks the tool")
+    print(f"  /hooks add done say done                                                       when a reply is finished")
+    print(f"  /hooks remove 1 · tools match as a regex · they get BXZEX_TOOL, BXZEX_FILE, BXZEX_COMMAND, BXZEX_ARGS, BXZEX_RESULT{R}")
+
+# ---- notifications: when a long reply ends or it needs you while you're in another window ----
+HOME_APP = ""      # the app it was started in (it's in front then), to tell when they've switched away
+
+def front_app():
+    """The app in front on a Mac. Needs no permission."""
+    if not MAC: return ""
+    try:
+        asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=2).stdout.strip()
+        got = subprocess.run(["lsappinfo", "info", "-only", "name", asn], capture_output=True, text=True, timeout=2).stdout
+        m = re.search(r'"LSDisplayName"="([^"]*)"', got)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+def away():
+    """True when they're likely not looking at this window."""
+    if not (sys.stdout.isatty() and load_config().get("notify", True)): return False
+    if MAC:
+        now = front_app()
+        return bool(HOME_APP and now and now != HOME_APP)
+    return bool(shutil.which("notify-send"))
+
+def notify(title, text):
+    if os.environ.get("BXZEX_NO_TICKER"): return        # the tests: no system timer and no notifications
+    try:
+        if MAC:
+            subprocess.Popen(["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+                              "-e", "end run", title, text[:220]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", title, text[:220]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+def ping_if_away(text):
+    if away():
+        notify(AI_NAME, text); RAW.write("\a"); RAW.flush()     # the bell also bounces the terminal in the dock
+
+# ---- scheduled tasks: it does a task at set times on its own, even with the app closed ----
+SCHEDULES = f"{APP_HOME}/schedules.json"
+RESULTS = f"{APP_HOME}/scheduled"
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+TICK_LABEL = "com.bxzex.ai.schedule"
+
+def load_schedules():
+    try:
+        with open(SCHEDULES) as f: got = json.load(f)
+        return [s for s in got if isinstance(s, dict) and s.get("id")] if isinstance(got, list) else []
+    except (OSError, ValueError):
+        return []
+
+def save_schedules(items):
+    os.makedirs(APP_HOME, exist_ok=True)
+    with open(SCHEDULES + ".tmp", "w") as f: json.dump(items, f, indent=1)
+    os.replace(SCHEDULES + ".tmp", SCHEDULES)
+
+def clock(text):
+    m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?", text.strip())
+    if not m: return ""
+    h, mi, half = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "")[:1]
+    if half and not 1 <= h <= 12: return ""
+    if half == "p" and h != 12: h += 12
+    if half == "a" and h == 12: h = 0
+    return f"{h:02d}:{mi:02d}" if h < 24 and mi < 60 else ""
+
+def day_list(text):
+    text = re.sub(r"\b(mornings?|evenings?|nights?|afternoons?|at)\b", " ", text.replace(" and ", ",")).strip()
+    if text in ("", "daily", "day", "every day", "everyday", "each day"): return list(range(7))
+    if text in ("weekday", "weekdays"): return list(range(5))
+    if text in ("weekend", "weekends"): return [5, 6]
+    days = set()
+    for part in re.split(r"[,\s]+", text):
+        if not part: continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            if a[:3] not in DAYS or b[:3] not in DAYS: return None
+            i, j = DAYS.index(a[:3]), DAYS.index(b[:3])
+            days.update(range(i, j + 1) if i <= j else list(range(i, 7)) + list(range(j + 1)))
+        elif part[:3] in DAYS: days.add(DAYS.index(part[:3]))
+        else: return None
+    return sorted(days) or None
+
+def parse_when(text):
+    """'every day at 8am', 'weekdays 9:30', 'mon,thu 18:00', 'every 30 minutes', 'hourly', 'once 2026-10-20 15:00'."""
+    s = " ".join(str(text).lower().replace("every day", "daily").split())
+    s = re.sub(r"^(every|on)\s+(?=[a-z])(?!\d)", "", s) if not re.match(r"every\s+\d", s) else s
+    s = s.removeprefix("at ")
+    if s in ("hourly", "hour", "every hour"): return {"every": 60}
+    m = re.fullmatch(r"(?:every\s*)?(\d+)\s*(m|mins?|minutes?|h|hrs?|hours?)", s)
+    if m:
+        n = int(m.group(1)) * (60 if m.group(2).startswith("h") else 1)
+        return {"every": n} if n >= 5 else "error: the most often is every 5 minutes"
+    m = re.fullmatch(r"(?:once\s+)?(?:on\s+)?(\d{4}-\d{2}-\d{2})(?:\s+at)?\s+(.+)", s)
+    if m:
+        t = clock(m.group(2))
+        try: at = datetime.datetime.strptime(f"{m.group(1)} {t}", "%Y-%m-%d %H:%M")
+        except ValueError: return "error: couldn't read that date and time; use like once 2026-10-20 15:00"
+        if at <= datetime.datetime.now(): return "error: that time has already passed"
+        return {"once": f"{at:%Y-%m-%d %H:%M}"}
+    m = re.fullmatch(r"(?:(.+?)\s+)?(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)", s)
+    if m:
+        days, t = day_list((m.group(1) or "").removesuffix(" at")), clock(m.group(2))
+        if days is not None and t: return {"days": days, "at": t}
+    return ("error: couldn't read when. Use one of: daily 08:00 · weekdays 9am · mon,thu 18:00 · every 30 minutes · "
+            "every 2 hours · hourly · once 2026-10-20 15:00")
+
+def describe(it):
+    if "every" in it:
+        n = it["every"]
+        return "every hour" if n == 60 else f"every {n // 60} hours" if n % 60 == 0 else f"every {n} minutes"
+    if "once" in it: return f"once, {it['once']}"
+    d = it.get("days") or []
+    days = "every day" if len(d) == 7 else "weekdays" if d == [0, 1, 2, 3, 4] else "weekends" if d == [5, 6] else ", ".join(DAYS[i] for i in d)
+    return f"{days} at {it.get('at')}"
+
+def due(it, now):
+    last = it.get("last") or it.get("made") or 0
+    if "every" in it: return now.timestamp() - last >= it["every"] * 60 - 30
+    if "once" in it: return not it.get("last") and now >= datetime.datetime.strptime(it["once"], "%Y-%m-%d %H:%M")
+    h, mi = map(int, it["at"].split(":"))
+    for back in range(8):
+        slot = (now - datetime.timedelta(days=back)).replace(hour=h, minute=mi, second=0, microsecond=0)
+        if slot > now or slot.weekday() not in it.get("days", []): continue
+        return slot.timestamp() > last and (now - slot).total_seconds() < 6 * 3600   # missed while the computer slept: still runs within 6 hours
+    return False
+
+def warm_now(now):
+    w = load_config().get("warm") or {}
+    if not (REMOTE and w): return False
+    return now.weekday() in w.get("days", range(7)) and w.get("from", 9) <= now.hour < w.get("to", 18)
+
+def ticker():
+    """The system starts this app every minute to begin tasks that are due (launchd on a Mac, cron on Linux).
+    It's switched on while anything is scheduled or kept warm, and off again when nothing is."""
+    if os.environ.get("BXZEX_NO_TICKER"): return ""
+    on = bool(load_schedules()) or bool(load_config().get("warm"))
+    me = [sys.executable, os.path.abspath(__file__), "--tick"]
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": HOME}
+    if "BXZEX_HOME" in os.environ: env["BXZEX_HOME"] = APP_HOME
+    os.makedirs(RESULTS, exist_ok=True)
+    try:
+        if MAC:
+            import plistlib
+            plist = f"{HOME}/Library/LaunchAgents/{TICK_LABEL}.plist"; where = f"gui/{os.getuid()}"
+            data = plistlib.dumps({"Label": TICK_LABEL, "ProgramArguments": me, "StartInterval": 60, "RunAtLoad": True,
+                                   "EnvironmentVariables": env, "StandardOutPath": f"{RESULTS}/tick.log", "StandardErrorPath": f"{RESULTS}/tick.log"})
+            try:
+                with open(plist, "rb") as f: same = f.read() == data
+            except OSError: same = False
+            loaded = subprocess.run(["launchctl", "print", f"{where}/{TICK_LABEL}"], capture_output=True).returncode == 0
+            if on and same and loaded: return ""
+            subprocess.run(["launchctl", "bootout", f"{where}/{TICK_LABEL}"], capture_output=True)
+            if not on:
+                if os.path.exists(plist): os.remove(plist)
+                return ""
+            os.makedirs(os.path.dirname(plist), exist_ok=True)
+            with open(plist, "wb") as f: f.write(data)
+            r = subprocess.run(["launchctl", "bootstrap", where, plist], capture_output=True, text=True)
+            return "" if r.returncode == 0 else f"couldn't start the timer: {r.stderr.strip()[:160]}"
+        if not shutil.which("crontab"): return "scheduled tasks need cron on this computer: sudo apt install cron"
+        cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+        rows = [l for l in cur.splitlines() if "# bxzex-ai schedule" not in l]
+        if on:
+            rows.append("* * * * * " + " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " " + " ".join(shlex.quote(x) for x in me)
+                        + f" >> {shlex.quote(RESULTS + '/tick.log')} 2>&1 # bxzex-ai schedule")
+        subprocess.run(["crontab", "-"], input="\n".join(rows) + "\n", text=True, capture_output=True)
+        return ""
+    except Exception as e:
+        log_error(type(e), e, e.__traceback__); return f"couldn't set the timer: {e}"
+
+def tick():
+    """Every minute: start each task that's due in its own process, and keep the cloud card awake in the warm hours."""
+    import fcntl
+    os.makedirs(RESULTS, exist_ok=True)
+    with open(f"{RESULTS}/.tick.lock", "w") as lock:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError: return
+        now = datetime.datetime.now()
+        items = load_schedules(); go = [it for it in items if not it.get("paused") and due(it, now)]
+        for it in go: it["last"] = time.time()
+        if go: save_schedules(items)               # marked before starting, so a slow task is never started twice
+        for it in go:
+            with open(f"{RESULTS}/{it['id']}.log", "w") as log:
+                subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-schedule", it["id"]], stdin=subprocess.DEVNULL,
+                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        if warm_now(now):
+            try: urllib.request.urlopen(f"{HOST}/health", timeout=20).read()
+            except Exception: pass
+
+def run_schedule(sid):
+    """Run one scheduled task with nobody at the keyboard, save its report and send a notification."""
+    global allow_all
+    item = next((it for it in load_schedules() if it["id"] == sid), None)
+    if not item: return
+    allow_all = bool(item.get("act"))        # risky commands still never run: there's nobody to ask
+    def stop(*_): raise KeyboardInterrupt
+    signal.signal(signal.SIGALRM, stop); signal.alarm(30 * 60)
+    before = read_text(item.get("result") or "", 3000) if item.get("result") else ""
+    h = [user_message(
+        "(This is a scheduled task running on its own. Nobody is at the keyboard and nobody can answer questions. "
+        + ("You may take the actions the task asks for. " if item.get("act") else
+           "Only look and read: anything that sends, posts, changes or deletes is not allowed, so say what you would do instead. ")
+        + "End with a short, plain report of what you found or did: it is saved and shown to the user as a notification. "
+        + "If there is nothing worth telling them, reply with just: nothing new"
+        + (f"\nYour report from the last run, so you can tell what's new:\n{before}" if before else "") + ")\n\n" + item["task"])]
+    try:
+        if not ensure_server(): result = "couldn't reach the model, so this didn't run"
+        else:
+            if load_config().get("mcp"): connect_mcp()
+            refresh_system()
+            run_turn(h)
+            result = next((m["content"] for m in reversed(h) if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip()), "")
+            result = result or "it finished without a report"
+    except KeyboardInterrupt:
+        result = "stopped: it ran for more than 30 minutes"
+    except Exception as e:
+        log_error(type(e), e, e.__traceback__); result = f"it hit an error: {e}"
+    signal.alarm(0)
+    stamp = datetime.datetime.now(); os.makedirs(RESULTS, exist_ok=True)
+    path = f"{RESULTS}/{stamp:%Y-%m-%d_%H%M}-{sid}.md"
+    with open(path, "w") as f: f.write(f"# {item['name']}\n{stamp:%A %B %d, %Y at %H:%M} · {describe(item)}\n\n{result}\n")
+    quiet = result.strip().lower().rstrip(".") == "nothing new"
+    items = load_schedules()
+    for it in items:
+        if it["id"] == sid: it.update(result=path, seen=quiet, ran=stamp.strftime("%b %d %H:%M"))
+    save_schedules([it for it in items if not (it["id"] == sid and "once" in it)])
+    if "once" in item: ticker()
+    if not quiet: notify(f"{AI_NAME} · {item['name']}", " ".join(re.sub(r"[*#`>|_]", "", result).split()))
+
+def schedule_task(action="add", when="", task="", name="", can_act="false", id=""):
+    action = str(action).strip().lower()
+    items = load_schedules()
+    if action == "list":
+        return "\n".join(f"{it['id']}: {it['name']} · {describe(it)} · {'can act' if it.get('act') else 'looks only'} · task: {it['task']}"
+                         for it in items) or "nothing is scheduled"
+    if action == "remove":
+        left = [it for it in items if it["id"] != str(id).strip()]
+        if len(left) == len(items): return f"error: no scheduled task {id}. Use action list to see them."
+        if not confirm("remove a scheduled task", next(it["name"] for it in items if it["id"] == str(id).strip())): return "The user declined."
+        save_schedules(left); ticker(); return f"removed {id}"
+    if PLAN: return plan_block()
+    rule = parse_when(when)
+    if isinstance(rule, str): return rule
+    if not str(task).strip(): return "error: task is empty: write out the full task, with every detail it needs"
+    act = str(can_act).lower() == "true"
+    name = " ".join((str(name).strip() or str(task)).split()[:6])[:48]
+    it = {"id": f"s{max([int(i['id'][1:]) for i in items if i['id'][1:].isdigit()], default=0) + 1}", "name": name, "task": str(task).strip(),
+          "act": act, "made": time.time(), **rule}
+    if not confirm(f"schedule: {name} · {describe(it)}", f"{it['task']}\n\n" + (
+            "It may act on its own when it runs (send, post, change things), without asking." if act else
+            "It only looks and reads when it runs, then tells you what it found."), always_ask=act):
+        return "The user declined."
+    items.append(it); save_schedules(items)
+    trouble = ticker()
+    return (f"scheduled {it['id']}: {name} · {describe(it)}. It runs on its own, even with the app closed, and sends a notification "
+            f"with what it found. /schedule shows them." + (f" But: {trouble}" if trouble else ""))
+
+def unseen_results():
+    return [it for it in load_schedules() if it.get("result") and it.get("seen") is False]
+
+def show_schedules(arg=""):
+    global history
+    items = load_schedules()
+    print(header("Scheduled tasks"))
+    if not items:
+        print(f"  {DIM}none yet · ask for one in your own words, like: every weekday at 8am read my gmail and tell me what's important{R}"); return
+    rows = [(it["name"], f"{describe(it)} · {'can act' if it.get('act') else 'looks only'}{' · paused' if it.get('paused') else ''}"
+             f"{' · last ran ' + it['ran'] if it.get('ran') else ''}{' · NEW' if it.get('seen') is False else ''}") for it in items]
+    at = menu(rows, hint="↑↓ to move · enter to pick · esc to close")
+    if at is None: return
+    it = items[at]
+    acts = (["Read the last result"] if it.get("result") else []) + ["Run it now", "Resume" if it.get("paused") else "Pause", "Remove"]
+    print(f"{GOLD}●{R} {BOLD}{it['name']}{R} {DIM}· {describe(it)} · {it['task'][:max(10, W() - len(it['name']) - 30)]}{R}")
+    pick = menu([(a, "") for a in acts])
+    if pick is None: return
+    what = acts[pick]
+    if what == "Read the last result":
+        text = read_text(it["result"], 20000)
+        md = Markdown(prefix=f"{GOLD}●{R} "); md.feed(text); md.close(); print()
+        history.append({"role": "user", "content": f"(The result of my scheduled task \"{it['name']}\", for reference:)\n{text}"})
+        it["seen"] = True
+    elif what == "Run it now":
+        with open(f"{RESULTS}/{it['id']}.log", "w") as log:
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-schedule", it["id"]], stdin=subprocess.DEVNULL,
+                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        print(f"  {DIM}running in the background · a notification comes when it's done · /schedule to read it{R}")
+    elif what in ("Pause", "Resume"):
+        it["paused"] = what == "Pause"; print(f"  {DIM}{'paused' if it['paused'] else 'running again on schedule'}{R}")
+    else:
+        items.remove(it); print(f"  {DIM}removed{R}")
+    save_schedules(items); ticker()
+
+def keep_warm(arg=""):
+    """/warm 9-18 keeps the cloud card awake in those hours (weekdays too: /warm weekdays 9-18), /warm off stops it."""
+    arg = arg.strip().lower()
+    if not REMOTE: print(f"{DIM}/warm is for the cloud card · this computer runs the model itself{R}"); return
+    if arg in ("off", "stop", "no"):
+        save_config(warm={}); ticker(); print(f"{DIM}keep-warm off · the card sleeps 5 minutes after the last message{R}"); return
+    m = re.fullmatch(r"(?:(weekdays|every ?day|daily)\s+)?(\d{1,2})\s*-\s*(\d{1,2})", arg)
+    if not m:
+        w = load_config().get("warm") or {}
+        now = f"on: {'weekdays' if w.get('days') == [0, 1, 2, 3, 4] else 'every day'} {w.get('from')}:00 to {w.get('to')}:00" if w else "off"
+        print(f"{DIM}keep-warm is {now} · /warm 9-18 keeps it awake 9am to 6pm so replies start right away · /warm weekdays 9-18 · /warm off")
+        print(f"it costs about $4 for every hour the card stays awake{R}"); return
+    a, b = int(m.group(2)), int(m.group(3))
+    if not (0 <= a < b <= 24): print(f"{DIM}hours go from 0 to 24, like /warm 9-18{R}"); return
+    days = [0, 1, 2, 3, 4] if m.group(1) == "weekdays" else list(range(7))
+    save_config(warm={"from": a, "to": b, "days": days})
+    trouble = ticker()
+    print(f"{DIM}keep-warm on: {'weekdays' if len(days) == 5 else 'every day'} {a}:00 to {b}:00 · about ${4 * (b - a)} a day it's on · /warm off to stop{R}"
+          + (f"\n{DIM}{trouble}{R}" if trouble else ""))
 
 # ---- MCP: tools from other servers, like Composio for connecting apps (Gmail, Slack, GitHub, Calendar...) ----
 # Servers live in config.json under "mcp": {"name": {"url": ..., "headers": {...}}}, on this computer only.
@@ -1303,10 +1751,24 @@ def connect_mcp():
             MCP_STATUS[server] = f"couldn't connect: {str(e)[:160]}"
 
 READ_ONLY_MCP = re.compile(r"(?i)search|get_tool_schemas|list|fetch|get_|read|wait_for|manage_connections")
+READ_VERBS = {"FETCH", "GET", "LIST", "SEARCH", "READ", "FIND", "QUERY", "RETRIEVE", "COUNT", "CHECK", "DESCRIBE", "VIEW", "LOOKUP"}
+WRITE_VERBS = {"SEND", "DELETE", "CREATE", "UPDATE", "POST", "REMOVE", "ADD", "PATCH", "MOVE", "TRASH", "REPLY", "FORWARD", "INVITE",
+               "PAY", "CHARGE", "EXECUTE", "RUN", "MODIFY", "SET", "INSERT", "UPLOAD", "SHARE", "ARCHIVE", "MARK", "STAR", "WRITE", "EDIT",
+               "CANCEL", "APPROVE", "PUBLISH", "TRANSFER", "REFUND", "COMMIT", "MERGE", "PUSH", "DRAFT", "REPLACE", "APPEND", "BLOCK",
+               "FOLLOW", "UNFOLLOW", "LIKE", "COMMENT", "BOOK", "ORDER", "BUY", "SELL", "ENABLE", "DISABLE", "RESET", "REVOKE", "GRANT",
+               "ASSIGN", "CLOSE", "LOCK", "RENAME", "COPY", "IMPORT", "SYNC", "TRIGGER", "START", "STOP", "DEPLOY", "SUBMIT", "SAVE",
+               "PUT", "UPSERT", "ACCEPT", "DECLINE", "REJECT", "CONFIRM", "NOTIFY", "SUBSCRIBE", "UNSUBSCRIBE", "LEAVE", "JOIN", "KICK", "BAN"}
+
+def mcp_acts(real, args):
+    """Whether a call changes something, and so asks first. Running app tools that only fetch, list or search doesn't."""
+    if "EXECUTE" in real.upper():
+        slugs = re.findall(r'"tool_slug":\s*"([A-Za-z0-9_]+)"', json.dumps(args))
+        return not slugs or not all({*s.upper().split("_")} & READ_VERBS and not {*s.upper().split("_")} & WRITE_VERBS for s in slugs)
+    return not READ_ONLY_MCP.search(real)
 
 def mcp_call(name, args):
     server, real = MCP[name]
-    acts = not READ_ONLY_MCP.search(real) or "EXECUTE" in real.upper()
+    acts = mcp_acts(real, args)
     if acts:
         if PLAN: return plan_block()
         shown = json.dumps(args, indent=1)[:3000]
@@ -1398,7 +1860,7 @@ def plan_block():
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
               "list_files": list_files, "search_files": search_files,
-              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": delegate,
+              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task: one_helper(1, str(task)), "schedule_task": schedule_task,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
               "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
 
@@ -1429,9 +1891,15 @@ TOOLS = [
     tool("search_files", "Search inside files for a regex. Returns file:line: matching text.", pattern="regex to look for",
          path="folder or file, default .", file_pattern="only files like this, e.g. *.js, default all"),
     tool("remember", "Save a lasting note about the user for future conversations.", note="one short sentence"),
-] + ([tool("delegate", "Hand one self-contained job (research, searching a codebase, reading many files) to a helper with its own fresh memory. "
-           "It works on its own and returns a short report. Give it everything it needs in the task.", task="the full task, with all the details")]
+] + ([tool("delegate", "Hand one self-contained look-only job (research, searching a codebase, reading many files) to a helper with its own fresh "
+           "memory. It can read, search and run read-only commands, then returns a short report. Several delegate calls in one reply run at "
+           "the same time, so split big research into 2 or 3 parts. Give each everything it needs in the task.", task="the full task, with all the details")]
      if REMOTE else []) + [
+    tool("schedule_task", "Do a task later or again and again on its own, even with the app closed: every morning, every weekday, every hour, once "
+         "at a time. Each run's report is saved and sent to them as a notification. Also lists or removes scheduled tasks.",
+         action="add, list or remove, default add", when="daily 08:00, weekdays 9am, mon,thu 18:00, every 30 minutes, hourly, or once 2026-10-20 15:00",
+         task="the full task as you'd tell a helper, with every detail; it runs with no one to ask", name="a short name, default from the task",
+         can_act="true only if they want it to send, post or change things without asking, default false", id="for remove, default none"),
     tool("use_skill", "Load the full instructions for one of your skills.", name="skill name"),
     {"type": "function", "function": {"name": "generate_image",
         "description": "Create a picture from a description and save it. About a minute, or a few for hd.",
@@ -1679,7 +2147,7 @@ def system_prompt():
 # what the loader says while each tool works, so nothing ever looks frozen (images draw their own)
 RUNNING = {"run_shell": "Running", "check_job": "Checking the job", "web_search": "Searching the web", "fetch_page": "Opening page", "read_file": "Reading",
            "list_files": "Looking through files", "search_files": "Searching files", "write_file": "Saving", "edit_file": "Saving",
-           "use_skill": "Loading skill"}
+           "use_skill": "Loading skill", "schedule_task": "Scheduling"}
 tool_wait = None; tool_label = ""
 LAST_TOOLS = []     # (call shown, full output) for this reply, for ctrl-o
 
@@ -1702,6 +2170,9 @@ def run_tool(call):
     shown = " ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " ")
     print(f"{TEAL}◆{R} {BOLD}{name}{R}{DIM}({shown[:W()-len(name)-6]}){R}")
     if name not in TOOL_FUNCS and name not in MCP: return f"error: no tool named {name}"
+    blocked = hooks_before(name, args)
+    if blocked:
+        LAST_TOOLS.append((f"{name}({shown[:W() - len(name) - 6]})", blocked)); print(f"  {DIM}└ blocked by your hook{R}\n"); return blocked
     global tool_wait, tool_label
     tool_label = RUNNING.get(name, "Working with " + MCP[name][0] if name in MCP else "")
     if tool_label: sys.stdout.write("\033[?25l"); tool_wait = Waiting(tool_label)
@@ -1712,6 +2183,7 @@ def run_tool(call):
     finally:
         if tool_wait: tool_wait.stop(); tool_wait = None
         tool_label = ""; sys.stdout.write("\033[?25h"); sys.stdout.flush()
+    out += hooks_after(name, args, out)
     lines = [l for l in out.strip().splitlines() if l.strip()]
     first = lines[0] if lines else "(empty)"
     LAST_TOOLS.append((f"{name}({shown[:W() - len(name) - 6]})", out))
@@ -2041,7 +2513,7 @@ def context_size():
     if not ctx_size:
         try:
             with urllib.request.urlopen(f"{HOST}/props", timeout=3) as r:
-                ctx_size = int(json.load(r)["default_generation_settings"]["n_ctx"])
+                ctx_size = min(int(json.load(r)["default_generation_settings"]["n_ctx"]), 65536)   # the card's pool is shared with helpers
         except Exception:
             return int(os.environ.get("BXZEX_CTX") or 32768)
     return ctx_size
@@ -2159,7 +2631,7 @@ stream_error = ""   # set when the server reports a failure instead of an answer
 DOING = {"update_todos": "Planning", "ask_user": "Writing a question", "delegate": "Briefing a helper",
          "generate_image": "Writing the image prompt", "write_file": "Writing file", "edit_file": "Editing file",
          "list_files": "Looking through files", "search_files": "Searching files", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
-         "read_file": "Opening file", "use_skill": "Loading skill", "remember": "Saving to memory"}
+         "read_file": "Opening file", "use_skill": "Loading skill", "remember": "Saving to memory", "schedule_task": "Scheduling"}
 
 def lines(resp):
     """The reply's lines, ending quietly if the connection drops halfway (what arrived is kept)."""
@@ -2295,8 +2767,12 @@ def run_turn(history):
             if calls:
                 if text: print()
                 history.append({"role": "assistant", "content": text, "tool_calls": calls})
+                for i, call in enumerate(calls): call["id"] = call["id"] or f"call_{len(history)}_{i}"
+                asked = [x for x in calls if x["function"]["name"] == "delegate" and whole(x)]
+                helped = run_helpers(asked) if asked and REMOTE else {}
                 for i, call in enumerate(calls):
-                    call["id"] = call["id"] or f"call_{len(history)}_{i}"
+                    if call["id"] in helped:
+                        history.append({"role": "tool", "tool_call_id": call["id"], "content": helped[call["id"]]}); continue
                     recent.append((call["function"]["name"], call["function"].get("arguments")))
                     if circling(recent):                   # the same call, or the same few, a third time in a row
                         history.append({"role": "tool", "tool_call_id": call["id"], "content": REPEAT})
@@ -2319,6 +2795,8 @@ def run_turn(history):
                 note = f"remembered {got} new thing{'s' if got > 1 else ''} about you (/memory)" if got else ""
                 if sys.stdout.isatty() and took >= 1: print(f"\n{DIM}≈ done in {fmt(took)} · {turn_tok} tok{' · ' + note if note else ''}{R}")
                 elif note: print(f"\n{DIM}≈ {note}{R}")
+                if took >= 30: ping_if_away("done: " + " ".join(re.sub(r"[*#`>|_]", "", text or "finished").split())[:160])
+                hooks_done(text or "", took)
                 return
         print(f"{DIM}paused after {MAX_STEPS} tool steps · type continue to keep going{R}")
     finally:
@@ -2665,7 +3143,10 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/jobs", "commands running in the background"), ("/context", "how full the chat is"),
             ("/mcp", "connected tools and apps · /mcp add name url"), ("/apps", "apps it can connect · /apps email · /apps connected"),
             ("/rewind", "go back to an earlier message · also esc esc"), ("/last", "full output of the last tools · also ctrl-o"),
-            ("/say", "read replies out loud"),
+            ("/say", "read replies out loud"), ("/schedule", "tasks it does on its own at set times"),
+            ("/commit", "commit your changes with a message it writes"), ("/review", "review your changes for bugs before you push"),
+            ("/hooks", "your own commands before or after its tools"), ("/notify", "notifications when it finishes in the background"),
+            ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -2677,7 +3158,14 @@ except (OSError, ValueError):
     past = []   # earlier inputs, for the up arrow, kept across sessions
 LITE = load_config().get("size") == "lite"     # the lighter build of the model, for computers with less memory
 
+FIND_NOTE = ""      # the status line while searching past messages with ctrl-r
+def find_past(q, start):
+    for j in range(min(start, len(past) - 1), -1, -1):
+        if q.lower() in past[j].lower(): return j
+    return -1
+
 def status_text(buf, working=False):
+    if FIND_NOTE: return FIND_NOTE
     if buf.startswith("/"):
         hits = [f"{n} {d}" for n, d in COMMANDS + [(c, "your command") for c in custom_commands()] if n.startswith(buf.split()[0])]
         if hits: return "  " + "   ".join(hits)
@@ -2777,7 +3265,9 @@ def ask(prefill=""):
         return line_input(f"\n{GOLD}❯{R} ").strip()
     box.fit()                            # the window may have been resized while it was busy
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
+    global FIND_NOTE
     buf = list(prefill); pos = len(buf); at = len(past); draft = ""; pasting = False
+    find = None; found = -1; before_find = []
     last_esc = 0.0; last_key = time.time()
     dec = codecs.getincrementaldecoder("utf-8")("ignore")
     print()
@@ -2785,6 +3275,8 @@ def ask(prefill=""):
     RAW.write("\0337\033[?2004h\033[?25h")   # remember where the conversation left off; bracketed paste on
 
     def leave():
+        global FIND_NOTE
+        FIND_NOTE = ""
         RAW.write("\033[?2004l\0338"); RAW.flush()      # back to where the conversation left off
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         box.draw("", 0, working=True)
@@ -2799,6 +3291,7 @@ def ask(prefill=""):
             except InterruptedError:
                 ready = []
             except KeyboardInterrupt:
+                if find is not None: find = None; FIND_NOTE = ""; buf = before_find; pos = len(buf); box.focus("".join(buf), pos); continue
                 if buf: buf = []; pos = 0; box.focus("", 0); continue    # first ctrl-c clears the line
                 raise
             if resized: resized = False; box.focus("".join(buf), pos)
@@ -2810,6 +3303,25 @@ def ask(prefill=""):
             i = 0; done = False
             while i < len(data):
                 ch = data[i]
+                if find is not None:                    # searching: letters narrow it, ctrl-r goes further back, enter takes it
+                    if ch == "\x12":
+                        j = find_past(find, found - 1) if found > 0 else -1
+                        if j >= 0: found = j
+                        i += 1
+                    elif ch in "\x7f\b": find = find[:-1]; found = find_past(find, len(past) - 1) if find else -1; i += 1
+                    elif ch == "\x1b" and not ESC_KEY.match(data[i:]) or ch == "\x07":
+                        find = None; buf = before_find; pos = len(buf); i += 1; FIND_NOTE = ""; continue
+                    elif ch in "\r\n": find = None; FIND_NOTE = ""; pos = len(buf); i += 1; continue
+                    elif ch >= " ": find += ch; found = find_past(find, len(past) - 1); i += 1
+                    else: find = None; FIND_NOTE = ""; pos = len(buf); continue     # any other key: keep the match and carry on editing
+                    buf = list(past[found]) if found >= 0 and find else []; pos = len(buf)
+                    FIND_NOTE = (f"  search past messages: {find}▏" + (" · no match" if find and found < 0 else "")
+                                 + " · ctrl-r older · enter to use · esc to cancel")
+                    continue
+                if ch == "\x12":                                              # ctrl-r: search what you sent before
+                    find = ""; found = -1; before_find = buf[:]; buf = []; pos = 0; i += 1
+                    FIND_NOTE = "  search past messages: ▏ · type to search · ctrl-r older · enter to use · esc to cancel"
+                    continue
                 if ch == "\x1b":
                     rest = data[i:]
                     if rest.startswith("\x1b[200~"): pasting = True; i += 6; continue
@@ -2930,6 +3442,7 @@ def clipboard_image():
 def show_help():
     print(header("Commands"))
     for n, d in COMMANDS: print(f"  {GOLD}{n:<8}{R} {DIM}{d}{R}")
+    print(f"  {DIM}ctrl-r searches what you sent before · ctrl-o shows the last tools' output · ctrl-v pastes a screenshot · shift-tab plan mode{R}")
     print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note. Esc stops a reply.")
     print(f"  Looking at files and read-only commands (ls, cat, grep, git status) never ask. File changes show what changes first.{R}")
     mine = custom_commands()
@@ -2962,6 +3475,13 @@ if sys.argv[1:2] == ["--flyby"]:
             pass
         sys.stdout.write(f"\033[{len(DELOREAN)}A\r\033[J\033[?25h"); sys.stdout.flush()
     sys.exit(0)
+
+if sys.argv[1:2] == ["--tick"]:
+    tick(); sys.exit(0)
+if sys.argv[1:2] == ["--ticker"]:            # set the system timer on or off to match what's scheduled
+    print(ticker() or "ok"); sys.exit(0)
+if sys.argv[1:2] == ["--run-schedule"] and len(sys.argv) > 2:
+    run_schedule(sys.argv[2]); sys.exit(0)
 
 # ---- one-shot ----
 if len(sys.argv) > 1:
@@ -3001,6 +3521,13 @@ if load_config().get("mcp"):                    # connected apps: their tools jo
         if MCP: refresh_system()
     threading.Thread(target=_mcp, daemon=True).start()
 warm_up()
+def _front():
+    global HOME_APP
+    HOME_APP = front_app()
+threading.Thread(target=_front, daemon=True).start()
+if unseen_results():
+    _n = len(unseen_results())
+    print(f"{GOLD}●{R} {BOLD}{_n} scheduled result{'s' if _n > 1 else ''} ready{R} {DIM}· {', '.join(it['name'] for it in unseen_results())[:W() - 40]} · /schedule{R}")
 if RELOAD.get("chat") and os.path.exists(RELOAD["chat"]):
     try:
         with open(RELOAD["chat"]) as _f: history = json.load(_f).get("messages", [])
@@ -3137,6 +3664,23 @@ while True:
         if user=="/jobs": show_jobs(); continue
         if user=="/context": show_context(); continue
         if user.startswith("/mcp"): show_mcp(user[4:]); continue
+        if user.startswith("/schedule"): show_schedules(user[9:]); continue
+        if user.startswith("/hooks"): show_hooks(user[6:]); continue
+        if user.startswith("/warm"): keep_warm(user[5:]); continue
+        if user == "/notify":
+            on = not load_config().get("notify", True); save_config(notify=on)
+            print(f"{DIM}notifications {'on · when a reply takes 30s or more, or it needs you, while you are in another window' if on else 'off'}{R}"); continue
+        if user.split()[0] == "/commit":
+            turn("Commit my changes in this git repo. Run git status, git diff and git diff --staged, and git log -5 --oneline to see how "
+                 "commit messages are written here. Stage only the files that belong to this change (never .env files, keys or other secrets; "
+                 "ask me if something looks private), then commit with a short message in that style saying what changed and why. "
+                 "Don't push unless I say so." + (f" Also: {user[7:].strip()}" if user[7:].strip() else "")); continue
+        if user.split()[0] == "/review":
+            turn("Review my code changes before I push them. Look at git diff and git diff --staged; if both are empty, review the commits on "
+                 "this branch that aren't on main or master (git log and git diff <base>...HEAD). Read the code around each change. Look for real "
+                 "problems: bugs, crashes, security holes, leaked secrets, broken edge cases, missing error handling. Change nothing. List what "
+                 "you found worst first, each with file:line, what goes wrong and the fix. If it all looks good, say so in one line."
+                 + (f" Also: {user[7:].strip()}" if user[7:].strip() else "")); continue
         if user.split()[0] in custom_commands():
             name, _, rest = user.partition(" ")
             text = read_text(custom_commands()[name], 20000)

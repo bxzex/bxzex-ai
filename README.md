@@ -123,6 +123,12 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/last` | The full output of the last tools it ran (it shows only the first line). Ctrl+O does the same. |
 | `/apps` | The apps you can connect. `/apps email` searches them, `/apps connected` shows yours. |
 | `/say` | Read its replies out loud. |
+| `/schedule` | Tasks it does on its own at set times, even with the app closed. Ask in your own words ("every weekday at 8am, read my Gmail and tell me what's important") and it sets it up; each run's report comes as a notification. Here you read the results, run one now, pause or remove it. |
+| `/commit` | It looks at your changes and commits them with a message in your repo's style. `/commit and push` pushes too. |
+| `/review` | It reviews your changes (or your branch) for bugs and security holes before you push, worst first, and changes nothing. |
+| `/hooks` | Your own commands that run before or after its tools, or when a reply is done. A before-hook that fails blocks the tool. `/hooks add after edit_file|write_file npx prettier --write "$BXZEX_FILE"`. |
+| `/notify` | Notifications on or off. When a reply takes 30 seconds or more, or it needs your OK, while you're in another window, you get a notification. |
+| `/warm` | Cloud card only: keep it awake during your hours so replies start right away. `/warm 9-18`, `/warm weekdays 9-18`, `/warm off`. Costs about $4 for every hour it stays awake. |
 | `/mcp` | Connected tool servers and apps. `/mcp add <name> <url> Header:value` adds one. |
 | `/undo` | Put back the last file it wrote or edited. |
 | `/compact` | Fold the chat so far into a short summary to make room. |
@@ -131,9 +137,11 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/reset` | Start a fresh conversation. `/clear` does the same. |
 | `exit` | Quit. |
 
-When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go, and Tab finishes the name. Ctrl+V pastes a screenshot from the clipboard. Pasted text keeps its line breaks, and the up arrow brings back what you typed, even from earlier sessions. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. Press `f` at a question to always allow that kind of command (like `npm test`) or file changes in that folder, kept between sessions; `/allow clear` forgets them. Tables come out as grids and code in color. The whole thing redraws itself when you resize the window.
+When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go, and Tab finishes the name. Ctrl+V pastes a screenshot from the clipboard. Ctrl+R searches what you sent before. Pasted text keeps its line breaks, and the up arrow brings back what you typed, even from earlier sessions. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. Press `f` at a question to always allow that kind of command (like `npm test`) or file changes in that folder, kept between sessions; `/allow clear` forgets them. Tables come out as grids and code in color. The whole thing redraws itself when you resize the window.
 
 To show it an image, drag the file into the terminal window and add your question.
+
+On the cloud card it can hand research to helpers, and several run at the same time. Helpers only look (read, search, fetch pages, read-only commands) and report back.
 
 You don't have to wait for it to finish. While it's working, type what you forgot to say and press Enter. It gets passed along as a "by the way" and it adjusts.
 
@@ -219,7 +227,9 @@ The model stays in memory after you quit so the next launch is instant. To shut 
 
 ```sh
 pkill llama-server
+launchctl bootout gui/$(id -u)/com.bxzex.ai.schedule 2>/dev/null; rm -f ~/Library/LaunchAgents/com.bxzex.ai.schedule.plist   # Mac, if you scheduled tasks
 rm -rf ~/.bxzex-ai "$(brew --prefix)/bin/bxzex-ai"    # Mac
+crontab -l 2>/dev/null | grep -v 'bxzex-ai schedule' | crontab -    # Linux, if you scheduled tasks
 rm -rf ~/.bxzex-ai ~/.local/bin/bxzex-ai              # Linux
 ```
 
