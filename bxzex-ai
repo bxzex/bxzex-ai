@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2111,7 +2111,8 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - run_shell with background true: leave a server or long build running; check_job reads its output or stops it.
 - delegate (on the cloud card): hand a big self-contained job to a helper with fresh memory; it reports back.
 - remember: save a short note that you will still have in future conversations.
-- use_skill: load one of your skills (listed below) before a task it covers.
+- use_skill: load one of your skills (listed below) before a task it covers. Anything with a screen (a site, web app, mobile app,
+  game or any UI) also gets no-ai-slop before you call it done, and a test_page check on phone and desktop.
 - generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes about a minute (use quality hd only when asked for high quality) and you are reloaded afterwards. Make one image per request unless asked for more.
 
 ## Memory

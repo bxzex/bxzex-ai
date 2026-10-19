@@ -174,10 +174,12 @@ Everything it knows about itself lives in four places inside `~/.bxzex-ai`, all 
 - **`chats/`** keeps every conversation, so nothing is lost when you close the window.
 - **`skills/`** holds one file per skill. Copy one, change the name and description at the top, write what you want it to know, and it has a new skill.
 
-The skills it ships with, 97 of them:
+The skills it ships with, 107 of them:
 
 - **Design and UX:** `ui-design`, `no-ai-slop`, `high-end-visual`, `design-direction`, `design-system`, `design-intake`, `design-from-image`, `ui-polish`, `ui-component`, `dashboard-design`, `redesign-existing`, `motion-animation`, `ux-audit`, `ux-critique`, `web-design-review`, `user-research`, `microcopy`, `accessibility`, `case-study`
 - **Building websites and apps:** `frontend-build`, `landing-page`, `local-business-sites`, `react-components`, `react-performance`, `component-libraries`, `nextjs-app`, `framework-upgrade`, `monorepo-tooling`, `web-performance`, `seo-basics`
+- **Web apps, mobile apps and PWAs:** `web-app-build`, `mobile-ui-design`, `mobile-app-expo`, `web-to-mobile-app`, `app-store-release`
+- **Games:** `game-design`, `web-game-2d`, `threejs-3d-game`, `game-audio-assets`, `game-online-features`
 - **Backend, data and shipping:** `api-design`, `serverless-functions`, `edge-middleware`, `database-postgres`, `sql-database`, `file-storage`, `auth-login`, `payments-stripe`, `background-jobs`, `cron-jobs-web`, `caching-cdn`, `feature-flags`, `firewall-security-headers`, `observability`, `deploy-vercel`, `github-cli`, `docker`, `env-secrets`
 - **AI and automation:** `ai-chat-app`, `ai-agents`, `chat-bots`, `browser-automation`, `web-scraping`, `scheduled-tasks`, `mac-automation`, `linux-automation`, `bash-scripting`, `python-scripting`, `sandbox-safety`
 - **Working like an agent:** `task-tracking`, `delegate-work`, `ask-before-guessing`, `run-and-verify`, `code-explainer`, `debugging`, `testing`, `refactor-simplify`, `code-review`, `security-check`, `git-workflow`, `plan-project`, `new-skill`
