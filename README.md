@@ -30,7 +30,7 @@ If your machine can run it, this app is still the one with no limits and no bill
 - **Does things on your computer.** It can run commands and read or write files. It shows you exactly what it wants to do and waits for your yes first.
 - **Listens.** Type `/v`, say what you want, and your words show up at the prompt ready to send.
 - **Remembers you.** Tell it something worth keeping and it's still there next week. It all sits in a plain text file you can read, edit or wipe.
-- **Comes with skills.** Twenty-nine of them: design, front-end, writing that doesn't sound like a robot, social posts, client proposals, research, debugging, security and more. It pulls in the right one when the job calls for it, and you can write your own.
+- **Comes with skills.** 95 of them: design and UX, websites and apps, backends and deploying, AI and automation, documents and spreadsheets, writing, research and sales. It pulls in the right one when the job calls for it, and you can write your own.
 - **Looks how you want.** Nine color themes. It starts in white fading to blue, like the logo. Pick another during install or switch any time with `/color`.
 
 ## Check it before you run it
@@ -114,6 +114,10 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/update` | Get the newest version. |
 | `!command` | Run a command yourself, like `!git status`. You see the output and so does it. |
 | `@file` | Attach a file to your message, like `what does @app.py do`. |
+| `/plan` | Plan mode: it looks around and writes a plan, and changes nothing until you turn it off. Shift+Tab in the box does the same. |
+| `/todos` | Its to-do list for the job it's on. On bigger jobs it keeps one and ticks steps off as it goes. |
+| `/jobs` | Commands it left running in the background, like a dev server. They stop when you quit. |
+| `/context` | How full the chat is. |
 | `/undo` | Put back the last file it wrote or edited. |
 | `/compact` | Fold the chat so far into a short summary to make room. |
 | `/init` | It looks around the folder you're in and writes a `BXZEX.md` about the project, which it reads every time you work there. |
@@ -149,43 +153,20 @@ Everything it knows about itself lives in four places inside `~/.bxzex-ai`, all 
 
 - **`BXZEX.md`** is its guide. Add your own rules at the bottom ("always answer in Spanish", "I'm a mechanic, keep it practical") and it follows them in every conversation. Put a `BXZEX.md` in any folder and it reads that too when you launch it from there.
 - **`memory.md`** is what it has saved about you. One line per thing.
+- **`about.md`** is where you tell it who you are. It's read in every chat and never leaves your computer.
+- **`commands/`** holds your own slash commands: save a prompt as `commands/name.md` and type `/name`.
 - **`chats/`** keeps every conversation, so nothing is lost when you close the window.
 - **`skills/`** holds one file per skill. Copy one, change the name and description at the top, write what you want it to know, and it has a new skill.
 
-The skills it ships with:
+The skills it ships with, 95 of them:
 
-| Skill | What it's for |
-|---|---|
-| `ui-design` | Layout, type, color and states for interfaces that look intentional |
-| `no-ai-slop` | Stripping out the generic machine-made look before it calls a design done |
-| `frontend-build` | Web pages that work when you open the file |
-| `landing-page` | Pages built around getting one action from a visitor |
-| `accessibility` | Making a page usable by keyboard, screen reader and low vision |
-| `react-components` | React components and small apps |
-| `human-writing` | Copy, posts and emails that read like a person wrote them |
-| `email-writing` | Emails and messages that get an answer |
-| `social-posts` | Instagram, TikTok, X and LinkedIn captions in your voice |
-| `video-script` | Scripts for Reels, TikTok and Shorts |
-| `sales-outreach` | First messages to a client that don't read like spam |
-| `client-proposal` | Quotes and scopes of work a client can say yes to |
-| `pricing-offers` | What to charge and how to package it |
-| `brand-naming` | Names for a business, product or app |
-| `seo-basics` | Getting a page found on Google |
-| `plan-project` | Turning a vague goal into steps |
-| `summarize` | Boiling a long document down for someone with thirty seconds |
-| `explain-teach` | Explaining something hard so it sticks |
-| `web-research` | Finding current facts and saying where they came from |
-| `data-analysis` | Getting an honest answer out of a spreadsheet |
-| `debugging` | Finding the real cause before changing anything |
-| `code-review` | Catching bugs before they ship |
-| `security-check` | Spotting common security mistakes in your own site or app |
-| `api-design` | Endpoints that are clear and safe |
-| `sql-database` | Tables and queries that return the right rows |
-| `python-scripting` | Scripts that automate a job and have been run |
-| `bash-scripting` | Shell scripts that don't break on a space |
-| `git-workflow` | Committing, branching and undoing without losing work |
-| `mac-automation` | Getting things done on your Mac without breaking it |
-| `linux-automation` | The same for Linux and Windows. You get whichever one matches your computer. |
+- **Design and UX:** `ui-design`, `no-ai-slop`, `high-end-visual`, `design-direction`, `design-system`, `design-intake`, `design-from-image`, `ui-polish`, `ui-component`, `dashboard-design`, `redesign-existing`, `motion-animation`, `ux-audit`, `ux-critique`, `web-design-review`, `user-research`, `microcopy`, `accessibility`, `case-study`
+- **Building websites and apps:** `frontend-build`, `landing-page`, `local-business-sites`, `react-components`, `react-performance`, `component-libraries`, `nextjs-app`, `framework-upgrade`, `monorepo-tooling`, `web-performance`, `seo-basics`
+- **Backend, data and shipping:** `api-design`, `serverless-functions`, `edge-middleware`, `database-postgres`, `sql-database`, `file-storage`, `auth-login`, `payments-stripe`, `background-jobs`, `cron-jobs-web`, `caching-cdn`, `feature-flags`, `firewall-security-headers`, `observability`, `deploy-vercel`, `github-cli`, `docker`, `env-secrets`
+- **AI and automation:** `ai-chat-app`, `ai-agents`, `chat-bots`, `browser-automation`, `web-scraping`, `scheduled-tasks`, `mac-automation`, `linux-automation`, `bash-scripting`, `python-scripting`, `sandbox-safety`
+- **Working like an agent:** `task-tracking`, `delegate-work`, `ask-before-guessing`, `run-and-verify`, `code-explainer`, `debugging`, `testing`, `refactor-simplify`, `code-review`, `security-check`, `git-workflow`, `plan-project`, `new-skill`
+- **Documents, data and media:** `documents`, `pdf-tools`, `word-docs`, `spreadsheets`, `slide-decks`, `charts-dataviz`, `data-analysis`, `media-ffmpeg`, `google-workspace`
+- **Writing, research and business:** `human-writing`, `email-writing`, `social-posts`, `video-script`, `sales-outreach`, `client-proposal`, `pricing-offers`, `brand-naming`, `resume-job-apply`, `web-research`, `deep-research`, `daily-briefing`, `summarize`, `explain-teach`
 
 ## Graphics card or processor
 

@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.5.5"
+VERSION = "1.6.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -330,10 +330,21 @@ def loaded_model():
         with urllib.request.urlopen(f"{HOST}/v1/models", timeout=600 if REMOTE else 3) as r:
             d = json.load(r)["data"]
         MODEL_ID = d[0]["id"] if d else ""
+        if REMOTE and MODEL_ID: global last_ok; last_ok = time.time()     # it answered, so it's awake
         return MODEL_ID or None
     except Exception:
         MODEL_ID = ""
         return None
+
+waking = threading.Lock()
+
+def wake_soon():
+    """Start waking a sleeping cloud card in the background, e.g. as soon as they start typing."""
+    def go():
+        if waking.acquire(blocking=False):
+            try: loaded_model()
+            finally: waking.release()
+    if REMOTE and not awake(): threading.Thread(target=go, daemon=True).start()
 
 def awake():
     """True when the cloud card answered in the last minute: it can't have gone to sleep, so no need to check."""
@@ -382,7 +393,7 @@ def wake_remote(block=True):
     if not block:
         threading.Thread(target=loaded_model, daemon=True).start(); return True
     sys.stdout.write("\033[?25l")
-    wait = Waiting("Waking the cloud GPU")
+    wait = Waiting("Waking the cloud GPU · it sleeps after 5 min idle and takes about 2 min to start")
     try:
         if loaded_model(): return True
     except KeyboardInterrupt:
@@ -421,7 +432,10 @@ def choose_device(arg=""):
     save_config(device=want)
     if want == now: print(f"{DIM}already on the {'processor' if want == 'cpu' else 'graphics card'}{R}"); return
     print(f"  {GOLD}●{R} {'processor (CPU)' if want == 'cpu' else card + ' (GPU)'} {DIM}· saved · reloading the model{R}")
-    stop_server(); ensure_server()
+    wait = Waiting("Stopping the model")
+    try: stop_server()
+    finally: wait.stop()
+    ensure_server()
 
 # ---- tools ----
 import base64, datetime, difflib, fnmatch, html, http.client, shlex, tempfile, threading, urllib.parse
@@ -570,6 +584,8 @@ def confirm(what, detail, always_ask=False, diff=False):
     global allow_all
     if allow_all and not always_ask: return True
     if not sys.stdin.isatty(): return False
+    global tool_wait
+    if tool_wait: tool_wait.stop(); tool_wait = None       # the loader steps aside for the question
     busy = typed.th is not None
     typed.stop()                      # hand the keyboard back for the question
     sys.stdout.write("\033[?25h")
@@ -596,6 +612,7 @@ def confirm(what, detail, always_ask=False, diff=False):
     finally:
         if busy: typed.start()
     print(a if a in "yna" else "")
+    if a in "ya" and a and tool_label: sys.stdout.write("\033[?25l"); tool_wait = Waiting(tool_label)   # and comes back while it runs
     if a == "a" and not always_ask: allow_all = True; return True
     return a == "y"
 
@@ -618,9 +635,12 @@ def only_looks(command):
         if name in ("sort", "tree") and any(w == "-o" or w.startswith("-o") and name == "sort" for w in words[1:]): return False
     return True
 
-def run_shell(command):
-    if not only_looks(command) and not confirm("run command", command, always_ask=bool(RISKY.search(command))):
+def run_shell(command, background="false"):
+    if PLAN and not only_looks(command): return plan_block()
+    if not only_looks(command) and not confirm("run in the background" if str(background).lower() == "true" else "run command",
+                                               command, always_ask=bool(RISKY.search(command))):
         return "The user declined to run this command."
+    if str(background).lower() == "true": return start_job(command)
     # no keyboard for the command (a prompt would freeze the app), and its own process group so a timeout stops all of it
     p = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True, errors="replace", start_new_session=True)
@@ -663,6 +683,7 @@ def save_file(path, content):
     UNDO.append((path, old))
 
 def write_file(path, content):
+    if PLAN: return plan_block()
     path = os.path.expanduser(path)
     old = None
     if os.path.isfile(path):
@@ -674,6 +695,7 @@ def write_file(path, content):
     return f"wrote {len(content)} chars to {path}"
 
 def edit_file(path, old_text, new_text, replace_all="false"):
+    if PLAN: return plan_block()
     path = os.path.expanduser(path)
     with open(path, "r", errors="replace") as f: text = f.read()
     n = text.count(old_text) if old_text else 0
@@ -938,9 +960,126 @@ def generate_image(prompt, shape="square", quality="fast", wait_for_chat=True):
     print(f"  {GOLD}{link(file_link(out), out.replace(HOME, '~'))}{R} {DIM}· {'cmd' if MAC else 'ctrl'}-click to open{R}")
     return f"saved to {out.replace(HOME, '~')} ({w}x{h}" + (f", {len(loras)} style file(s) applied)" if loras else ")")
 
+# ---- working like an agent: a to-do list, questions, background jobs, helpers and plan mode ----
+TODOS = []          # (state, text): state is " " to do, ">" doing now, "x" done
+PLAN = False        # plan mode: it only looks around and writes a plan, nothing is changed
+
+def show_todos():
+    for state, text in TODOS:
+        if state == "x": print(f"  {DIM}✓ {text}{R}")
+        elif state == ">": print(f"  {GOLD}▸{R} {BOLD}{text}{R}")
+        else: print(f"  {DIM}○{R} {text}")
+
+def update_todos(todos):
+    items = []
+    for line in str(todos).splitlines():
+        m = re.match(r"\s*(?:[-*]\s*)?\[(.)\]\s*(.+)", line)
+        if m: items.append(({"x": "x", "X": "x", ">": ">", "~": ">"}.get(m.group(1), " "), m.group(2).strip()))
+        elif line.strip(): items.append((" ", line.strip(" -*")))
+    if not items: return "error: give one step per line, like [ ] step, [>] the step you are on, [x] a finished step"
+    TODOS[:] = items[:20]
+    show_todos()
+    left = sum(1 for st, _ in TODOS if st != "x")
+    return f"to-do list updated: {len(TODOS) - left} done, {left} left"
+
+def ask_user(question, options=""):
+    """A question with choices the user picks with the arrow keys, or answers in their own words."""
+    if not sys.stdin.isatty(): return "The user isn't at the keyboard. Pick the most sensible option and say which."
+    picks = [o.strip() for o in str(options).split("|") if o.strip()][:6]
+    busy = typed.th is not None
+    typed.stop()
+    try:
+        print(f"{GOLD}?{R} {BOLD}{question}{R}")
+        rows = [(o, "") for o in picks] + [("Type my own answer", "")]
+        at = menu(rows, hint="↑↓ to move · enter to pick · esc to skip")
+        if at is None: print(f"  {DIM}skipped{R}"); return "The user skipped the question. Use your best judgment and say what you chose."
+        if at < len(picks): print(f"  {GOLD}❯{R} {picks[at]}"); return f"The user picked: {picks[at]}"
+        own = line_input(f"  {GOLD}❯{R} ").strip()
+        return f"The user answered: {own}" if own else "The user didn't answer. Use your best judgment."
+    finally:
+        if busy: typed.start()
+
+JOBS = {}           # number -> (process, log file, command) for commands left running in the background
+
+def start_job(command):
+    os.makedirs(f"{APP_HOME}/jobs", exist_ok=True)
+    n = max(JOBS, default=0) + 1
+    log = f"{APP_HOME}/jobs/{n}.log"
+    with open(log, "w") as f:
+        p = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+    JOBS[n] = (p, log, command)
+    time.sleep(1.5)                                  # long enough to catch a command that fails straight away
+    return f"started job {n} in the background (pid {p.pid}). First output:\n" + job_output(n)
+
+def job_output(n):
+    p, log, _ = JOBS[n]
+    with open(log, errors="replace") as f: text = f.read()
+    state = "still running" if p.poll() is None else f"finished, exit code {p.returncode}"
+    return f"[job {n}: {state}]\n" + (text[-3000:] if len(text) > 3000 else text)
+
+def check_job(job, action="output"):
+    try: n = int(str(job).strip().lstrip("#"))
+    except ValueError: return "error: job must be the job number"
+    if n not in JOBS: return f"error: no job {n}. Running jobs: {', '.join(map(str, JOBS)) or 'none'}"
+    if str(action).strip() == "stop":
+        p = JOBS[n][0]
+        try: os.killpg(p.pid, 15)
+        except OSError: pass
+        try: p.wait(5)
+        except subprocess.TimeoutExpired:
+            try: os.killpg(p.pid, 9)
+            except OSError: pass
+        return f"stopped job {n}"
+    return job_output(n)
+
+def stop_jobs():
+    for p, _, _ in JOBS.values():
+        if p.poll() is None:
+            try: os.killpg(p.pid, 15)
+            except OSError: pass
+
+def show_jobs():
+    print(header("Background jobs"))
+    if not JOBS: print(f"  {DIM}none{R}"); return
+    for n, (p, log, cmd) in JOBS.items():
+        state = f"{GOLD}running{R}" if p.poll() is None else f"{DIM}done ({p.returncode}){R}"
+        print(f"  {GOLD}{n}{R}  {state}  {cmd[:W() - 24]}")
+    print(f"  {DIM}logs in {APP_HOME.replace(HOME, '~')}/jobs · they stop when you quit{R}")
+
+helping = False
+def delegate(task):
+    """A helper with its own fresh memory works on one self-contained job and reports back."""
+    global helping
+    if helping: return "error: a helper can't start another helper. Do this part yourself."
+    helping = True
+    sub = [{"role": "user", "content": str(task) + "\n\nWork on this on your own with your tools. Don't ask me questions. "
+            "When you're done, reply with a short report of what you found or did, with the exact file paths, links and numbers."}]
+    print(f"  {DIM}┌ helper started{R}")
+    try:
+        recent = []
+        for _ in range(30):
+            text, calls = stream(sub, "Helper working")
+            if stream_error and not text and not calls: return f"the helper hit an error: {stream_error}"
+            if not calls:
+                print(f"  {DIM}└ helper finished{R}")
+                return text or "the helper finished without a report"
+            sub.append({"role": "assistant", "content": text, "tool_calls": calls})
+            for i, call in enumerate(calls):
+                call["id"] = call["id"] or f"h{len(sub)}_{i}"
+                recent.append((call["function"]["name"], call["function"].get("arguments")))
+                out = REPEAT if circling(recent) else (run_tool(call) if whole(call) else CUT_OFF)
+                sub.append({"role": "tool", "tool_call_id": call["id"], "content": out})
+        return "the helper used all its steps. What it last said: " + (sub[-1].get("content") or "")[:2000]
+    finally:
+        helping = False
+
+def plan_block():
+    return "Plan mode is on, so nothing can be changed yet. Look around with the read-only tools, then write the plan and ask the user to turn plan mode off (/plan or shift-tab) to go ahead."
+
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
               "list_files": list_files, "search_files": search_files,
+              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": delegate,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
               "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
 
@@ -952,7 +1091,13 @@ def tool(tool_name, desc, **props):
 TOOLS = [
     tool("web_search", "Search the web. Returns titles, URLs and snippets.", query="search query"),
     tool("fetch_page", "Download a web page and return its readable text.", url="full URL"),
-    tool("run_shell", "Run a shell command on this computer and return its output.", command="the command"),
+    tool("run_shell", "Run a shell command on this computer and return its output. For servers or long builds, set background to true: "
+         "it keeps running and check_job reads its output.", command="the command", background="true to leave it running, default false"),
+    tool("check_job", "Read the output of a background job, or stop it.", job="the job number", action="output or stop, default output"),
+    tool("update_todos", "Keep a to-do list for work with 3 or more steps. Send the whole list every time, one step per line: "
+         "[ ] to do, [>] the one you are on now, [x] done. The user sees it.", todos="the full list"),
+    tool("ask_user", "Ask the user to choose when you really need their decision. They pick with the arrow keys or type their own answer.",
+         question="short question", options="2 to 5 short choices separated by |"),
     tool("read_file", "Read a text file from this computer. Long files come in parts: pass start to read further.", path="file path",
          start="character to start from, default 0"),
     tool("write_file", "Create a new text file, or replace one completely. To change part of a file, use edit_file.", path="file path", content="full file content"),
@@ -964,6 +1109,9 @@ TOOLS = [
     tool("search_files", "Search inside files for a regex. Returns file:line: matching text.", pattern="regex to look for",
          path="folder or file, default .", file_pattern="only files like this, e.g. *.js, default all"),
     tool("remember", "Save a lasting note about the user for future conversations.", note="one short sentence"),
+] + ([tool("delegate", "Hand one self-contained job (research, searching a codebase, reading many files) to a helper with its own fresh memory. "
+           "It works on its own and returns a short report. Give it everything it needs in the task.", task="the full task, with all the details")]
+     if REMOTE else []) + [
     tool("use_skill", "Load the full instructions for one of your skills.", name="skill name"),
     {"type": "function", "function": {"name": "generate_image",
         "description": "Create a picture from a description and save it. About a minute, or a few for hd.",
@@ -991,6 +1139,9 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - /device: show whether you run on the graphics card (GPU) or the processor (CPU). /device cpu or /device gpu switches.
 - /update: get the newest version of the app. It also checks by itself each time it starts.
 - /image <description>: make a picture straight from their words, without you. If they ask you for a picture in conversation, use generate_image.
+- /plan or shift-tab: plan mode. You only look around and write a plan; changes are blocked until they turn it off.
+- /todos: your to-do list. /jobs: commands you left running. /context: how full the chat is.
+- Their own commands: a prompt saved as ~/.bxzex-ai/commands/name.md runs with /name.
 - /undo: put back the last file you wrote or edited.
 - /compact: fold the conversation so far into a summary, to make room.
 - /init: you look around this folder and write a BXZEX.md about it, which you read in every later chat here.
@@ -1007,6 +1158,10 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - list_files, search_files, read_file: look around this computer. These never ask.
 - edit_file: change part of a file by replacing exact text. Use it instead of rewriting a whole file with write_file.
 - run_shell, write_file: act on this computer. Commands that only look (ls, cat, grep, git status...) run straight away; others and file changes ask the user first, showing them what changes.
+- update_todos: for work with 3 or more steps, keep a to-do list they can see, and tick steps off as you go.
+- ask_user: when a choice is really theirs, ask with 2 to 5 short options they pick with the arrow keys.
+- run_shell with background true: leave a server or long build running; check_job reads its output or stops it.
+- delegate (on the cloud card): hand a big self-contained job to a helper with fresh memory; it reports back.
 - remember: save a short note that you will still have in future conversations.
 - use_skill: load one of your skills (listed below) before a task it covers.
 - generate_image: make a picture. Write the prompt as one detailed paragraph: the subject, the setting, the light, the style and the camera. Pick square, portrait or landscape. It takes about a minute (use quality hd only when asked for high quality) and you are reloaded afterwards. Make one image per request unless asked for more.
@@ -1132,12 +1287,15 @@ def refresh_system():
     except OSError:
         pass
     parts = [system_prompt(), read_text(GUIDE, 6000) or DEFAULT_GUIDE]
-    here = read_text(os.path.join(os.getcwd(), "BXZEX.md"), 3000)
-    if here: parts.append("## Notes for this folder\n" + here)
+    for notes_file in ("BXZEX.md", "AGENTS.md"):
+        here = read_text(os.path.join(os.getcwd(), notes_file), 3000)
+        if here: parts.append(f"## Notes for this folder ({notes_file})\n" + here)
+    if PLAN: parts.append("## Plan mode is on\nOnly look around and plan. Nothing can be changed until the user turns it off.")
     skills = list_skills()
     if skills:
         parts.append("## Skills\nBefore starting a task that matches one of these, call use_skill with its name "
-                     "and follow what it says:\n" + "\n".join(f"- {n}: {' '.join(d.split(':')[0].split()[:9])}" for n, d, _ in skills))   # short hints: every prompt token costs load time
+                     "and follow what it says:\n" + ("\n".join(f"- {n}: {' '.join(d.split(':')[0].split()[:9])}" for n, d, _ in skills) if REMOTE
+                                                     else ", ".join(n for n, _, _ in skills)))   # on a laptop just the names: every prompt token costs load time
     me = read_text(ABOUT, 10**6)[:16000]           # the start of it matters most: who they are comes first
     if me: parts.append("## About the user (they wrote this for you: it is true, use it)\n" + me)
     notes = read_text(MEMORY, 8000 if REMOTE else 3000)
@@ -1167,7 +1325,8 @@ def system_prompt():
         f"Working directory: {os.getcwd().replace(HOME, '~')}.\n"
         "You can act: web_search and fetch_page for anything current or that you are unsure of; "
         "list_files, search_files and read_file to look around; edit_file to change part of a file and write_file only for "
-        "new files or full rewrites; run_shell for everything else. When a task needs action, do it "
+        "new files or full rewrites; run_shell for everything else (background true for servers). For work with 3 or more steps, keep a "
+        "list with update_todos and tick steps off as you go. Ask with ask_user only when a choice is really theirs. When a task needs action, do it "
         "with the tools instead of telling them how. If no tool is needed, just answer.\n"
         "Reading tool output is slow for you, so use as few calls as the task needs and rely on search "
         "snippets before fetching whole pages. Keep answers short and plain.\n"
@@ -1175,6 +1334,12 @@ def system_prompt():
         "Use such details only when they bring them up in this conversation or ask you to. What you remember "
         "about them is background, not a brief. You do not know their name unless they tell you"
         + (", or it is in About the user below. That section is from them: you know them, so use it when it helps." if os.path.exists(ABOUT) else "."))
+
+# what the loader says while each tool works, so nothing ever looks frozen (images draw their own)
+RUNNING = {"run_shell": "Running", "check_job": "Checking the job", "web_search": "Searching the web", "fetch_page": "Opening page", "read_file": "Reading",
+           "list_files": "Looking through files", "search_files": "Searching files", "write_file": "Saving", "edit_file": "Saving",
+           "use_skill": "Loading skill"}
+tool_wait = None; tool_label = ""
 
 def run_tool(call):
     fn = call["function"]; name = fn["name"]
@@ -1186,10 +1351,16 @@ def run_tool(call):
     shown = " ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " ")
     print(f"{TEAL}◆{R} {BOLD}{name}{R}{DIM}({shown[:W()-len(name)-6]}){R}")
     if name not in TOOL_FUNCS: return f"error: no tool named {name}"
+    global tool_wait, tool_label
+    tool_label = RUNNING.get(name, "")
+    if tool_label: sys.stdout.write("\033[?25l"); tool_wait = Waiting(tool_label)
     try:
         out = str(TOOL_FUNCS[name](**args))
     except Exception as e:
         out = f"error: {e}"
+    finally:
+        if tool_wait: tool_wait.stop(); tool_wait = None
+        tool_label = ""; sys.stdout.write("\033[?25h"); sys.stdout.flush()
     lines = [l for l in out.strip().splitlines() if l.strip()]
     first = lines[0] if lines else "(empty)"
     more = f" (+{len(lines)-1} lines)" if len(lines) > 1 else ""
@@ -1560,7 +1731,8 @@ def fold(history, force=False, everything=False):
 
 turn_tok = 0   # tokens generated in the current turn, for the summary line
 stream_error = ""   # set when the server reports a failure instead of an answer
-DOING = {"generate_image": "Writing the image prompt", "write_file": "Writing file", "edit_file": "Editing file",
+DOING = {"update_todos": "Planning", "ask_user": "Writing a question", "delegate": "Briefing a helper",
+         "generate_image": "Writing the image prompt", "write_file": "Writing file", "edit_file": "Editing file",
          "list_files": "Looking through files", "search_files": "Searching files", "run_shell": "Writing command", "web_search": "Searching", "fetch_page": "Opening page",
          "read_file": "Opening file", "use_skill": "Loading skill", "remember": "Saving to memory"}
 
@@ -1827,26 +1999,48 @@ def newer(a, b):
 def fetch(path):
     return http_get(f"{UPDATE_URL}/{path}")
 
+update_lock = threading.Lock()   # the check at startup and /update never download at the same time
+
 def check_update(quiet=True):
-    """Look for a newer version and put it in place. The running session keeps the old one until restart.
+    """Look for a newer version and put it in place, then the app reloads itself at the prompt.
     Only the app, the server launcher and the skills change here: the big model files are never touched."""
+    if quiet:
+        if not update_lock.acquire(blocking=False): return False
+        try: return get_update(True, None)
+        finally: update_lock.release()
+    sys.stdout.write("\033[?25l")
+    wait = Waiting("Checking for updates")
+    try:
+        with update_lock:                            # if the check at startup is mid-download, this waits for it
+            if reload_ready:
+                wait.stop(); print(f"{GOLD}●{R} {BOLD}Updated{R} {DIM}· reloading, your chat stays{R}"); return True
+            return get_update(False, wait)
+    finally:
+        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+
+def get_update(quiet, wait):
     global update_note
+    def say(text):
+        if wait: wait.stop()
+        if not quiet: print(f"{DIM}{text}{R}")
     try:
         latest = fetch("VERSION").split()
-        if not latest or not re.fullmatch(r"\d+(\.\d+){1,2}", latest[0]): return False
+        if not latest or not re.fullmatch(r"\d+(\.\d+){1,2}", latest[0]): say("couldn't read the latest version number, try /update again"); return False
         if not newer(latest[0], VERSION):
-            if not quiet: print(f"{DIM}you have the latest version, v{VERSION}{R}")
-            return False
+            say(f"you have the latest version, v{VERSION}"); return False
+        if wait: wait.label = f"Downloading v{latest[0]}"
         here = os.path.dirname(os.path.realpath(__file__))
-        app = fetch("bxzex-ai")
-        compile(app, "bxzex-ai", "exec")                       # never install something that doesn't even parse
-        if f'VERSION = "{latest[0]}"' not in app or not app.rstrip().endswith(END_MARK):   # cut off, or the download servers still hold the old copy
-            if not quiet: print(f"{DIM}v{latest[0]} is on its way but hasn't reached the download servers yet. Try /update again in a few minutes{R}")
-            return False
-        server = fetch("bxzex-server")
-        names = re.search(r'SKILLS="([^"]*)"', fetch("install.sh"))
-        skills = {n: fetch(f"skills/{n}.md") for n in (names.group(1).split() if names else [])}
-        if not server.startswith("#!") or any(not v.startswith("---") for v in skills.values()): return False
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(8) as pool:                    # every file at once: one by one took half a minute
+            app, server, installer = pool.map(fetch, ["bxzex-ai", "bxzex-server", "install.sh"])
+            compile(app, "bxzex-ai", "exec")                   # never install something that doesn't even parse
+            if f'VERSION = "{latest[0]}"' not in app or not app.rstrip().endswith(END_MARK):   # cut off, or the download servers still hold the old copy
+                say(f"v{latest[0]} is on its way but hasn't reached the download servers yet. Try /update again in a few minutes"); return False
+            names = re.search(r'SKILLS="([^"]*)"', installer)
+            names = names.group(1).split() if names else []
+            skills = dict(zip(names, pool.map(lambda n: fetch(f"skills/{n}.md"), names)))
+        if not server.startswith("#!") or any(not v.startswith("---") for v in skills.values()):
+            say("part of the download came back broken, nothing was changed. Try /update again"); return False
         os.makedirs(SKILLS_DIR, exist_ok=True)
         for n, text in skills.items():
             with open(os.path.join(SKILLS_DIR, f"{n}.md"), "w") as f: f.write(text)
@@ -1858,10 +2052,11 @@ def check_update(quiet=True):
         update_note = f"updated to v{latest[0]} · reloading"; reload_ready = True
         if len(latest) > 1 and latest[1].isdigit() and int(latest[1]) > int(load_config().get("parts", 0) or 0):
             update_note += " · new features to download: /update full"
+        if wait: wait.stop()
         if not quiet: print(f"{GOLD}●{R} {BOLD}Updated to v{latest[0]}{R} {DIM}· reloading, your chat stays{R}")
         return True
     except Exception:
-        if not quiet: print(f"{DIM}couldn't check for updates right now{R}")
+        say("couldn't reach the update server right now, try /update again in a minute")
         return False
 
 def full_update():
@@ -2015,6 +2210,8 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/history", "past chats, pick one to continue"), ("/resume", "continue the last chat"),
             ("/fast", "toggle answering without thinking first"), ("/think", "show or hide its thinking"),
             ("/device", "run on the graphics card or the processor · /device cpu"),
+            ("/plan", "plan mode: it only looks and plans · also shift-tab"), ("/todos", "its to-do list"),
+            ("/jobs", "commands running in the background"), ("/context", "how full the chat is"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -2028,12 +2225,37 @@ LITE = load_config().get("size") == "lite"     # the lighter build of the model,
 
 def status_text(buf, working=False):
     if buf.startswith("/"):
-        hits = [f"{n} {d}" for n, d in COMMANDS if n.startswith(buf.split()[0])]
+        hits = [f"{n} {d}" for n, d in COMMANDS + [(c, "your command") for c in custom_commands()] if n.startswith(buf.split()[0])]
         if hits: return "  " + "   ".join(hits)
     if working: return "  working · type and press Enter to add a note · esc to stop"
     if update_note: return f"  {update_note}"
+    if PLAN: return "  plan mode · it only looks and plans, nothing is changed · shift-tab or /plan to leave"
     lite = (" · lite" if LITE else "") + (" · always allow on" if allow_all else "")
-    return f"  bxzex-ai v{VERSION}{lite} · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')} · /help"
+    branch = git_branch()
+    return f"  bxzex-ai v{VERSION}{lite} · {THEME} · fast {'on' if fast else 'off'} · {os.getcwd().replace(HOME, '~')}{' · ' + branch if branch else ''} · /help"
+
+_branch = ("", 0.0, "")
+def git_branch():
+    """The git branch of this folder, looked up at most every few seconds (the status line redraws on every key)."""
+    global _branch
+    here = os.getcwd()
+    if _branch[0] != here or time.time() - _branch[1] > 5:
+        try:
+            b = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=1, stdin=subprocess.DEVNULL)
+            name = b.stdout.strip() if b.returncode == 0 else ""
+        except Exception: name = ""
+        _branch = (here, time.time(), f"⎇ {name}" if name and name != "HEAD" else "")
+    return _branch[2]
+
+def custom_commands():
+    """Your own slash commands: a .md file in ~/.bxzex-ai/commands (or .bxzex/commands in a project) is a prompt, run with /its-name."""
+    found = {}
+    for folder in (f"{APP_HOME}/commands", os.path.join(os.getcwd(), ".bxzex", "commands")):
+        try:
+            for f in sorted(os.listdir(folder)):
+                if f.endswith(".md"): found["/" + f[:-3]] = os.path.join(folder, f)
+        except OSError: pass
+    return found
 
 class Box:
     """Keeps the input box on the last four rows. Everything else scrolls in the area above it,
@@ -2125,6 +2347,7 @@ def ask(prefill=""):
                 raise
             if resized: resized = False; box.focus("".join(buf), pos)
             if not ready: continue
+            if not buf: wake_soon()                       # they started typing: get a sleeping cloud card going now
             data = dec.decode(os.read(fd, 4096))
             if ESC_PART.search(data): data = finish_escapes(fd, data)     # a key code cut in two must not read as Esc, which clears the line
             i = 0; done = False
@@ -2155,6 +2378,7 @@ def ask(prefill=""):
                     elif key in ("\x1b[H", "\x1bOH", "\x1b[1~"): pos = 0
                     elif key in ("\x1b[F", "\x1bOF", "\x1b[4~"): pos = len(buf)
                     elif key == "\x1b[3~": del buf[pos:pos + 1]
+                    elif key == "\x1b[Z": toggle_plan(quiet=True)          # shift-tab: plan mode on or off
                     elif key in ("\x1b[A", "\x1bOA") and at > 0:
                         if at == len(past): draft = "".join(buf)
                         at -= 1; buf = list(past[at]); pos = len(buf)
@@ -2182,7 +2406,7 @@ def ask(prefill=""):
                     del buf[j:pos]; pos = j
                 elif ch == "\t":
                     word = "".join(buf)
-                    hits = [n for n, _ in COMMANDS if n.startswith("/") and n.startswith(word)] if word.startswith("/") and " " not in word else []
+                    hits = [n for n in [n for n, _ in COMMANDS] + list(custom_commands()) if n.startswith("/") and n.startswith(word)] if word.startswith("/") and " " not in word else []
                     if hits:
                         common = os.path.commonprefix(hits)
                         buf = list(common + (" " if len(hits) == 1 else "")); pos = len(buf)
@@ -2203,11 +2427,30 @@ def ask(prefill=""):
         print(f"{GOLD}❯{R} {BOLD}" + text.replace("\n", f"{R}\n  {BOLD}") + R)
     return text
 
+def toggle_plan(quiet=False):
+    global PLAN
+    PLAN = not PLAN
+    refresh_system()
+    history.append({"role": "user", "content": "(Plan mode is on: only look around and plan, change nothing.)" if PLAN
+                    else "(Plan mode is off: you can go ahead and make the changes now.)"})
+    if not quiet: print(f"{DIM}plan mode {'on · it looks around and writes a plan, nothing is changed' if PLAN else 'off · it can make changes again'}{R}")
+
+def show_context():
+    size = context_size(); used = estimate(history)
+    pct = min(100, round(used * 100 / max(1, size)))
+    bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+    print(header("Context"))
+    print(f"  {GOLD}{bar}{R} {pct}% {DIM}· about {used:,} of {size:,} tokens · {len(history)} messages{R}")
+    print(f"  {DIM}it folds older messages into a summary by itself when it gets full · /compact does it now{R}")
+
 def show_help():
     print(header("Commands"))
     for n, d in COMMANDS: print(f"  {GOLD}{n:<8}{R} {DIM}{d}{R}")
     print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note. Esc stops a reply.")
     print(f"  Looking at files and read-only commands (ls, cat, grep, git status) never ask. File changes show what changes first.{R}")
+    mine = custom_commands()
+    if mine: print(f"  {DIM}your commands: {' '.join(mine)}{R}")
+    print(f"  {DIM}make your own: save a prompt as {APP_HOME.replace(HOME, '~')}/commands/name.md and type /name (use $ARGUMENTS for what you type after it){R}")
 
 # ---- installer helpers ----
 if sys.argv[1:2] in (["--version"], ["-v"]):
@@ -2257,13 +2500,13 @@ if splash:
     for row in car_rows():
         sys.stdout.write("  " + row + "\n"); sys.stdout.flush(); time.sleep(0.015)
     print()
-up = ensure_server()
+up = ensure_server(block=not RELOAD)     # after an update it doesn't wait: the card wakes while they type
 if splash:
     time.sleep(max(0, 1.2 - (time.time() - began)))      # long enough to be seen when the model is already loaded
     sys.stdout.write(f"\033[{len(CAR) + 2}A\r\033[J"); sys.stdout.flush()
 if not up: sys.exit(1)
 if RELOAD:
-    fast, show_think, allow_all = bool(RELOAD.get("fast", fast)), bool(RELOAD.get("think")), bool(RELOAD.get("allow"))
+    fast, show_think, allow_all, PLAN = bool(RELOAD.get("fast", fast)), bool(RELOAD.get("think")), bool(RELOAD.get("allow")), bool(RELOAD.get("plan"))
     print(f"{GOLD}●{R} {BOLD}Updated to v{VERSION}{R} {DIM}· carrying on where you were{R}")
 else:
     banner()
@@ -2277,6 +2520,7 @@ if RELOAD.get("chat") and os.path.exists(RELOAD["chat"]):
 elif not RELOAD and load_config().get("continue", True): start_menu()   # continue the last chat, start a new one, or pick an earlier one
 threading.Thread(target=autosave, daemon=True).start()
 atexit.register(save_chat)
+atexit.register(stop_jobs)      # background jobs end with the app
 if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version in the background each time it starts
     threading.Thread(target=check_update, daemon=True).start()
 def reload_app(typed_text=""):
@@ -2286,7 +2530,8 @@ def reload_app(typed_text=""):
         try: termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, COOKED)
         except termios.error: pass
     sys.stdout.flush()
-    state = {"chat": chat_file or "", "fast": fast, "think": show_think, "allow": allow_all, "typed": typed_text}
+    stop_jobs()
+    state = {"chat": chat_file or "", "fast": fast, "think": show_think, "allow": allow_all, "typed": typed_text, "plan": PLAN}
     try:
         os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)], dict(os.environ, BXZEX_RELOAD=json.dumps(state)))
     except OSError:
@@ -2356,6 +2601,19 @@ while True:
         if user=="/think":
             show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); continue
         if user=="/undo": undo(); continue
+        if user=="/plan": toggle_plan(); continue
+        if user=="/todos":
+            if TODOS: print(header("To-do")); show_todos()
+            else: print(f"{DIM}no to-do list yet · it makes one for jobs with a few steps{R}")
+            continue
+        if user=="/jobs": show_jobs(); continue
+        if user=="/context": show_context(); continue
+        if user.split()[0] in custom_commands():
+            name, _, rest = user.partition(" ")
+            text = read_text(custom_commands()[name], 20000)
+            text = re.sub(r"(?s)\A---.*?---\s*", "", text)
+            turn(text.replace("$ARGUMENTS", rest.strip()) if "$ARGUMENTS" in text else (text + ("\n\n" + rest if rest.strip() else "")))
+            continue
         if user=="/allow":
             allow_all = not allow_all
             print(f"{DIM}always allow {'on · commands and file changes run without asking, risky ones still ask' if allow_all else 'off · it asks first'}{R}"); continue
@@ -2377,7 +2635,7 @@ while True:
             except Exception as e: print(f"{DIM}couldn't run it: {e}{R}")
             save_chat(); continue
         if user in ("/reset", "/clear"):
-            history=[]; chat_file=None; allow_all=False; UNDO.clear(); refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); continue
+            history=[]; chat_file=None; allow_all=False; UNDO.clear(); TODOS.clear(); PLAN=False; refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); continue
         if user=="/history": open_chat(); continue
         if user=="/resume": open_chat(0); continue
         if user.startswith("/memory"): show_memory(user[7:]); continue
