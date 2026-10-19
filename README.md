@@ -105,7 +105,7 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/color` | Show the color themes and let you pick one. `/color red` jumps straight to it. |
 | `/skills` | List what it's been taught. |
 | `/memory` | Show what it remembers about you. `/memory clear` wipes it. |
-| `/history` | Your past chats. Pick one and carry on where you left off. |
+| `/history` | Your past chats. Move with the arrow keys and press Enter to carry on where you left off. |
 | `/resume` | Jump straight back into the last chat. |
 | `/btw` | Add a note without waiting for an answer, like `/btw the client wants it in Spanish`. |
 | `/fast` | Switch fast mode. It's on by default and answers right away. Turn it off when you want it to think a hard question through first. |
@@ -121,7 +121,7 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/reset` | Start a fresh conversation. `/clear` does the same. |
 | `exit` | Quit. |
 
-Type `/` and it shows you the commands as you go. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. The whole thing redraws itself when you resize the window.
+When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. The whole thing redraws itself when you resize the window.
 
 To show it an image, drag the file into the terminal window and add your question.
 

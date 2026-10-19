@@ -61,7 +61,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -167,7 +167,7 @@ def choose_color(arg=""):
         for i, n in enumerate(names, 1):
             ramp, hi = THEMES[n]
             print(f"  {DIM}{i}{R}  " + "".join(f"{c(x)}██" for x in ramp + [hi]) + f"{R}  {c(ramp[4])}{n}{R}")
-        try: pick = input(f"\n  {GOLD}❯{R} pick a number or name ").strip().lower()
+        try: pick = line_input(f"\n  {GOLD}❯{R} pick a number or name ").strip().lower()
         except (EOFError, KeyboardInterrupt): print(); return
     if pick.isdigit() and 1 <= int(pick) <= len(names): pick = names[int(pick) - 1]
     if pick not in THEMES:
@@ -456,12 +456,31 @@ def fetch_page(url):
     return clip(page_text(http_get(url)), PAGE_CHARS)
 
 ESC_PART = re.compile(r"\x1b(\[[0-9;<?]*|O)?$")                  # an escape sequence the read cut off before its last byte
-ESC_KEY  = re.compile(r"\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[0-9;?]*[A-Za-z~]|\x1bO[A-Za-z]")
+ESC_KEY  = re.compile(r"\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[0-9;?<=>]*[ -/]*[@-~]|\x1bO[A-Za-z]|\x1b[^\[O\x1b]")
+
+COOKED = None   # the terminal's own settings, put back on exit and for the few places that read a whole typed line
+
+def keys_mode():
+    """For the whole session: keys are not echoed by the terminal and arrive one at a time. Without this, anything typed
+    while the app is busy (starting up, waking the cloud card) is printed raw, like ^[[A for an arrow or ^H for delete."""
+    global COOKED
+    if not sys.stdin.isatty() or COOKED: return
+    try: COOKED = termios.tcgetattr(sys.stdin.fileno()); tty.setcbreak(sys.stdin.fileno(), termios.TCSANOW)
+    except termios.error: COOKED = None; return
+    atexit.register(lambda: termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, COOKED))
+
+def line_input(prompt=""):
+    """input() with the terminal's normal typing (echo, delete), then back to keys mode."""
+    if not COOKED: return input(prompt)
+    fd = sys.stdin.fileno(); keys = termios.tcgetattr(fd)
+    termios.tcsetattr(fd, termios.TCSADRAIN, COOKED)
+    try: return input(prompt)
+    finally: termios.tcsetattr(fd, termios.TCSADRAIN, keys)
 
 def finish_escapes(fd, buf):
     """A read can end halfway through a key's or a click's escape sequence (a trackpad scroll sends dozens at once).
     Wait a moment for the rest, so the cut-off half isn't taken for Esc on its own."""
-    while ESC_PART.search(buf) and select.select([fd], [], [], 0.05)[0]:
+    while ESC_PART.search(buf) and select.select([fd], [], [], 0.12)[0]:
         buf += os.read(fd, 64).decode("utf-8", "ignore")
     return buf
 
@@ -471,7 +490,7 @@ def read_choice(spots):
     if not sys.stdin.isatty(): return ""
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
     try:
-        tty.setcbreak(fd)
+        tty.setcbreak(fd, termios.TCSANOW)
         RAW.write("\033[6n"); RAW.flush()                         # where the buttons are: the terminal answers ESC[row;colR
         row, buf = 0, ""
         while select.select([fd], [], [], 0.3)[0]:
@@ -509,7 +528,7 @@ def read_key():
     if not sys.stdin.isatty(): return ""
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
     try:
-        tty.setcbreak(fd)
+        tty.setcbreak(fd, termios.TCSANOW)
         ch = os.read(fd, 1).decode("utf-8", "ignore")
         if ch == "\x1b":                               # swallow the rest of an escape sequence (arrows, etc.)
             while select.select([fd], [], [], 0.02)[0]: os.read(fd, 1)
@@ -1168,7 +1187,7 @@ class TypeAhead:
         if self.th or not sys.stdin.isatty(): return
         self.fd = sys.stdin.fileno()
         try:
-            self.saved = termios.tcgetattr(self.fd); tty.setcbreak(self.fd)   # no echo, keys arrive one by one, Ctrl-C still works
+            self.saved = termios.tcgetattr(self.fd); tty.setcbreak(self.fd, termios.TCSANOW)   # no echo, keys arrive one by one, Ctrl-C still works
         except termios.error:
             self.saved = None; return
         self.stop_ev.clear()
@@ -1180,9 +1199,9 @@ class TypeAhead:
             if resized: resized = False; box.draw(self.buf, len(self.buf))
             if not ready: continue
             raw = finish_escapes(self.fd, os.read(self.fd, 64).decode("utf-8", "ignore"))
-            if re.search(r"\x1b(?![\[O])", raw + " "):          # Esc on its own (not an arrow key): stop, the same as ctrl-c
+            if "\x1b" in ESC_KEY.sub("", raw):                  # Esc on its own (not an arrow or other key): stop, the same as ctrl-c
                 os.kill(os.getpid(), signal.SIGINT); continue
-            got = re.sub(r"\x1b\[[0-9;<?]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b", "", raw)   # arrows and other keys, not text
+            got = ESC_KEY.sub("", raw).replace("\x1b", "")       # arrows and other keys, not text
             for ch in got:
                 if ch in "\r\n":
                     if self.buf.strip(): self.notes.append(self.buf.strip())
@@ -1690,7 +1709,7 @@ def listen():
     sys.stdout.write("\033[?25l")
     wait = Waiting("Listening, press enter when done")
     try:
-        input()
+        line_input()
         RAW.write("\033[1A")          # back onto the loader line the Enter moved us off
     except (EOFError, KeyboardInterrupt):
         wait.stop(); rec.kill(); os.unlink(wav); sys.stdout.write("\033[?25h"); print(f"{DIM}cancelled{R}"); return ""
@@ -1767,7 +1786,11 @@ def full_update():
     script = tempfile.NamedTemporaryFile(suffix=".sh", delete=False).name
     try:
         with open(script, "w") as f: f.write(fetch("install.sh"))
-        subprocess.run(["bash", script])
+        fd = sys.stdin.fileno(); keys = termios.tcgetattr(fd) if COOKED else None
+        if keys: termios.tcsetattr(fd, termios.TCSADRAIN, COOKED)     # the installer asks questions: normal typing for it
+        try: subprocess.run(["bash", script])
+        finally:
+            if keys: termios.tcsetattr(fd, termios.TCSADRAIN, keys)
     finally:
         os.unlink(script)
     print(f"{DIM}quit and open bxzex-ai again to use the new version{R}")
@@ -1819,6 +1842,54 @@ def list_chats():
         out.append((os.path.join(CHATS, f), f[:16].replace("_", " ").replace("-", ":", 3).replace(":", "-", 2), d.get("title", ""), d.get("messages", [])))
     return out
 
+def menu(rows, at=0, hint="↑↓ to move · enter to pick · esc to cancel"):
+    """A list you move through with the arrow keys and pick from with Enter. Returns the row's number, or None for Esc.
+    rows are (label, detail). Numbers jump straight to a row."""
+    if not (sys.stdin.isatty() and RAW.isatty()) or not rows: return None
+    fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
+    shown = len(rows) + 1
+    def draw(first=False):
+        w = W(); out = "" if first else f"\033[{shown}A"
+        for i, (label, detail) in enumerate(rows):
+            room = max(0, w - len(label) - 6)
+            tail = f"  {DIM}{detail[:room]}{R}" if detail and room > 8 else ""
+            out += f"\r\033[K  {GOLD}❯ {BOLD}{label}{R}{tail}\n" if i == at else f"\r\033[K    {label}{tail}\n"
+        RAW.write(out + f"\r\033[K  {DIM}{hint[:w - 2]}{R}\n"); RAW.flush()
+    try:
+        tty.setcbreak(fd, termios.TCSANOW); RAW.write("\033[?25l"); draw(True)
+        while True:
+            buf = finish_escapes(fd, os.read(fd, 64).decode("utf-8", "ignore"))
+            while buf:
+                m = ESC_KEY.match(buf)
+                key = m.group(0) if m else buf[0]; buf = buf[len(key):]
+                if key in ("\x1b[A", "\x1bOA", "k"): at = (at - 1) % len(rows)
+                elif key in ("\x1b[B", "\x1bOB", "j", "\t"): at = (at + 1) % len(rows)
+                elif key in ("\r", "\n"): return at
+                elif key in ("\x1b", "\x03", "\x04", "q"): return None
+                elif key.isdigit() and 1 <= int(key) <= len(rows): at = int(key) - 1; draw(); return at
+            draw()
+    finally:
+        RAW.write(f"\033[{shown}A\r\033[J\033[?25h"); RAW.flush()     # the list goes away; what was picked is printed after
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+def chat_rows(chats):
+    return [(when, f"{title}  · {len(msgs)} msgs") for _, when, title, msgs in chats]
+
+def start_menu():
+    """On opening: continue the last chat, start a new one, or pick an earlier one."""
+    chats = list_chats()
+    if not chats: return
+    if not sys.stdin.isatty(): open_chat(0); return
+    _, when, title, msgs = chats[0]
+    print(f"{GOLD}●{R} {BOLD}Where do you want to start?{R}")
+    rows = [("Continue from last save", f"{when} · {title}"), ("New chat", "start fresh, the old one stays in /history")]
+    if len(chats) > 1: rows.append(("Earlier chats…", f"{len(chats) - 1} more"))
+    pick = menu(rows, hint="↑↓ to move · enter to pick · esc for a new chat")
+    RAW.write("\033[1A\r\033[K"); RAW.flush()                        # the question goes too
+    if pick == 0: open_chat(0)
+    elif pick == 2: open_chat()
+    else: print(f"{GOLD}●{R} {BOLD}New chat{R} {DIM}· /history has the earlier ones{R}")
+
 def open_chat(pick=None):
     """Continue an earlier conversation. pick=0 takes the most recent without asking."""
     global history, chat_file
@@ -1828,12 +1899,8 @@ def open_chat(pick=None):
         return
     if pick is None:
         print(header("History"))
-        for i, (_, when, title, msgs) in enumerate(chats, 1):
-            print(f"  {GOLD}{i:>2}{R}  {DIM}{when}{R}  {title[:W() - 34]}  {DIM}{len(msgs)} msgs{R}")
-        try: a = input(f"\n  {GOLD}❯{R} number to continue, Enter to cancel ").strip()
-        except (EOFError, KeyboardInterrupt): print(); return
-        if not (a.isdigit() and 1 <= int(a) <= len(chats)): return
-        pick = int(a) - 1
+        pick = menu(chat_rows(chats))
+        if pick is None: print(f"  {DIM}cancelled{R}"); return
     path, when, title, msgs = chats[pick]
     global last_saved
     history = msgs; chat_file = path; last_saved = chat_data()      # just opened: nothing to save until it changes
@@ -1938,13 +2005,13 @@ def ask(prefill=""):
         return line.strip()
     box.pin()
     if not box.on:                       # window too small for the box: plain prompt
-        return input(f"\n{GOLD}❯{R} ").strip()
+        return line_input(f"\n{GOLD}❯{R} ").strip()
     box.fit()                            # the window may have been resized while it was busy
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
     buf = list(prefill); pos = len(buf); at = len(past); draft = ""; pasting = False
     dec = codecs.getincrementaldecoder("utf-8")("ignore")
     print()
-    tty.setcbreak(fd)
+    tty.setcbreak(fd, termios.TCSANOW)
     RAW.write("\0337\033[?2004h\033[?25h")   # remember where the conversation left off; bracketed paste on
 
     def leave():
@@ -1973,12 +2040,23 @@ def ask(prefill=""):
                     rest = data[i:]
                     if rest.startswith("\x1b[200~"): pasting = True; i += 6; continue
                     if rest.startswith("\x1b[201~"): pasting = False; i += 6; continue
-                    m = re.match(r"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]", rest)
-                    if not m:                          # a lone Esc clears the line
-                        if len(rest) == 1 or rest[1] not in "[O": buf = []; pos = 0
+                    m = ESC_KEY.match(rest)
+                    if not m:                          # a lone Esc clears the line; a broken code is just dropped
+                        if len(rest) == 1: buf = []; pos = 0
                         i += 1; continue
                     key = m.group(0); i += len(key)
-                    if key in ("\x1b[D", "\x1bOD"): pos = max(0, pos - 1)
+                    if key in ("\x1bb", "\x1b[1;3D", "\x1b[1;5D", "\x1b[1;9D"):      # a word left
+                        while pos and buf[pos - 1] == " ": pos -= 1
+                        while pos and buf[pos - 1] != " ": pos -= 1
+                    elif key in ("\x1bf", "\x1b[1;3C", "\x1b[1;5C", "\x1b[1;9C"):    # a word right
+                        while pos < len(buf) and buf[pos] == " ": pos += 1
+                        while pos < len(buf) and buf[pos] != " ": pos += 1
+                    elif key == "\x1b\x7f":                                            # option-delete: the word before
+                        j = pos
+                        while j and buf[j - 1] == " ": j -= 1
+                        while j and buf[j - 1] != " ": j -= 1
+                        del buf[j:pos]; pos = j
+                    elif key in ("\x1b[D", "\x1bOD"): pos = max(0, pos - 1)
                     elif key in ("\x1b[C", "\x1bOC"): pos = min(len(buf), pos + 1)
                     elif key in ("\x1b[H", "\x1bOH", "\x1b[1~"): pos = 0
                     elif key in ("\x1b[F", "\x1bOF", "\x1b[4~"): pos = len(buf)
@@ -2063,6 +2141,7 @@ if len(sys.argv) > 1:
     sys.exit(0)
 
 # ---- interactive ----
+keys_mode()
 splash = splash_fits()
 if splash:
     began = time.time()
@@ -2078,7 +2157,7 @@ if not up: sys.exit(1)
 banner()
 refresh_system()
 warm_up()
-if load_config().get("continue", True): open_chat(0)   # it remembers: open where the last chat left off (/reset starts fresh)
+if load_config().get("continue", True): start_menu()   # continue the last chat, start a new one, or pick an earlier one
 threading.Thread(target=autosave, daemon=True).start()
 atexit.register(save_chat)
 if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version in the background each time it starts
