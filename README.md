@@ -31,7 +31,7 @@ If your machine can run it, this app is still the one with no limits and no bill
 - **Listens.** Type `/v`, say what you want, and your words show up at the prompt ready to send.
 - **Remembers you.** Tell it something worth keeping and it's still there next week. It all sits in a plain text file you can read, edit or wipe.
 - **Connects to your apps.** Gmail, Calendar, Slack, GitHub, Notion, Drive, Sheets, Instagram, Stripe and 1,600 more, through Composio over MCP. Add it once with `/mcp add`, sign in to an app when it asks, and it can read and act there (it asks before anything that sends, posts or changes). Any other MCP server works the same way.
-- **Skills.** Teach it with your own skill files and it pulls in the right one when the job calls for it.
+- **Skills.** Over 100 of them, from design and web apps to games, mobile apps, video and sales. They come from bxzex.com as it needs them, so they're always the newest, and you can add your own.
 - **Looks how you want.** Nine color themes. It starts in white fading to blue, like the logo. Pick another during install or switch any time with `/color`.
 
 ## Check it before you run it
@@ -174,7 +174,7 @@ Everything it knows about itself lives in four places inside `~/.bxzex-ai`, all 
 - **`chats/`** keeps every conversation, so nothing is lost when you close the window.
 - **`skills/`** holds one file per skill: a markdown file with a name and description at the top and what it should know below.
 
-The skills are private to bxzex's own installs and aren't in this repo. Write your own: copy the format of any markdown file with `name:` and `description:` at the top into `~/.bxzex-ai/skills/`, and it uses it.
+The bxzex skills are served from bxzex.com, one at a time as it uses them, and aren't in this repo. `/skills` lists them. Write your own: copy the format of any markdown file with `name:` and `description:` at the top into `~/.bxzex-ai/skills/`, and it uses it.
 
 ## Remove it
 

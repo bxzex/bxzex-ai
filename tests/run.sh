@@ -3,6 +3,7 @@
 # Nothing touches ~/.bxzex-ai or a real model.   bash tests/run.sh   (about two minutes)
 set -u
 export BXZEX_NO_TICKER=1   # never touch the real system timer or send notifications
+export BXZEX_SKILLS_URL=http://127.0.0.1:9/skills   # never ask bxzex.com from the tests
 cd "$(dirname "$0")/.."
 APP="$PWD/bxzex-ai"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT

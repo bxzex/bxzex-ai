@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.8.3"
+VERSION = "1.8.4"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2205,23 +2205,65 @@ def show_memory(arg=""):
 
 SKILLS_DIR = f"{APP_HOME}/skills"   # one .md per skill; drop your own in to teach it something new
 
+SKILLS_URL = os.environ.get("BXZEX_SKILLS_URL", "https://bxzex.com/api/public/ai/skills")
+SKILL_INDEX = f"{APP_HOME}/skills-index.json"   # names and descriptions of the bxzex skills, never their text
+ONLINE = {}                                      # skill text fetched from bxzex.com this session, kept in memory only
+
+def skills_api(path=""):
+    """The bxzex skills live on bxzex.com. The app asks for the list, and for one skill's text when it uses it."""
+    url = SKILLS_URL + path; head = f"x-bxzex-ai: bxzex-ai/{VERSION}"
+    if shutil.which("curl"):
+        r = subprocess.run(["curl", "-fsSL", "--max-time", "20", "-H", head, url], capture_output=True, stdin=subprocess.DEVNULL)
+        if r.returncode == 0: return json.loads(r.stdout)
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"x-bxzex-ai": f"bxzex-ai/{VERSION}"}), timeout=20) as r:
+        return json.load(r)
+
+def refresh_skills(force=False):
+    """Fetch the list of bxzex skills now and then. Old copies of them saved by earlier versions are cleared out:
+    they come from bxzex.com now, always the newest."""
+    try:
+        if not force and time.time() - os.path.getmtime(SKILL_INDEX) < 6 * 3600: return False
+    except OSError: pass
+    try: got = [(s["name"], s.get("description", "")) for s in skills_api()["skills"]]
+    except Exception: return False
+    if not got: return False
+    os.makedirs(APP_HOME, exist_ok=True)
+    with open(SKILL_INDEX + ".tmp", "w") as f: json.dump(got, f)
+    os.replace(SKILL_INDEX + ".tmp", SKILL_INDEX)
+    for name, _ in got:
+        try: os.remove(os.path.join(SKILLS_DIR, f"{name}.md"))
+        except OSError: pass
+    return True
+
 def list_skills():
-    """[(name, description, path)] from the frontmatter of each skill file."""
+    """[(name, description, path)]: your own skill files first, then the bxzex skills (path None: they're fetched when used)."""
     found = []
     try: files = sorted(f for f in os.listdir(SKILLS_DIR) if f.endswith(".md"))
-    except OSError: return found
+    except OSError: files = []
+    other = ("linux-automation" if MAC else "mac-automation")      # the one for the other system
     for f in files:
-        if f == ("linux-automation.md" if MAC else "mac-automation.md"): continue     # the one for the other system
+        if f[:-3] == other: continue
         head = read_text(os.path.join(SKILLS_DIR, f), 100000)[:600]
         name = re.search(r"(?m)^name:\s*(.+)$", head); desc = re.search(r"(?m)^description:\s*(.+)$", head)
         found.append((name.group(1).strip() if name else f[:-3], desc.group(1).strip() if desc else "", os.path.join(SKILLS_DIR, f)))
+    mine = {n for n, _, _ in found}
+    try:
+        with open(SKILL_INDEX) as f: index = json.load(f)
+    except (OSError, ValueError): index = []
+    found += [(n, d, None) for n, d in index if n not in mine and n != other]
     return found
 
 def use_skill(name):
+    name = str(name).strip()
     for n, _, path in list_skills():
-        if n == name.strip():
+        if n != name: continue
+        if path:
             with open(path, "r", errors="replace") as f: body = f.read()
             return clip(re.sub(r"(?s)\A---.*?---\s*", "", body), PAGE_CHARS)
+        if name not in ONLINE:
+            try: ONLINE[name] = skills_api("/" + urllib.parse.quote(name))["body"]
+            except Exception as e: return f"error: couldn't get the {name} skill from bxzex.com right now ({getattr(e, 'reason', e)}). Carry on without it."
+        return clip(ONLINE[name], PAGE_CHARS)
     return f"no skill named {name}. Available: {', '.join(n for n, _, _ in list_skills())}"
 
 def show_skills():
@@ -2232,7 +2274,7 @@ def show_skills():
         room = W() - wide - 5
         print(f"  {GOLD}{n:<{wide}}{R}  {DIM}{d if len(d) <= room else d[:room - 1] + '…'}{R}")
     if not skills: print(f"  {DIM}none installed{R}")
-    print(f"  {DIM}It picks these up on its own. Add your own .md files in {SKILLS_DIR.replace(HOME, '~')}{R}")
+    print(f"  {DIM}It picks these up on its own. The bxzex skills come from bxzex.com when it uses one. Add your own .md files in {SKILLS_DIR.replace(HOME, '~')}{R}")
 
 SYSTEM = ""
 def refresh_system():
@@ -3109,24 +3151,6 @@ def check_update(quiet=True):
     finally:
         wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
 
-def private_skills():
-    """The skills are private: they live in a private repo, and only an install whose config.json names it ("skills_repo")
-    and whose GitHub login (gh) can read it gets them. Every other install keeps only the skills its owner wrote."""
-    repo = load_config().get("skills_repo")
-    if not repo or not shutil.which("gh"): return {}
-    import io, tarfile
-    try:
-        r = subprocess.run(["gh", "api", f"repos/{repo}/tarball/main"], capture_output=True, timeout=180, stdin=subprocess.DEVNULL)
-        if r.returncode != 0 or not r.stdout: return {}
-        got = {}
-        with tarfile.open(fileobj=io.BytesIO(r.stdout)) as t:
-            for m in t.getmembers():
-                if m.isfile() and re.search(r"/skills/[a-z0-9-]+\.md$", m.name):
-                    got[os.path.basename(m.name)[:-3]] = t.extractfile(m).read().decode("utf-8", "replace")
-        return got
-    except Exception:
-        return {}
-
 def get_update(quiet, wait):
     global update_note
     def say(text):
@@ -3145,14 +3169,10 @@ def get_update(quiet, wait):
             compile(app, "bxzex-ai", "exec")                   # never install something that doesn't even parse
             if f'VERSION = "{latest[0]}"' not in app or not app.rstrip().endswith(END_MARK):   # cut off, or the download servers still hold the old copy
                 say(f"v{latest[0]} is on its way but hasn't reached the download servers yet. Try /update again in a few minutes"); return False
-            skills = private_skills()
-        if not server.startswith("#!") or any(not v.startswith("---") for v in skills.values()):
+        if not server.startswith("#!"):
             say("part of the download came back broken, nothing was changed. Try /update again"); return False
         if apps.startswith("# Apps"):
             with open(f"{APP_HOME}/connectors.txt", "w") as f: f.write(apps)
-        os.makedirs(SKILLS_DIR, exist_ok=True)
-        for n, text in skills.items():
-            with open(os.path.join(SKILLS_DIR, f"{n}.md"), "w") as f: f.write(text)
         for name, text in (("bxzex-server", server), ("bxzex-ai", app)):
             tmp = os.path.join(here, f".{name}.new")
             with open(tmp, "w") as f: f.write(text)
@@ -3695,6 +3715,9 @@ if RELOAD:
 else:
     banner()
 refresh_system()
+def _skills():
+    if refresh_skills() and not history: refresh_system()      # a new list joins before the first message
+threading.Thread(target=_skills, daemon=True).start()
 if load_config().get("mcp"):                    # connected apps: their tools join in a second or two
     def _mcp():
         connect_mcp()
