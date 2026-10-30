@@ -62,7 +62,7 @@ You shouldn't paste a command from the internet into your terminal on trust, min
 
 **It picks the build that fits your computer.** It's one model in two builds. With 24GB of memory, or a graphics card with 20GB or more, you get the full one. With 16GB of memory, or a 12GB or 16GB graphics card, you get the lighter one: the same model with the same skills, tools, vision, voice and images, packed smaller so it fits. It's a little less sharp on hard questions and remembers about half as much conversation at once. The bar at the bottom says `lite` when that's the one you have. To choose yourself, put `BXZEX_SIZE=full` or `BXZEX_SIZE=lite` in front of `bash` on the install line.
 
-It will not run on a computer with 8GB of memory. The same model can't be made that small and still be worth using. The installer checks and stops if there isn't enough. On a 16GB computer, close your other big apps while it's running.
+It will not run on a computer with 8GB of memory. The same model can't be made that small and still be worth using. On a computer like that, the installer offers to run it on a cloud card in your own Modal account instead (see below), and only downloads the small parts. On a 16GB computer, close your other big apps while it's running.
 
 Everything works on all three: chat, web search, vision, image generation, voice input, skills, memory, chat history and the shell tools. Linux and Windows support is new, so tell me if something breaks. Image generation on Linux and Windows needs a recent system (Ubuntu 24.04 or similar) and a 64-bit Intel or AMD processor. It uses the graphics card on Linux. Inside Windows it runs on the processor for now, so a picture takes several minutes there.
 
@@ -83,6 +83,28 @@ bxzex-ai
 ```
 
 The first launch takes about a minute while the model loads. After that it stays loaded and opens right away.
+
+## Run it on a cloud card
+
+Your computer too small, or just want it faster? Type `/cloud` and it runs the same model on a graphics card in your own [Modal](https://modal.com) account. Replies come many times faster than on a laptop. Your chats, memory and files stay on your computer; only the model's work happens on the card.
+
+`/cloud` does the whole setup for you:
+
+1. It installs Modal's command line tool if you don't have it.
+2. It opens Modal's login page in your browser. New to Modal? The same page makes you an account. Add a card in Modal's billing settings so it keeps running once any free credit runs out.
+3. You pick the graphics card. The H100 is the fastest. The A100 and L40S cost less per hour and are a bit slower.
+4. It makes a private key only your computer has, copies the model into your Modal account (about 23GB, only the first time, it goes from Modal's side so your internet doesn't matter), puts it online and starts it once to check it works.
+
+That takes about five minutes. After that you use it exactly as before.
+
+Modal bills your account by the second while the card is awake. It goes to sleep after 5 minutes without a message, and the next message wakes it in about two minutes. `/cost` shows what it has cost, and `/warm 9-18` keeps it awake during your hours so replies start right away. Prices are on [modal.com/pricing](https://modal.com/pricing).
+
+- `/cloud` shows which card you're on.
+- `/cloud off` runs it on your computer again, and `/cloud on` goes back to the card.
+- `/cloud again` sets it up from the start, for example to switch cards.
+- `/cloud login` uses a different Modal account.
+
+If you'd rather do it by hand, [cloud.py](cloud.py) is the whole setup in one file, with the steps at the top.
 
 ## Updates
 
@@ -128,6 +150,7 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/phone` | Use it from your phone through Telegram: it walks you through making a bot (one minute), then you can write to it from anywhere and it works on your computer. Questions and OKs come as buttons, scheduled reports arrive there, and only your Telegram account can use it. `/phone test`, `/phone off`. |
 | `/imessage` | Mac only: text your own number from your iPhone and it answers in that chat from your Mac, with replies starting "BXZEX AI:". Reply yes or no to OK an action. It only reads your chat with yourself, and texting anyone else always asks first and is capped at 20 an hour. Needs Full Disk Access for Python, which it walks you through. `/imessage off`. |
 | `/password` | A password your phone has to send before Telegram or iMessage will do anything. It stays unlocked until 12 hours after your last message, `/lock` from the phone locks it at once, and too many wrong tries locks it for an hour and tells your computer. Kept only as a hash. `/password off` removes it. |
+| `/cloud` | Run the model on a graphics card in your own Modal account. It walks you through it, see [Run it on a cloud card](#run-it-on-a-cloud-card). `/cloud off` runs it on your computer again. |
 | `/cost` | What the cloud card has cost today, this month and last month, from Modal's own billing. |
 | `/export` | Save this chat as a Markdown document in the folder you're in. `/export ~/Desktop` saves it there. |
 | `/commit` | It looks at your changes and commits them with a message in your repo's style. `/commit and push` pushes too. |

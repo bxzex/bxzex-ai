@@ -25,9 +25,10 @@ die()  { printf '\033[?25h\n  %s✗ %s%s\n' "$A" "$*" "$R" >&2; exit 1; }
 trap 'printf "\033[?25h"' EXIT
 
 # curl | bash leaves stdin as the script itself, so questions go to the terminal directly
+has_tty() { { : < /dev/tty; } 2>/dev/null; }   # /dev/tty can exist and still not open (no terminal attached)
 ask() {   # prompt -> reply on stdout, empty when there is no terminal or BXZEX_YES=1
   [ "${BXZEX_YES:-}" = 1 ] && return 0
-  [ -r /dev/tty ] || return 0
+  has_tty || return 0
   printf '%s' "$1" > /dev/tty
   local reply; IFS= read -r reply < /dev/tty || true
   printf '%s' "$reply"
@@ -140,6 +141,7 @@ fi
 
 # The same model in two builds. Full wants about 17GB to itself; lite is packed smaller and wants about 12GB.
 # A graphics card needs the whole model in its own memory, so it decides first. Set BXZEX_SIZE=full or lite to choose.
+# Too small for either: the same model on a graphics card in their own Modal account (BXZEX_SIZE=cloud).
 size="${BXZEX_SIZE:-}"
 if [ -z "$size" ]; then
   if   [ -f "$BXZEX_HOME/models/bxzex-model.gguf" ]; then size=full      # already installed: keep what they have
@@ -149,18 +151,24 @@ if [ -z "$size" ]; then
   elif [ "$ram" -ge 23 ];  then size=full
   elif [ "$ram" -ge 15 ];  then size=lite
   elif [ "${BXZEX_YES:-}" = 1 ]; then size=lite
-  else die "This computer has ${ram}GB of memory. Even the lighter build of the model needs about 12GB to itself, so it can't run here. Loading it anyway could freeze the computer."
+  else
+    note "This computer has ${ram}GB of memory. Even the lighter build of the model needs about 12GB to itself, so it can't run here."
+    note "It can run the same model on a graphics card in your own Modal account (modal.com) instead. Modal bills you while the card is on."
+    case "$(ask "  Set it up that way? [Y/n] ")" in n|N|no) die "stopped. Nothing big was downloaded." ;; esac
+    size=cloud
   fi
 fi
-case "$size" in full|lite) ;; *) die "BXZEX_SIZE is full or lite." ;; esac
+case "$size" in full|lite|cloud) ;; *) die "BXZEX_SIZE is full, lite or cloud." ;; esac
 # a graphics card too small to hold the whole model would fail to load it, so those run on the processor
 auto_device=""
-fits=20; [ "$size" = lite ] && fits=11
+fits=20; [ "$size" = lite ] && fits=11; [ "$size" = cloud ] && fits=0
 if [ "$vram" -gt 0 ] && [ "$vram" -lt "$fits" ]; then
   auto_device=cpu
   note "The graphics card has ${vram}GB, which is not enough to hold the model, so it will run on the processor."
 fi
-if [ "$size" = lite ]; then
+if [ "$size" = cloud ]; then
+  note "The model will run on your own cloud card, so it isn't downloaded here. At the end it walks you through setting the card up."
+elif [ "$size" = lite ]; then
   note "This computer gets the lighter build: the same model, packed smaller so it fits. A little less sharp, everything else the same."
 elif [ "$ram" -lt 23 ] && [ "$vram" -lt 20 ] && [ ! -f "$BXZEX_HOME/models/bxzex-model.gguf" ]; then
   note "The full model wants about 17GB to itself and this computer has ${ram}GB, so it may be very slow, freeze the computer or fail to load."
@@ -172,9 +180,12 @@ if [ "$OS" = Darwin ]; then
   command -v brew >/dev/null || die "Homebrew is required. Install it from https://brew.sh and run this again."
   for pair in "llama.cpp:chat engine" "whisper-cpp:voice engine" "ffmpeg:audio tools"; do
     pkg="${pair%%:*}"; label="${pair#*:}"
+    [ "$size" = cloud ] && [ "$pkg" = llama.cpp ] && continue      # the model runs on the cloud card
     if brew list "$pkg" >/dev/null 2>&1; then ok "$label"
     else HOMEBREW_NO_AUTO_UPDATE=1 drive "$label" brew install "$pkg"; fi
   done
+elif [ "$size" = cloud ]; then
+  case "$ARCH" in x86_64) cpu=x64 ;; *) cpu=arm64 ;; esac      # the model runs on the cloud card: no chat engine here
 else
   # Linux: a ready-built engine matched to the graphics card, kept inside our own folder
   eng="$BXZEX_HOME/engine"; tag="${BXZEX_ENGINE_TAG:-b11401}"
@@ -211,18 +222,25 @@ fi
 
 # ---- the model ----
 m="$BXZEX_HOME/models"
-if [ "$size" = lite ]; then file="$m/bxzex-lite.gguf";  pack=IQ2_XS; gb=10; need=19
-else                         file="$m/bxzex-model.gguf"; pack=Q3_K_M; gb=15; need=24; fi
-[ "$OS" = Darwin ] || need=$((need + 1))
-if [ ! -f "$file" ]; then
-  free="$(df -Pk "$HOME" | awk 'NR==2 {print int($4 / 1048576)}')"
-  [ "$free" -ge "$need" ] || [ -n "${BXZEX_MODEL_URL:-}" ] || die "Not enough disk space: the downloads need about $((need - 1))GB and ${free}GB is free."
-  note "Downloading the AI model. It is about ${gb}GB, so this is the long part."
+if [ "$size" != cloud ]; then
+  if [ "$size" = lite ]; then file="$m/bxzex-lite.gguf";  pack=IQ2_XS; gb=10; need=19
+  else                         file="$m/bxzex-model.gguf"; pack=Q3_K_M; gb=15; need=24; fi
+  [ "$OS" = Darwin ] || need=$((need + 1))
+  if [ ! -f "$file" ]; then
+    free="$(df -Pk "$HOME" | awk 'NR==2 {print int($4 / 1048576)}')"
+    [ "$free" -ge "$need" ] || [ -n "${BXZEX_MODEL_URL:-}" ] || die "Not enough disk space: the downloads need about $((need - 1))GB and ${free}GB is free."
+    note "Downloading the AI model. It is about ${gb}GB, so this is the long part."
+  fi
+  download "${BXZEX_MODEL_URL:-$WEIGHTS/orcarouter_Qwen3.8-27B-Uncensored-$pack.gguf}" "$file"  "AI model"
+  [ -n "${BXZEX_MODEL_URL:-}" ] || download "$WEIGHTS/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf"  "$m/bxzex-vision.gguf" "vision"
 fi
-download "${BXZEX_MODEL_URL:-$WEIGHTS/orcarouter_Qwen3.8-27B-Uncensored-$pack.gguf}" "$file"  "AI model"
-[ -n "${BXZEX_MODEL_URL:-}" ] || download "$WEIGHTS/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf"  "$m/bxzex-vision.gguf" "vision"
 if [ "$OS" = Darwin ]; then
   download "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" "$m/bxzex-voice.bin" "voice"
+fi
+
+images="${BXZEX_IMAGES:-1}"
+if [ "$size" = cloud ] && [ "$ram" -lt 15 ] && [ "$images" != 0 ]; then
+  images=0; note "Image generation needs about 8GB to itself, more than this computer can spare, so it was skipped."
 fi
 
 # ---- Linux: voice and image generation (set BXZEX_VOICE=0 or BXZEX_IMAGES=0 to skip) ----
@@ -252,7 +270,7 @@ if [ "$OS" = Linux ] && [ -z "${BXZEX_SKIP_EXTRAS:-}" ]; then
     if [ -n "$WSL" ]; then note "On Windows, /v also needs the microphone switched on for desktop apps (Settings, Privacy, Microphone)."
     fi
   fi
-  if [ "${BXZEX_IMAGES:-1}" != 0 ] && [ "$cpu" = x64 ]; then
+  if [ "$images" != 0 ] && [ "$cpu" = x64 ]; then
     img="$BXZEX_HOME/imgengine"; itag="master-929-3f8527a"; ibuild="sd-master-3f8527a-bin-Linux-Ubuntu-24.04-x86_64"
     if has_vulkan; then ibuild="$ibuild-vulkan"; fi
     if [ -f "$img/.$ibuild" ]; then ok "image engine"
@@ -272,13 +290,13 @@ if [ "$OS" = Linux ] && [ -z "${BXZEX_SKIP_EXTRAS:-}" ]; then
       download "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors" "$m/bxzex-paint/vae.safetensors" "image finishing"
       download "https://github.com/bxzex/bxzex-ai/releases/download/assets/bxzex-image-style.safetensors" "$BXZEX_HOME/loras/bxzex-image-style.safetensors" "image style"
     fi
-  elif [ "${BXZEX_IMAGES:-1}" != 0 ]; then
+  elif [ "$images" != 0 ]; then
     note "Image generation is not available for ARM Linux yet. Everything else works here."
   fi
 fi
 
 # ---- image generation (Mac only; set BXZEX_IMAGES=0 to skip) ----
-if [ "$OS" = Darwin ] && [ "${BXZEX_IMAGES:-1}" != 0 ]; then
+if [ "$OS" = Darwin ] && [ "$images" != 0 ]; then
   brew list uv >/dev/null 2>&1 || command -v uv >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 drive "image tools" brew install uv
   if [ -x "$HOME/.local/bin/mflux-generate-z-image-turbo" ] || command -v mflux-generate-z-image-turbo >/dev/null; then ok "image engine"
   else drive "image engine" uv tool install --python 3.12 mflux; fi
@@ -313,6 +331,11 @@ if sys.argv[3] in ("cpu", "gpu"): d["device"] = sys.argv[3]
 elif sys.argv[5] and "device" not in d: d["device"] = sys.argv[5]   # card too small for the model; /device can still change it      # installed with BXZEX_DEVICE=cpu: keep it on the processor
 json.dump(d, open(p, "w"))
 PART
+
+if [ "$size" = cloud ] && [ "${BXZEX_YES:-}" != 1 ] && has_tty; then
+  printf '\n'
+  python3 "$BXZEX_HOME/bin/bxzex-ai" --cloud < /dev/tty || note "The cloud card isn't set up yet. Opening bxzex-ai picks it up again."
+fi
 
 python3 "$BXZEX_HOME/bin/bxzex-ai" --car || true
 printf '\n  %s%sREADY.%s Open a new terminal window and type: %sbxzex-ai%s\n' "$B" "$A" "$R" "$B" "$R"

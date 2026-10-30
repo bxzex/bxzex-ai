@@ -66,7 +66,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -361,6 +361,8 @@ def ensure_server(block=True):
         if os.path.exists(PAINTING) and not painting(): os.remove(PAINTING)   # a leftover lock from a crash
     except OSError: pass
     if REMOTE: return True if awake() else wake_remote(block)
+    if load_config().get("size") == "cloud":
+        print(f"{DIM}this install runs the model on your own cloud card, which isn't set up yet · type /cloud{R}"); return False
     if loaded_model(): return True
     if os.path.exists(f"{APP_HOME}/painting.lock") and painting():     # another window is making an image
         wait = Waiting("Waiting for an image to finish")
@@ -2332,11 +2334,11 @@ def setup_phone(arg=""):
 def show_cost(arg=""):
     conf = load_config().get("cost") or {}
     if not REMOTE: print(f"{DIM}this computer runs the model itself, so there's no cloud bill{R}"); return
-    if not shutil.which("modal") or not conf.get("app"):
+    if not modal_bin() or not conf.get("app"):
         print(f"{DIM}/cost needs the modal command and, in {CONFIG.replace(HOME, '~')}: \"cost\": {{\"app\": \"<your Modal app>\", \"profile\": \"<your Modal profile>\"}}{R}"); return
     env = dict(os.environ, **({"MODAL_PROFILE": conf["profile"]} if conf.get("profile") else {}))
     def modal(*a):
-        r = subprocess.run(["modal", "billing", *a, "--json"], capture_output=True, text=True, env=env, timeout=90, stdin=subprocess.DEVNULL)
+        r = subprocess.run([modal_bin(), "billing", *a, "--json"], capture_output=True, text=True, env=env, timeout=90, stdin=subprocess.DEVNULL)
         return json.loads(r.stdout)
     sys.stdout.write("\033[?25l"); wait = Waiting("Asking Modal for the bill")
     try:
@@ -2359,6 +2361,152 @@ def show_cost(arg=""):
     w = load_config().get("warm") or {}
     if w: print(f"  {DIM}/warm is on {w.get('from')}:00 to {w.get('to')}:00, which adds about ${4 * (w.get('to', 0) - w.get('from', 0))} a day{R}")
     print(f"  {DIM}whole Modal account this month: ${float(summary.get('metered_cost', 0)):.2f} used, ${float(summary.get('billed_cost', 0)):.2f} billed after credits{R}")
+
+# ---- /cloud: the model on a graphics card in their own Modal account ----
+CLOUD_APP = "bxzex-ai-gpu"
+CLOUD_CARDS = [("H100", "fastest · the one to pick if unsure"), ("A100-80GB", "a bit slower, costs less per hour"),
+               ("L40S", "slowest, costs the least per hour, holds a shorter chat")]
+
+def modal_bin():
+    """Modal's command line tool, also when ~/.local/bin isn't on the PATH."""
+    mine = f"{HOME}/.local/bin/modal"
+    return os.environ.get("BXZEX_MODAL") or shutil.which("modal") or (mine if os.access(mine, os.X_OK) else "")
+
+def quietly(label, cmd, timeout=1800, env=None, cwd=None, data=None):
+    """One setup step with the loader running. Returns (worked, what it printed)."""
+    sys.stdout.write("\033[?25l"); wait = Waiting(label)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout, env=env, cwd=cwd, start_new_session=True,
+                           **({"input": data} if data else {"stdin": subprocess.DEVNULL}))
+        return p.returncode == 0, p.stdout + p.stderr
+    except subprocess.TimeoutExpired: return False, "it took too long"
+    except OSError as e: return False, str(e)
+    finally: wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+
+def modal_profiles(modal):
+    try:
+        p = subprocess.run([modal, "profile", "list", "--json"], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        return [x for x in json.loads(p.stdout) if x.get("name")]
+    except Exception: return []
+
+def modal_login(modal):
+    """Modal's own login in the browser. The same page makes an account for someone new to Modal."""
+    print(f"  {DIM}Log in to Modal in your browser. New to Modal? The same page makes you an account.{R}")
+    p = subprocess.Popen([modal, "token", "new"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                         text=True, errors="replace", start_new_session=True, env=dict(os.environ, COLUMNS="300"))
+    out = []; sys.stdout.write("\033[?25l"); wait = Waiting("Opening Modal's login page")
+    try:
+        for line in p.stdout:
+            out.append(line)
+            m = re.search(r"https://\S*modal\.com/\S+", line)
+            if m and wait.label.startswith("Opening"):        # the browser opens by itself, but not always (WSL, a remote shell)
+                wait.stop(); print(f"  {DIM}if no browser opened, open this link:{R} {link(m.group(0), m.group(0))}")
+                wait = Waiting("Waiting for you to log in")
+        p.wait()
+    except KeyboardInterrupt:
+        try: os.killpg(p.pid, 9)
+        except OSError: pass
+        return False
+    finally:
+        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+    if p.returncode: print(f"  {DIM}the login didn't finish: {(''.join(out).strip().splitlines() or ['no reason given'])[-1][:200]}{R}")
+    return p.returncode == 0
+
+def setup_cloud(arg=""):
+    """/cloud puts the model on a graphics card in their own Modal account and points the app at it.
+    /cloud off goes back to this computer, /cloud on back to the card, /cloud again sets it up from the start.
+    Returns True when the app should restart on the new setting."""
+    arg = arg.strip(); conf = load_config(); cloud = conf.get("cloud") or {}
+    card = next((n for n, _ in CLOUD_CARDS if n.lower() == arg.lower()), "")
+    if arg not in ("", "on", "off", "again", "login") and not card:
+        print(f"{DIM}/cloud sets up your own cloud card · /cloud off · /cloud on · /cloud again · /cloud login uses another Modal account{R}"); return False
+    if arg and os.environ.get("BXZEX_REMOTE"):
+        print(f"{DIM}BXZEX_REMOTE is set where you launched it, so that decides. Launch without it to use /cloud{R}"); return False
+    if arg == "off":
+        if conf.get("size") == "cloud": print(f"{DIM}this install has no model of its own, it was set up for the cloud card only{R}"); return False
+        if not REMOTE: print(f"{DIM}it already runs on this computer{R}"); return False
+        cloud.update(remote=REMOTE, remote_key=REMOTE_KEY)          # kept for /cloud on
+        save_config(cloud=cloud, remote="", remote_key=""); return True
+    if arg == "on":
+        if REMOTE: print(f"{DIM}it already runs on your cloud card{R}"); return False
+        if not cloud.get("remote"): print(f"{DIM}no cloud card set up yet · /cloud sets one up{R}"); return False
+        save_config(remote=cloud["remote"], remote_key=cloud["remote_key"]); return True
+    if REMOTE and not arg:
+        print(header("Cloud card"))
+        where = f"{cloud['card']} in your Modal account {cloud.get('workspace', '')}".strip() if cloud.get("card") else REMOTE
+        print(f"  {DIM}the model runs on {where} · it sleeps after 5 minutes idle and Modal only bills while it's awake")
+        print(f"  /cost what it has cost · /warm keeps it awake in your hours · /cloud again sets it up from the start · /cloud off runs it here{R}"); return False
+
+    print(header("Your own cloud card"))
+    print(f"  {DIM}The model runs on a graphics card in your own Modal account (modal.com) and answers in seconds. Your chats, memory")
+    print(f"  and files stay on this computer. Modal bills your account by the second while the card is awake; it sleeps after 5 minutes idle.{R}")
+    modal = modal_bin()
+    if not modal:
+        uv = shutil.which("uv") or f"{HOME}/.local/bin/uv"
+        if not os.access(uv, os.X_OK):
+            quietly("Getting uv, which installs Modal's tool", ["sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"], 300)
+        worked, out = quietly("Installing Modal's command line tool", [uv, "tool", "install", "--python", "3.12", "modal"], 900)
+        modal = modal_bin()
+        if not modal: print(f"  {DIM}couldn't install Modal's tool: {out.strip()[-300:]}{R}"); return False
+    print(f"  {GOLD}✓{R} Modal's command line tool")
+    profiles = [] if arg == "login" else modal_profiles(modal)
+    if not profiles:
+        before = {p["name"] for p in modal_profiles(modal)}
+        if not modal_login(modal): return False
+        profiles = modal_profiles(modal)
+        profiles = [p for p in profiles if p["name"] not in before] or [p for p in profiles if p.get("active")] or profiles
+        if not profiles: print(f"  {DIM}logged in, but Modal didn't list the account. Try /cloud again{R}"); return False
+    pick = profiles[0]
+    if len(profiles) > 1:
+        print(f"  {DIM}Which Modal account?{R}")
+        at = menu([(p.get("workspace") or p["name"], "in use now" if p.get("active") else "") for p in profiles],
+                  next((i for i, p in enumerate(profiles) if p.get("active")), 0))
+        if at is None: print(f"  {DIM}cancelled{R}"); return False
+        pick = profiles[at]
+    workspace = pick.get("workspace") or pick["name"]
+    print(f"  {GOLD}✓{R} Modal account {BOLD}{workspace}{R}")
+    if not card:
+        print(f"  {DIM}Which graphics card? You can change it later with /cloud again.{R}")
+        at = menu(CLOUD_CARDS, next((i for i, (n, _) in enumerate(CLOUD_CARDS) if n == cloud.get("card")), 0))
+        if at is None: print(f"  {DIM}cancelled{R}"); return False
+        card = CLOUD_CARDS[at][0]
+    print(f"  {GOLD}✓{R} {card}")
+
+    try: script = fetch("cloud.py")
+    except Exception: script = ""
+    if "modal.App(" not in script:
+        print(f"  {DIM}couldn't download the cloud setup, try /cloud again in a few minutes{R}"); return False
+    script = re.sub(r'^GPU = "[^"]*"', f'GPU = "{card}"', script, count=1, flags=re.M)
+    folder = f"{APP_HOME}/cloud"; os.makedirs(folder, exist_ok=True)
+    with open(f"{folder}/cloud.py", "w") as f: f.write(script)
+    env = dict(os.environ, MODAL_PROFILE=pick["name"], COLUMNS="300")
+    import secrets
+    key = secrets.token_urlsafe(32)
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as f:      # a file only they can read, so the key never shows in a process list
+        json.dump({"ENGINE_KEY": key}, f); f.flush()
+        worked, out = quietly("Making the card's private key", [modal, "secret", "create", "bxzex-gpu", "--from-json", f.name, "--force"], 120, env)
+    if not worked: print(f"  {DIM}Modal didn't take the key: {out.strip()[-300:]}{R}"); return False
+    print(f"  {GOLD}✓{R} private key, only this computer has it")
+    worked, out = quietly("Copying the AI model into your Modal account · about 23GB, only the first time", [modal, "run", "cloud.py::fetch"], 3600, env, folder)
+    if not worked: print(f"  {DIM}the model didn't copy: {out.strip()[-300:]}{R}"); return False
+    print(f"  {GOLD}✓{R} AI model in your Modal account")
+    worked, out = quietly("Putting it online", [modal, "deploy", "cloud.py"], 900, env, folder)
+    url = re.search(r"https://[\w.-]+\.modal\.run", out)
+    if not (worked and url):
+        print(f"  {DIM}Modal didn't put it online: {out.strip()[-300:]}{R}"); return False
+    url = url.group(0)
+    save_config(remote=url, remote_key=key, cloud={"card": card, "workspace": workspace, "profile": pick["name"]},
+                cost={"app": CLOUD_APP, "profile": pick["name"]})
+    try: os.chmod(CONFIG, 0o600)
+    except OSError: pass
+    print(f"  {GOLD}✓{R} online")
+    worked, out = quietly("Starting the card for the first time · about 3 minutes", ["curl", "-sL", "-m", "900", "-H", "@-", f"{url}/v1/models"],
+                          960, data=f"Authorization: Bearer {key}\n")
+    if '"data"' in out:
+        print(f"{GOLD}●{R} {BOLD}Your cloud card is ready{R} {DIM}· {card} in Modal account {workspace} · /cost shows what it costs · /cloud off runs it here again{R}")
+    else:
+        print(f"{GOLD}●{R} {BOLD}Your cloud card is set up{R} {DIM}· it didn't answer yet, your first message wakes it. If it keeps failing, run /cloud again{R}")
+    return True
 
 # ---- /export: the chat as a document ----
 def export_chat(arg=""):
@@ -4089,7 +4237,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/hooks", "your own commands before or after its tools"), ("/check", "check a site on phone, tablet and desktop · /check localhost:5173"), ("/notify", "notifications when it finishes in the background"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
             ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"),
-            ("/password", "a password your phone has to send before it can use it"), ("/cost", "what the cloud card has cost"), ("/export", "save this chat as a document"),
+            ("/password", "a password your phone has to send before it can use it"), ("/cloud", "run the model on a graphics card in your own Modal account"), ("/cost", "what the cloud card has cost"), ("/export", "save this chat as a document"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -4449,6 +4597,8 @@ if sys.argv[1:2] == ["--flyby"]:
         sys.stdout.write(f"\033[{len(DELOREAN)}A\r\033[J\033[?25h"); sys.stdout.flush()
     sys.exit(0)
 
+if sys.argv[1:2] == ["--cloud"]:             # the installer runs this on computers too small for the model
+    sys.exit(0 if setup_cloud(" ".join(sys.argv[2:])) else 1)
 if sys.argv[1:2] == ["--tick"]:
     tick(); sys.exit(0)
 if sys.argv[1:2] == ["--phone"]:             # the phone bridge, kept running by the system
@@ -4471,6 +4621,9 @@ if len(sys.argv) > 1:
     sys.exit(0)
 
 # ---- interactive ----
+if not REMOTE and load_config().get("size") == "cloud" and sys.stdin.isatty():
+    if not setup_cloud(): sys.exit(1)
+    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])     # start again, now pointed at the card
 keys_mode()
 try: RELOAD = json.loads(os.environ.pop("BXZEX_RELOAD", "") or "null") or {}
 except ValueError: RELOAD = {}
@@ -4488,11 +4641,13 @@ if splash:
 if not up: sys.exit(1)
 if RELOAD:
     fast, show_think, allow_all, PLAN = bool(RELOAD.get("fast", fast)), bool(RELOAD.get("think")), bool(RELOAD.get("allow")), bool(RELOAD.get("plan"))
-    print(f"{GOLD}●{R} {BOLD}Updated to v{VERSION}{R} {DIM}· carrying on where you were{R}")
-    try:
-        news = next((l.split(":", 1)[1].strip() for l in open(f"{APP_HOME}/whatsnew.txt") if l.split(":", 1)[0].strip() == VERSION), "")
-        if news: print(f"  {DIM}new: {news}{R}")
-    except (OSError, IndexError): pass
+    if RELOAD.get("note"): print(f"{GOLD}●{R} {BOLD}{RELOAD['note']}{R} {DIM}· carrying on where you were{R}")
+    else:
+        print(f"{GOLD}●{R} {BOLD}Updated to v{VERSION}{R} {DIM}· carrying on where you were{R}")
+        try:
+            news = next((l.split(":", 1)[1].strip() for l in open(f"{APP_HOME}/whatsnew.txt") if l.split(":", 1)[0].strip() == VERSION), "")
+            if news: print(f"  {DIM}new: {news}{R}")
+        except (OSError, IndexError): pass
 else:
     banner()
 refresh_system()
@@ -4528,7 +4683,7 @@ if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version whe
             if reload_ready: return
             time.sleep(int(os.environ.get("BXZEX_UPDATE_EVERY") or 1200))
     threading.Thread(target=_updates, daemon=True).start()
-def reload_app(typed_text=""):
+def reload_app(typed_text="", note=""):
     """Start the new version in this same window, on the same chat, with the same settings. Nothing is lost."""
     save_chat(); box.unpin()
     if COOKED:
@@ -4536,7 +4691,7 @@ def reload_app(typed_text=""):
         except termios.error: pass
     sys.stdout.flush()
     stop_jobs()
-    state = {"chat": chat_file or "", "fast": fast, "think": show_think, "allow": allow_all, "typed": typed_text, "plan": PLAN}
+    state = {"chat": chat_file or "", "fast": fast, "think": show_think, "allow": allow_all, "typed": typed_text, "plan": PLAN, "note": note}
     try:
         os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)], dict(os.environ, BXZEX_RELOAD=json.dumps(state)))
     except OSError:
@@ -4664,6 +4819,9 @@ while True:
             if len(pw) < 6: print(f"{DIM}use at least 6 characters{R}"); continue
             set_bridge_password(pw); RAW.write("\033[1A\r\033[K"); print(f"{GOLD}●{R} {BOLD}Password set{R} {DIM}· send it from your phone to unlock · /lock there locks it · /password off removes it{R}"); continue
         if user == "/cost": show_cost(); continue
+        if user.split()[0] == "/cloud":
+            if setup_cloud(user[6:]): reload_app(note="Now running on " + ("your cloud card" if load_config().get("remote") else "this computer"))
+            continue
         if user.startswith("/export"): export_chat(user[7:]); continue
         if user == "/notify":
             on = not load_config().get("notify", True); save_config(notify=on)
