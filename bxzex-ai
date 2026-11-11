@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.15.0"
+VERSION = "1.15.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -3199,7 +3199,7 @@ def web_loop():
         word = text.split()[0].lower() if text[:1] in "/!" else ""
         if text.lower() in ("exit", "quit"): web_push("note", "The remote stays on. /remote off on the computer turns it off."); return
         if word in WEB_KEYBOARD or (word == "/cloud" and text.strip() != "/cloud") or text.lower() == "/update full":
-            web_push("note", f"{word} asks things at the keyboard, so it only works on the computer itself."); return
+            web_push("note", f"{text.strip()[:40]} needs the computer's keyboard, so run it there."); return
         if word == "/update":
             if check_update(quiet=True): web_push("note", "Updated. The remote is restarting on the new version."); sys.exit(0)
             web_push("note", f"You have the latest version, v{VERSION}."); return
@@ -3219,8 +3219,8 @@ def web_loop():
                 msg["_hint"] = msg.get("_hint", "") + "\n\n(Sent from their phone through a web page: keep the reply short and easy to read on a small screen.)"
                 history.append(msg); run_turn(history)
             reply = "\n\n".join(m["content"] for m in history[start:] if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip())
-            if word and not works:                                 # a command's printed output is its answer
-                tee.flush(); reply = "```\n" + "\n".join(tee.all)[:15000] + "\n```" if tee.all else "Done."
+            if word and (not works or not reply):                  # a command's printed output is its answer
+                tee.flush(); reply = ("```\n" + "\n".join(tee.all)[:15000] + "\n```") if tee.all else (reply or "Done.")
         except KeyboardInterrupt:
             close_open_calls(); reply = "Stopped. Everything done so far is kept."
         except Exception as e:
@@ -4561,7 +4561,9 @@ def sync_chat():
     history = msgs; last_saved = chat_data()
     return max(added, 0)
 
-def save_chat():
+def save_chat(merge=True):
+    """Save the chat. If another bxzex-ai (the remote, or a second window) saved it since, its turns are kept and
+    this one's new turns go after them. merge=False (the 30-second autosave, which can run mid-reply) skips instead."""
     global chat_file, last_saved
     if not history: return
     try:
@@ -4569,6 +4571,13 @@ def save_chat():
         if not chat_file: chat_file = f"{CHATS}/{time.strftime('%Y-%m-%d_%H-%M-%S')}.json"; mark_current()
         data = chat_data()
         if data == last_saved and os.path.exists(chat_file): return    # nothing new: never overwrite another window's newer save
+        if last_saved is not None and os.path.exists(chat_file):
+            with open(chat_file) as f: disk = f.read()
+            if disk != last_saved:                                       # someone else saved this chat after we last read it
+                if not merge: return
+                theirs = json.loads(disk).get("messages", []); had = len(json.loads(last_saved).get("messages", []))
+                if len(history) >= had: history[:] = theirs + history[had:]     # in place: their turns, then ours
+                data = chat_data()
         with open(chat_file + ".tmp", "w") as f: f.write(data)
         os.replace(chat_file + ".tmp", chat_file)                       # all or nothing, so a crash mid-save can't break the chat
         last_saved = data
@@ -4578,7 +4587,7 @@ def save_chat():
 def autosave():
     """Saves the conversation every 30 seconds, so a closed window or a crash loses nothing."""
     while True:
-        time.sleep(30); save_chat()
+        time.sleep(30); save_chat(merge=False)
 
 def list_chats():
     try: files = sorted((f for f in os.listdir(CHATS) if f.endswith(".json")), reverse=True)
@@ -4594,7 +4603,10 @@ def list_chats():
 
 def menu(rows, at=0, hint="↑↓ to move · enter to pick · esc to cancel"):
     """A list you move through with the arrow keys and pick from with Enter. Returns the row's number, or None for Esc.
-    rows are (label, detail). Numbers jump straight to a row."""
+    rows are (label, detail). Numbers jump straight to a row. From the phone or the web remote they come as buttons."""
+    if PHONE and rows:
+        clean = lambda t: re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", str(t)).strip()
+        return phone_choose("Pick one", [(clean(a) + (f" · {clean(b)}" if clean(b) else ""))[:80] for a, b in rows[:30]])
     if not (sys.stdin.isatty() and RAW.isatty()) or not rows: return None
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
     fits = max(3, shutil.get_terminal_size((90, 30)).lines - Box.ROWS - 4)     # rows that fit above the input box
@@ -5079,7 +5091,8 @@ def rewind():
             except OSError: pass
     del history[i:]
     spoken = plain(m["content"])
-    print(f"{GOLD}●{R} {BOLD}Went back{R} {DIM}· {'files put back · ' if put_back else ''}your message is in the box: change it and press Enter{R}")
+    if PHONE: print(f"Went back{' and put the files back' if put_back else ''}. Your message was:\n{spoken}\nSend it again, changed if you like."); spoken = ""
+    else: print(f"{GOLD}●{R} {BOLD}Went back{R} {DIM}· {'files put back · ' if put_back else ''}your message is in the box: change it and press Enter{R}")
     save_chat()
 
 def turn(text):

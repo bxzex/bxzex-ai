@@ -57,4 +57,14 @@ print("picked up the remote's turns:", g["sync_chat"]() == 2 and g["history"][-1
 g["history"].append({"role": "user", "content": "typed here, not saved yet"})
 open(cf, "w").write(json.dumps({"title": "hi", "messages": base}))
 print("own unsaved lines kept:", g["sync_chat"]() == 0 and g["history"][-1]["content"].startswith("typed here"))
+# the terminal and the remote both saving one chat: neither loses the other's turns
+g["CHATS"] = d + "/chats"; cf2 = d + "/chats/c.json"; os.makedirs(d + "/chats", exist_ok=True)
+g["history"][:] = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]; g["chat_file"] = cf2; g["last_saved"] = None
+g["save_chat"]()
+other = json.loads(open(cf2).read())["messages"] + [{"role": "user", "content": "from phone"}, {"role": "assistant", "content": "phone reply"}]
+open(cf2, "w").write(json.dumps({"title": "a", "messages": other}))
+g["history"].append({"role": "user", "content": "from keyboard"})
+g["save_chat"](merge=False); print("autosave leaves the newer copy alone:", len(json.loads(open(cf2).read())["messages"]) == 4)
+g["save_chat"](); got = [m["content"] for m in json.loads(open(cf2).read())["messages"]]
+print("both kept:", got == ["a", "b", "from phone", "phone reply", "from keyboard"] and [m["content"] for m in g["history"]] == got)
 shutil.rmtree(d)
