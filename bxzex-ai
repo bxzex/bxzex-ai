@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.15.1"
+VERSION = "1.15.2"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2322,6 +2322,7 @@ def bridge_gate(kind, text):
 
 def phone_loop():
     """Runs on its own (started by the system): answers what you send from your phone, one message at a time."""
+    trim_log("phone")
     global PHONE, history
     conf = load_config().get("phone") or {}
     if not conf.get("chat"): print("the phone isn't set up: run /phone in the app"); return
@@ -2386,6 +2387,15 @@ def phone_loop():
             except OSError: pass
 
 def phone_service(on=True): return bridge_service(on, "phone")
+
+def trim_log(kind):
+    """A background service's log keeps only its newest part, so it never grows without end."""
+    path = f"{APP_HOME}/{kind}.log"
+    try:
+        if os.path.getsize(path) > 2_000_000:
+            with open(path, "rb") as f: f.seek(-200_000, 2); tail = f.read()
+            with open(path, "wb") as f: f.write(tail)
+    except OSError: pass
 
 def bridge_service(on=True, kind="phone"):
     """Keep a bridge (Telegram, iMessage or the web page) running in the background (launchd on a Mac, a user service on Linux)."""
@@ -2974,6 +2984,7 @@ def im_choose(question, choices, detail=""):
 
 def imessage_loop():
     """Runs on its own (started by the system): answers what you text to your own number, one at a time."""
+    trim_log("imessage")
     global PHONE, CHANNEL, history
     conf = load_config().get("imessage") or {}
     if not conf.get("to"): print("iMessage isn't set up: run /imessage in the app"); return
@@ -3144,6 +3155,7 @@ def web_choose(question, choices, detail=""):
 
 def web_loop():
     """Runs on its own (started by the system): works on what you write on your page, one message at a time."""
+    trim_log("web")
     global PHONE, CHANNEL, WEB_TEE, WEB_ACTIVE, history
     conf = load_config().get("web") or {}
     if not (conf.get("url") and conf.get("key")): print("remote control isn't set up: run /remote in the app"); return
@@ -3627,6 +3639,11 @@ def show_last():
         if len(lines) > 300: print(f"  {DIM}│ … {len(lines) - 300} more lines{R}")
     print()
 
+def short_path(text):
+    """Paths on screen as you'd say them: inside this folder from here, elsewhere from ~. What the model sees is unchanged."""
+    here = os.getcwd().rstrip(os.sep) + os.sep
+    return str(text).replace(here, "").replace(HOME, "~") if here != os.sep else str(text).replace(HOME, "~")
+
 def run_tool(call):
     fn = call["function"]; name = fn["name"]
     try:
@@ -3634,7 +3651,9 @@ def run_tool(call):
     except Exception:
         return "error: arguments were not valid JSON"
     if not isinstance(args, dict): return "error: arguments must be a JSON object with the tool's named fields"
-    shown = " ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " ")
+    if name in ("read_file", "write_file", "edit_file") and args.get("path"):    # files: just which one, the rest is noise on screen
+        shown = short_path(args["path"]) + (f" · lines {args['lines']}" if args.get("lines") else "")
+    else: shown = short_path(" ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " "))
     print(f"{TEAL}◆{R} {BOLD}{name}{R}{DIM}({shown[:W()-len(name)-6]}){R}")
     if name not in TOOL_FUNCS and name not in MCP: return f"error: no tool named {name}"
     blocked = hooks_before(name, args)
@@ -3652,7 +3671,7 @@ def run_tool(call):
         tool_label = ""; sys.stdout.write("\033[?25h"); sys.stdout.flush()
     out += hooks_after(name, args, out)
     lines = [l for l in out.strip().splitlines() if l.strip()]
-    first = lines[0] if lines else "(empty)"
+    first = short_path(lines[0]) if lines else "(empty)"
     LAST_TOOLS.append((f"{name}({shown[:W() - len(name) - 6]})", out))
     more = f" (+{len(lines)-1} lines · ctrl-o)" if len(lines) > 1 else ""
     print(f"  {DIM}└ {first[:W()-len(more)-6]}{more}{R}\n")
@@ -3973,6 +3992,7 @@ class Waiting:
         self.th = threading.Thread(target=self.run, daemon=True); self.th.start()
     def run(self):
         while not self.stop_ev.wait(0.07):
+            if not RAW.isatty(): continue              # a background service writes to a log file: 14 frames a second would fill it
             el = time.time() - self.t0; w = W()
             tok = f" · ↓ {self.tok / 1000:.1f}k tokens" if self.tok >= 1000 else f" · ↓ {self.tok} tokens" if self.tok else ""
             info = f"({fmt(el)}{tok} · {'thinking · ' if self.thinking else ''}esc to stop)"
@@ -3990,7 +4010,7 @@ class Waiting:
     def stop(self):
         if self.stop_ev.is_set(): return
         self.stop_ev.set(); self.th.join()
-        RAW.write("\r\033[K"); RAW.flush()
+        if RAW.isatty(): RAW.write("\r\033[K"); RAW.flush()
 
 # ---- long conversations ----
 # The model can only hold so much at once. Before a chat outgrows that, the older part is folded into a
