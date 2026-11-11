@@ -143,9 +143,11 @@ fi
 # A graphics card needs the whole model in its own memory, so it decides first. Set BXZEX_SIZE=full or lite to choose.
 # Too small for either: the same model on a graphics card in their own Modal account (BXZEX_SIZE=cloud).
 size="${BXZEX_SIZE:-}"
+has_card=""
 if [ -z "$size" ]; then
   if   [ -f "$BXZEX_HOME/models/bxzex-model.gguf" ]; then size=full      # already installed: keep what they have
   elif [ -f "$BXZEX_HOME/models/bxzex-lite.gguf" ];  then size=lite
+  elif grep -q '"remote": *"http' "$BXZEX_HOME/config.json" 2>/dev/null; then size=cloud; has_card=1   # already runs on a cloud card and has no model here: don't fetch 15GB it never loads
   elif [ "$vram" -ge 20 ]; then size=full
   elif [ "$vram" -ge 11 ]; then size=lite
   elif [ "$ram" -ge 23 ];  then size=full
@@ -166,7 +168,9 @@ if [ "$vram" -gt 0 ] && [ "$vram" -lt "$fits" ]; then
   auto_device=cpu
   note "The graphics card has ${vram}GB, which is not enough to hold the model, so it will run on the processor."
 fi
-if [ "$size" = cloud ]; then
+if [ -n "$has_card" ]; then
+  note "This install already runs on your cloud card, so the model isn't downloaded here."
+elif [ "$size" = cloud ]; then
   note "The model will run on your own cloud card, so it isn't downloaded here. At the end it walks you through setting the card up."
 elif [ "$size" = lite ]; then
   note "This computer gets the lighter build: the same model, packed smaller so it fits. A little less sharp, everything else the same."
@@ -332,7 +336,7 @@ elif sys.argv[5] and "device" not in d: d["device"] = sys.argv[5]   # card too s
 json.dump(d, open(p, "w"))
 PART
 
-if [ "$size" = cloud ] && [ "${BXZEX_YES:-}" != 1 ] && has_tty; then
+if [ "$size" = cloud ] && [ -z "$has_card" ] && [ "${BXZEX_YES:-}" != 1 ] && has_tty; then
   printf '\n'
   python3 "$BXZEX_HOME/bin/bxzex-ai" --cloud < /dev/tty || note "The cloud card isn't set up yet. Opening bxzex-ai picks it up again."
 fi

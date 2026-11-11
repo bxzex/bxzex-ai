@@ -119,7 +119,7 @@ It checks for a new version each time you open it and installs it quietly in the
 
 ## Using it
 
-Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "your question"`.
+Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "your question"`. In scripts, `bxzex-ai -p "your question"` prints just the answer, and anything piped in is added to it, like `git diff | bxzex-ai -p "review this"`.
 
 | Type this | And it will |
 |---|---|

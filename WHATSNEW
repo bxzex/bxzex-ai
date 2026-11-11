@@ -1,3 +1,5 @@
+1.14.0: edits still land when only the spacing was off and a failed edit shows the closest lines, every changed file gets a quick syntax check that goes straight back to it, helpers can change files (you OK their changes once at the end), bxzex-ai -p "question" prints just the answer for scripts and pipes, and running the installer again on a cloud install no longer downloads the model
+1.13.1: questions with choices show each choice on its own row and pick by number, the working line says when it is thinking, the done line shows thinking time and what the cloud card cost, and /doctor checks the model, key, updates and errors in one go
 1.13.0: /cloud runs the model on a graphics card in your own Modal account, set up for you in about five minutes; computers too small for the model can install for the cloud
 1.12.0: the footer shows your mode in color (shift+tab cycles asks first, plan mode, always allow), esc to stop and running jobs; a ping and a footer note when an update comes out, checked every 20 minutes; this line after each update
 1.11.1: the input box at the bottom never disappears after a question with choices or when typing your own answer

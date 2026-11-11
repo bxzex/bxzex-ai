@@ -25,3 +25,25 @@ print(open(d + "/src/a.py").read())
 g["undo"](); print(open(d + "/src/a.py").read())
 print(g["attach_files"](f"explain @{d}/src/a.py please")[-60:])
 print(g["run_tool"]({"function": {"name": "read_file", "arguments": "[1,2]"}}))
+
+# edits that forgive spacing, say where the closest lines are, and check the result
+import tempfile, shutil
+d = tempfile.mkdtemp(dir=os.path.realpath("/tmp")); os.makedirs(d + "/src")     # the test home sits under /var on a Mac, where every change asks
+f = d + "/src/b.py"; open(f, "w").write("class A:\n    def hi(self):\n        x = 1\n        return x\n")
+print("loose:", g["edit_file"](f, "def hi(self):\n    x = 1\n    return x", "def hi(self):\n    x = 2\n    return x"))
+print("loose kept indent:", open(f).read() == "class A:\n    def hi(self):\n        x = 2\n        return x\n")
+print("nearest:", "3│" in g["edit_file"](f, "x = 22 ", "x = 3") or "closest" in g["edit_file"](f, "xx = 2", "x = 3"))
+print("syntax caught:", "syntax error" in g["edit_file"](f, "x = 2", "x = (2"))
+print("syntax fine:", "syntax error" not in g["edit_file"](f, "x = (2", "x = 2"))
+print("json caught:", "syntax error" in g["write_file"](d + "/c.json", "{bad"))
+# a working helper changes its own copy; the real file changes only when kept
+over = {}
+print("helper edit:", g["helper_file"]("edit_file", {"path": f, "old_text": "x = 2", "new_text": "x = 5"}, over)[:6] == "edited")
+print("real untouched:", "x = 2" in open(f).read())
+print("helper reads own copy:", "x = 5" in g["helper_file"]("read_file", {"path": f}, over))
+g["helper_file"]("write_file", {"path": d + "/src/new.py", "content": "y = 1\n"}, over)
+print("kept:", "saved" in g["keep_helper_changes"](1, over), "x = 5" in open(f).read(), os.path.exists(d + "/src/new.py"))
+over = {}; g["helper_file"]("edit_file", {"path": f, "old_text": "x = 5", "new_text": "x = 6"}, over); open(f, "a").write("# moved on\n")
+print("stale skipped:", "Not kept" in g["keep_helper_changes"](1, over), "x = 5" in open(f).read())
+print("helper blocked from ssh:", g["helper_file"]("write_file", {"path": "~/.ssh/x", "content": "k"}, {})[:5] == "error")
+shutil.rmtree(d)

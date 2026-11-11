@@ -5,6 +5,7 @@
 """bxzex-ai: a private, uncensored AI assistant that runs on your own computer (Mac, Linux, Windows through WSL).
 Usage:  bxzex-ai            (interactive)
         bxzex-ai "prompt"    (one-shot)
+        bxzex-ai -p "prompt" (for scripts and pipes: prints just the answer; piped text is added; --yes lets it act)
 Commands: /v speak instead of typing, /color pick a theme, /fast toggle reasoning,
           /think show reasoning, /memory what it remembers, /skills list skills, /reset clear, exit/quit.
 Files:  ~/.bxzex-ai/BXZEX.md is its guide (add your own instructions there),
@@ -66,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -183,7 +184,7 @@ def choose_color(arg=""):
 # ---- loaders ----
 WORDS = ["Thinking","Cooking","Brewing","Pondering","Scheming","Crunching","Simmering",
          "Churning","Noodling","Marinating","Mulling","Vibing","Working","Cooking up"]
-def fmt(s): s=int(s); return f"{s}s" if s<60 else f"{s//60}m{s%60}s"
+def fmt(s): s=int(s); return f"{s}s" if s<60 else f"{s//60}m {s%60}s" if s<3600 else f"{s//3600}h {s%3600//60}m"
 
 FLAME = [0.0] * 12
 def flame(el, n=12):
@@ -792,6 +793,76 @@ def save_file(path, content):
     with open(path, "w") as f: f.write(content)
     UNDO.append((path, old))
 
+def check_file(path, text=None):
+    """A quick syntax check of a file it just changed, so a broken edit comes straight back to it. "" when fine or unknown."""
+    ext = os.path.splitext(path)[1].lower(); err = ""; tmp = None
+    try:
+        if text is None:
+            with open(path, "r", errors="replace") as f: text = f.read()
+        if ext == ".py":
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                try: compile(text, path, "exec", dont_inherit=True)
+                except SyntaxError as e: err = f"line {e.lineno}: {e.msg}"
+        elif ext == ".json":
+            try: json.loads(text)
+            except ValueError as e: err = str(e)
+        elif ext in (".js", ".mjs", ".cjs", ".sh", ".bash"):
+            cmd = ["node", "--check"] if ext in (".js", ".mjs", ".cjs") else ["bash", "-n"]
+            if not shutil.which(cmd[0]): return ""
+            fd, tmp = tempfile.mkstemp(suffix=ext)
+            with os.fdopen(fd, "w") as f: f.write(text)
+            r = subprocess.run(cmd + [tmp], capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+            if r.returncode: err = " ".join((r.stderr or r.stdout).replace(tmp, os.path.basename(path)).split())
+    except Exception: return ""
+    finally:
+        if tmp:
+            try: os.remove(tmp)
+            except OSError: pass
+    return f"\nBut the file now has a syntax error ({err[:300]}). Fix it before you go on." if err else ""
+
+def loose_spots(text, old_text):
+    """Where old_text sits in the file when only the spacing differs (indentation, spaces at line ends). Returns (first row, how many rows)."""
+    want = [l.strip() for l in old_text.splitlines()]
+    while want and not want[0]: want.pop(0)
+    while want and not want[-1]: want.pop()
+    if not want: return [], 0
+    have = [l.strip() for l in text.splitlines()]
+    return [i for i in range(len(have) - len(want) + 1) if have[i:i + len(want)] == want], len(want)
+
+def nearest_lines(text, old_text):
+    """The lines of the file that look most like what it was trying to replace, numbered, for a failed edit."""
+    want = [l.strip() for l in old_text.splitlines() if l.strip()]
+    rows = text.splitlines()
+    if not want or not rows or len(rows) > 20000: return ""
+    have = [r.strip() for r in rows]
+    hit = difflib.get_close_matches(want[0], have, n=1, cutoff=0.5)
+    if not hit: return ""
+    at = have.index(hit[0])
+    return "\n".join(f"{n + 1:>5}│ {rows[n]}" for n in range(at, min(len(rows), at + min(len(want), 12))))
+
+def make_edit(text, old_text, new_text, every=False):
+    """The edit itself, with nothing asked or saved. Returns (new text, how many changes, a note) or an error string."""
+    n = text.count(old_text) if old_text else 0
+    if n > 1 and not every: return f"error: old_text appears {n} times. Include more of the lines around it so it matches once, or set replace_all to true."
+    if n: return (text.replace(old_text, new_text) if every else text.replace(old_text, new_text, 1)), (n if every else 1), ""
+    spots, size = loose_spots(text, old_text or "")
+    if len(spots) > 1:
+        return (f"error: old_text was not found exactly, and with spacing ignored it matches {len(spots)} places (lines "
+                + ", ".join(str(i + 1) for i in spots[:6]) + "). Include more of the lines around it so it matches once.")
+    if len(spots) == 1:                              # same lines, different spacing: change it there and keep the file's indentation
+        rows = text.splitlines(True); at = spots[0]
+        first = next(l for l in old_text.splitlines() if l.strip())
+        was = first[:len(first) - len(first.lstrip())]; now = rows[at][:len(rows[at]) - len(rows[at].lstrip())]
+        fresh = "".join(l if not l.strip() or was == now or not l.startswith(was) else now + l[len(was):] for l in new_text.strip("\n").splitlines(True))
+        if fresh and rows[at + size - 1].endswith("\n") and not fresh.endswith("\n"): fresh += "\n"
+        return "".join(rows[:at]) + fresh + "".join(rows[at + size:]), 1, f" (old_text matched lines {at + 1}-{at + size} once spacing was ignored)"
+    near = nearest_lines(text, old_text or "")
+    if near: return ("error: old_text was not found in the file. The closest lines are these (the numbers and │ are not part of the file):\n"
+                     + near + "\nCopy the text exactly from them, spaces included.")
+    return "error: old_text was not found in the file. Read the file again and copy the text exactly, spaces included."
+
 def write_file(path, content):
     if PLAN: return plan_block()
     path = os.path.expanduser(path)
@@ -803,23 +874,21 @@ def write_file(path, content):
     if not confirm(f"{'update' if old is not None else 'write'} {path}", shown, always_ask=bool(SENSITIVE.search(os.path.abspath(path))),
                    diff=old is not None, rule="edits" if here else "", rule_label="file changes"): return "The user declined to write this file."
     save_file(path, content)
-    return f"wrote {len(content)} chars to {path}"
+    return f"wrote {len(content)} chars to {path}" + check_file(path, content)
 
 def edit_file(path, old_text, new_text, replace_all="false"):
     if PLAN: return plan_block()
     path = os.path.expanduser(path)
     with open(path, "r", errors="replace") as f: text = f.read()
-    n = text.count(old_text) if old_text else 0
-    if not n: return "error: old_text was not found in the file. Read the file again and copy the text exactly, spaces included."
-    every = str(replace_all).lower() == "true"
-    if n > 1 and not every: return f"error: old_text appears {n} times. Include more of the lines around it so it matches once, or set replace_all to true."
-    new = text.replace(old_text, new_text) if every else text.replace(old_text, new_text, 1)
+    made = make_edit(text, old_text, new_text, str(replace_all).lower() == "true")
+    if isinstance(made, str): return made
+    new, n, note = made
     here = os.path.abspath(path).startswith(os.getcwd() + os.sep)
     if not confirm(f"edit {path}", changes(text, new), always_ask=bool(SENSITIVE.search(os.path.abspath(path))), diff=True,
                    rule="edits" if here else "", rule_label="file changes"):
         return "The user declined this edit."
     save_file(path, new)
-    return f"edited {path}: {n if every else 1} change(s)"
+    return f"edited {path}: {n} change(s){note}" + check_file(path, new)
 
 def undo(arg=""):
     """Put back the file the last write or edit changed."""
@@ -1123,9 +1192,22 @@ def update_todos(todos):
     left = sum(1 for st, _ in TODOS if st != "x")
     return f"to-do list updated: {len(TODOS) - left} done, {left} left"
 
+def split_options(options):
+    """Choices come as "a | b", a JSON list (even inside a string), or one per line. Always a clean list of up to 6."""
+    items = options
+    if isinstance(items, str):
+        t = items.strip()
+        if t.startswith("["):
+            try: items = json.loads(t)
+            except Exception: items = [x.strip().strip('"\'') for x in t.strip("[]").split('",')]
+        elif "|" in t: items = t.split("|")
+        else: items = t.splitlines()
+    if not isinstance(items, (list, tuple)): items = [items]
+    return [str(o).strip().strip('"\'').strip() for o in items if str(o).strip()][:6]
+
 def ask_user(question, options=""):
     """A question with choices the user picks with the arrow keys, or answers in their own words."""
-    picks = [o.strip() for o in str(options).split("|") if o.strip()][:6]
+    picks = split_options(options)
     if PHONE and picks:
         at = phone_choose(question, picks)
         return f"The user picked: {picks[at]}" if at is not None else "The user didn't answer. Use your best judgment and say what you chose."
@@ -1215,14 +1297,66 @@ def helper_tools():
     return [t for t in TOOLS if t["function"]["name"] in HELPER_TOOLS
             or t["function"]["name"] in MCP and not mcp_acts(MCP[t["function"]["name"]][1], {})]
 
-def helper_tool(n, call):
-    """A helper only looks: reading, searching, read-only commands and reading from apps. Nothing it does asks the user."""
+def helper_file(name, args, over):
+    """A working helper's own copy of the files it touches: {path: [what the real file held, what the helper made it]}.
+    Nothing reaches the real files here. keep_helper_changes shows the user the result afterwards."""
+    path = os.path.abspath(os.path.expanduser(str(args.get("path") or "")))
+    if name == "read_file" and path not in over: return str(read_file(**args))
+    if SENSITIVE.search(path): return "error: helpers can't change this file. Put what should be changed in your report."
+    if path not in over:
+        base = None
+        if os.path.isfile(path):
+            if os.path.getsize(path) > 2_000_000: return "error: this file is too big for a helper to change. Put what should be changed in your report."
+            with open(path, "r", errors="replace") as f: base = f.read()
+        elif name == "edit_file": return f"error: {path} doesn't exist. Use write_file to make it."
+        over[path] = [base, base or ""]
+    if name == "read_file":
+        rows = over[path][1].splitlines()
+        m = re.match(r"\s*(\d+)\s*(?:-\s*(\d+))?\s*$", str(args.get("lines") or ""))
+        if m:
+            a = max(1, int(m.group(1))); b = min(len(rows), int(m.group(2) or a + 199), a + 399)
+            return f"lines {a}-{b} of {len(rows)} (the numbers and │ are not part of the file)\n" + "\n".join(f"{i:>5}│ {rows[i - 1]}" for i in range(a, b + 1))
+        return clip(over[path][1], PAGE_CHARS)
+    if name == "write_file":
+        over[path][1] = str(args.get("content") or "")
+        return f"wrote {len(over[path][1])} chars to {path}" + check_file(path, over[path][1])
+    made = make_edit(over[path][1], str(args.get("old_text") or ""), str(args.get("new_text") or ""), str(args.get("replace_all")).lower() == "true")
+    if isinstance(made, str): return made
+    over[path][1] = made[0]
+    return f"edited {path}: {made[1]} change(s){made[2]}" + check_file(path, made[0])
+
+def keep_helper_changes(n, over):
+    """After a working helper is done: show everything it changed in one question and save it only on a yes. Returns a line for its report."""
+    done = []; stale = []
+    for path, (base, new) in over.items():
+        if base == new: continue
+        now = None
+        if os.path.isfile(path):
+            with open(path, "r", errors="replace") as f: now = f.read()
+        (done if now == base else stale).append((path, base, new))     # stale: the real file changed while the helper worked
+    note = ""
+    if stale: note = "\n(Not kept, because the file changed while the helper worked: " + ", ".join(p for p, _, _ in stale) + ". Make those changes yourself.)"
+    if not done: return note
+    names = ", ".join(os.path.basename(p) for p, _, _ in done)
+    detail = "\n".join(p.replace(HOME, "~") + ("" if b is not None else "  (new file)") + "\n" + (changes(b, new) if b is not None else new) for p, b, new in done)
+    here = all(p.startswith(os.getcwd() + os.sep) for p, _, _ in done)
+    if not confirm(f"keep helper {n}'s changes to {names}", detail, diff=True, rule="edits" if here else "", rule_label="file changes"):
+        return "\n(The user declined this helper's file changes, so no file was changed.)" + note
+    for p, _, new in done: save_file(p, new)
+    return "\n(Its changes are saved: " + ", ".join(p for p, _, _ in done) + ")" + note
+
+def helper_tool(n, call, over=None):
+    """A helper only looks: reading, searching, read-only commands and reading from apps. Nothing it does asks the user.
+    With over (a dict), it can also write and edit files, in its own copy."""
     fn = call["function"]; name = fn["name"]
     try: args = json.loads(fn.get("arguments") or "{}")
     except ValueError: return "error: arguments were not valid JSON"
     if not isinstance(args, dict): return "error: arguments must be a JSON object with the tool's named fields"
     shown = " ".join(str(v) for v in args.values()).replace("\n", " ")
     put_line(f"  {DIM}┊ helper {n} · {name}({shown[:max(10, W() - len(name) - 22)]}){R}")
+    if over is not None and name in ("read_file", "write_file", "edit_file"):
+        try: return helper_file(name, args, over)
+        except Exception as e: return f"error: {e}"
     looks = (not mcp_acts(MCP[name][1], args)) if name in MCP else name in HELPER_TOOLS and not (
         name == "run_shell" and (not only_looks(str(args.get("command", ""))) or str(args.get("background")).lower() == "true"))
     if not looks: return "error: helpers can only look (read, search, list, read-only commands). Put what should be done in your report."
@@ -1232,11 +1366,16 @@ def helper_tool(n, call):
     except Exception as e: out = f"error: {e}"
     return out + hooks_after(name, args, out)
 
-def one_helper(n, task):
-    sub = [{"role": "user", "content": str(task) + "\n\nWork on this on your own with your tools. Don't ask me questions. You can only look: "
-            "read, search, list and run read-only commands. When you're done, reply with a short report of what you found, with the exact "
-            "file paths, links and numbers, and anything that should be changed."}]
-    tools = helper_tools(); recent = []
+def one_helper(n, task, over=None):
+    can = ("You can read, search, list and run read-only commands, and you can change files with edit_file and write_file. Your file changes "
+           "are shown to the user when you finish, so make them complete and correct. You cannot run commands that change anything. When "
+           "you're done, reply with a short report of what you changed and why, with the exact file paths."
+           if over is not None else
+           "You can only look: read, search, list and run read-only commands. When you're done, reply with a short report of what you "
+           "found, with the exact file paths, links and numbers, and anything that should be changed.")
+    sub = [{"role": "user", "content": str(task) + "\n\nWork on this on your own with your tools. Don't ask me questions. " + can}]
+    tools = helper_tools() + ([t for t in TOOLS if t["function"]["name"] in ("write_file", "edit_file")] if over is not None else [])
+    recent = []
     for _ in range(30):
         if helper_stop.is_set(): return "stopped before it finished"
         try: text, calls = ask_model(sub, tools)
@@ -1246,7 +1385,7 @@ def one_helper(n, task):
         for i, call in enumerate(calls):
             call["id"] = call.get("id") or f"h{n}_{len(sub)}_{i}"
             recent.append((call["function"]["name"], call["function"].get("arguments")))
-            out = REPEAT if circling(recent) else helper_tool(n, call)
+            out = REPEAT if circling(recent) else helper_tool(n, call, over)
             sub.append({"role": "tool", "tool_call_id": call["id"], "content": clip(out, OUT_CHARS)})
     return "the helper used all its steps. What it last said: " + (sub[-1].get("content") or "")[:2000]
 
@@ -1254,17 +1393,18 @@ def run_helpers(calls):
     """Every delegate call in one reply runs at the same time. Returns {call id: report}."""
     jobs = []
     for call in calls:
-        try: task = json.loads(call["function"]["arguments"] or "{}").get("task", "")
-        except (ValueError, AttributeError): task = ""
-        jobs.append((call["id"], str(task)))
+        try: asked = json.loads(call["function"]["arguments"] or "{}"); task = asked.get("task", "")
+        except (ValueError, AttributeError): asked = {}; task = ""
+        works = str(asked.get("edits")).lower() == "true" and not PLAN        # this helper may change files, in its own copy
+        jobs.append((call["id"], str(task), {} if works else None))
     n = len(jobs)
-    for i, (_, task) in enumerate(jobs, 1):
+    for i, (_, task, _) in enumerate(jobs, 1):
         print(f"{TEAL}◆{R} {BOLD}helper {i}{R}{DIM}({' '.join(task.split())[:max(10, W() - 16)]}){R}")
     helper_stop.clear(); got = {}
     sys.stdout.write("\033[?25l")
     wait = Waiting("Helper working" if n == 1 else f"{n} helpers working")
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=HELPERS_AT_ONCE)
-    runs = {pool.submit(one_helper, i, task): cid for i, (cid, task) in enumerate(jobs, 1)}
+    runs = {pool.submit(one_helper, i, task, over): cid for i, (cid, task, over) in enumerate(jobs, 1)}
     try:
         for f in concurrent.futures.as_completed(runs):
             got[runs[f]] = f.result()
@@ -1273,11 +1413,12 @@ def run_helpers(calls):
         helper_stop.set(); raise
     finally:
         wait.stop(); pool.shutdown(wait=False); sys.stdout.write("\033[?25h"); sys.stdout.flush()
-    for i, (cid, _) in enumerate(jobs, 1):
+    for i, (cid, _, over) in enumerate(jobs, 1):
         out = got[cid]; LAST_TOOLS.append((f"helper {i}", out))
         rows = [l for l in out.splitlines() if l.strip()]
         more = f" (+{len(rows) - 1} lines · ctrl-o)" if len(rows) > 1 else ""
         print(f"  {DIM}└ helper {i}: {(rows[0] if rows else '(empty)')[:max(10, W() - len(more) - 18)]}{more}{R}")
+        if over: got[cid] = out + keep_helper_changes(i, over)
     print()
     return got
 
@@ -2362,10 +2503,59 @@ def show_cost(arg=""):
     if w: print(f"  {DIM}/warm is on {w.get('from')}:00 to {w.get('to')}:00, which adds about ${4 * (w.get('to', 0) - w.get('from', 0))} a day{R}")
     print(f"  {DIM}whole Modal account this month: ${float(summary.get('metered_cost', 0)):.2f} used, ${float(summary.get('billed_cost', 0)):.2f} billed after credits{R}")
 
+# ---- /doctor: everything that can go wrong, checked in one place ----
+def doctor():
+    ok, bad = f"{GOLD}✓{R}", "\033[31m✗\033[0m"
+    rows = []
+    def row(good, name, detail): rows.append(f"  {ok if good else bad} {name:<12} {DIM}{detail}{R}")
+    sys.stdout.write("\033[?25l"); wait = Waiting("Checking")
+    try:
+        try:
+            with urllib.request.urlopen(f"{UPDATE_URL}/VERSION", timeout=6) as r: latest = r.read().decode().split()[0]
+            newer = tuple(map(int, latest.split("."))) > tuple(map(int, VERSION.split(".")))
+            row(not newer, "version", f"v{VERSION} · v{latest} is out, /update gets it" if newer else f"v{VERSION}, the newest")
+        except Exception as e: row(False, "version", f"v{VERSION} · couldn't check for updates ({e.__class__.__name__})")
+        if REMOTE and not REMOTE_KEY: row(False, "key", "the cloud card has no key in config.json, /cloud again makes one")
+        t0 = time.time()
+        try:
+            with urllib.request.urlopen(f"{HOST}/health", timeout=8 if REMOTE else 3) as r: r.read()
+            row(True, "model", f"{'cloud card' if REMOTE else 'this computer'} answered in {time.time() - t0:.1f}s")
+            if REMOTE and REMOTE_KEY: row(True, "key", "accepted")
+        except urllib.error.HTTPError as e:
+            row(False, "key" if e.code in (401, 403) else "model", "the card turned the key down, /cloud again fixes it" if e.code in (401, 403) else f"error {e.code}")
+        except Exception:
+            row(False, "model", "the cloud card is asleep or starting (it wakes when you send something)" if REMOTE else "the model server isn't running, relaunch bxzex-ai")
+        if REMOTE: row(True, "cost", f"about ${card_rate():.2f} an hour while awake · /cost for the real bill")
+        try:
+            log = open(ERROR_LOG, errors="replace").read()
+            stamps = re.findall(r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d)", log, re.M)
+            day = str(datetime.datetime.now() - datetime.timedelta(days=1))[:16]
+            recent = [x for x in stamps if x.replace("T", " ") >= day]
+            row(not recent, "errors", f"{len(recent)} in the last day, newest {recent[-1]} · {ERROR_LOG.replace(HOME, '~')}" if recent else "none in the last day")
+        except OSError: row(True, "errors", "none logged")
+        free = shutil.disk_usage(APP_HOME).free / 1e9
+        row(free > 5, "disk", f"{free:.0f} GB free")
+        for tool, why in (("git", "for /commit and /review"), ("ffmpeg", "for /v voice")):
+            row(bool(shutil.which(tool)), tool, "found" if shutil.which(tool) else f"missing, needed {why}")
+        if REMOTE: row(bool(modal_bin()), "modal", "found" if modal_bin() else "missing, needed for /cost and /cloud")
+        try:
+            mode = os.stat(CONFIG).st_mode & 0o777
+            row(not mode & 0o077, "config", "only you can read it" if not mode & 0o077 else f"readable by others ({oct(mode)}), run chmod 600 {CONFIG.replace(HOME, '~')}")
+        except OSError: row(True, "config", "none yet")
+    finally:
+        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+    print(header("Doctor")); print("\n".join(rows))
+
 # ---- /cloud: the model on a graphics card in their own Modal account ----
 CLOUD_APP = "bxzex-ai-gpu"
 CLOUD_CARDS = [("H100", "fastest · the one to pick if unsure"), ("A100-80GB", "a bit slower, costs less per hour"),
                ("L40S", "slowest, costs the least per hour, holds a shorter chat")]
+
+CARD_RATE = {"H100": 3.95, "A100-80GB": 2.50, "L40S": 1.95}   # Modal's price per hour, roughly
+
+def card_rate():
+    """Dollars per hour the cloud card costs while it's awake (H100 unless /cloud picked another)."""
+    return CARD_RATE.get((load_config().get("cloud") or {}).get("card") or "H100", 3.95)
 
 def modal_bin():
     """Modal's command line tool, also when ~/.local/bin isn't on the PATH."""
@@ -2846,7 +3036,7 @@ def setup_imessage(arg=""):
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
               "list_files": list_files, "search_files": search_files,
-              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task: one_helper(1, str(task)), "schedule_task": schedule_task, "test_page": test_page, "safari": safari, "imessage": imessage,
+              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task, edits="false": one_helper(1, str(task)), "schedule_task": schedule_task, "test_page": test_page, "safari": safari, "imessage": imessage,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
               "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
 
@@ -2877,9 +3067,11 @@ TOOLS = [
     tool("search_files", "Search inside files for a regex. Returns file:line: matching text.", pattern="regex to look for",
          path="folder or file, default .", file_pattern="only files like this, e.g. *.js, default all"),
     tool("remember", "Save a lasting note about the user for future conversations.", note="one short sentence"),
-] + ([tool("delegate", "Hand one self-contained look-only job (research, searching a codebase, reading many files) to a helper with its own fresh "
-           "memory. It can read, search and run read-only commands, then returns a short report. Several delegate calls in one reply run at "
-           "the same time, so split big research into 2 or 3 parts. Give each everything it needs in the task.", task="the full task, with all the details")]
+] + ([tool("delegate", "Hand one self-contained job (research, searching a codebase, reading many files, or a contained change to a few files) to a "
+           "helper with its own fresh memory. It can read, search and run read-only commands, then returns a short report. With edits set to "
+           "true it can also change files: its changes are shown to the user for one OK when it finishes. Several delegate calls in one reply "
+           "run at the same time, so split big jobs into 2 or 3 parts that touch different files. Give each everything it needs in the task.",
+           task="the full task, with all the details", edits="true lets the helper change files, default false")]
      if REMOTE else []) + [
     tool("test_page", "Open a website or local app as an iPhone, Android phone, iPad or desktop would (the iPhone and iPad use Safari's engine) "
          "and check it: sideways scrolling, things too wide, buttons too small to tap, tiny text, broken images, console errors, failed requests. "
@@ -2957,7 +3149,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - update_todos: for work with 3 or more steps, keep a to-do list they can see, and tick steps off as you go.
 - ask_user: when a choice is really theirs, ask with 2 to 5 short options they pick with the arrow keys.
 - run_shell with background true: leave a server or long build running; check_job reads its output or stops it.
-- delegate (on the cloud card): hand a big self-contained job to a helper with fresh memory; it reports back.
+- delegate (on the cloud card): hand a big self-contained job to a helper with fresh memory; it reports back. With edits "true" the helper can also change files (shown to the user for one OK), so 2 or 3 helpers can each change different files at once.
 - remember: save a short note that you will still have in future conversations.
 - Anything you write for them to send or publish (emails, posts, page copy) reads like a person wrote it: load human-writing,
   no em dashes, no buzzwords, no [placeholders] when you know the detail.
@@ -3549,6 +3741,7 @@ class Waiting:
     """One-line status shown while it loads, reads or thinks: flames, what it's doing, how long, how many tokens."""
     def __init__(self, label):
         self.label = label; self.tok = 0
+        self.thinking = False  # the model is reasoning before it answers
         self.preview = ""     # tail of what is being written right now, e.g. the file a tool call is producing
         self.stop_ev = threading.Event(); self.t0 = time.time()
         self.th = threading.Thread(target=self.run, daemon=True); self.th.start()
@@ -3556,7 +3749,7 @@ class Waiting:
         while not self.stop_ev.wait(0.07):
             el = time.time() - self.t0; w = W()
             tok = f" · ↓ {self.tok / 1000:.1f}k tokens" if self.tok >= 1000 else f" · ↓ {self.tok} tokens" if self.tok else ""
-            info = f"({fmt(el)}{tok} · esc to stop)"
+            info = f"({fmt(el)}{tok} · {'thinking · ' if self.thinking else ''}esc to stop)"
             used = 2 + len(self.label) + 2 + len(info)
             ride = flame(el) + " " if w > used + 16 else ""
             if ride: used += 13
@@ -3702,6 +3895,7 @@ def fold(history, force=False, everything=False):
     return changed
 
 turn_tok = 0   # tokens generated in the current turn, for the summary line
+turn_think = 0.0   # seconds spent reasoning in the current turn
 stream_error = ""   # set when the server reports a failure instead of an answer
 DOING = {"update_todos": "Planning", "ask_user": "Writing a question", "delegate": "Briefing a helper",
          "generate_image": "Writing the image prompt", "write_file": "Writing file", "edit_file": "Editing file",
@@ -3728,7 +3922,8 @@ def stream(messages, label="Reading"):
     req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type":"application/json"})
     sys.stdout.write("\033[?25l")  # hide cursor while generating
     wait = Waiting(label)
-    global turn_tok, stream_error, tok_per_char
+    global turn_tok, turn_think, stream_error, tok_per_char
+    think_from = None
     stream_error = ""
     sent_chars = FIXED_CHARS + chars_in(messages) if estimate(messages) else 0
     plain_text = all(isinstance(m.get("content") or "", str) for m in messages)
@@ -3783,6 +3978,8 @@ def stream(messages, label="Reading"):
             think = delta.get("reasoning_content")
             if think:
                 tn += 1
+                if think_from is None: think_from = time.time()
+                wait.thinking = True
                 if show_think:
                     wait.stop()
                     if phase!="think":
@@ -3796,6 +3993,8 @@ def stream(messages, label="Reading"):
                     word = WORDS[(off + int((time.time()-t0)/1.8)) % len(WORDS)]
                     wait.label = word; wait.tok = tn
 
+            if (delta.get("content") or delta.get("tool_calls")) and think_from is not None:
+                turn_think += time.time() - think_from; think_from = None; wait.thinking = False
             content = delta.get("content")
             if content:
                 wait.stop()
@@ -3805,6 +4004,7 @@ def stream(messages, label="Reading"):
                     phase="answer"; at_start=True
                 md.feed(content); answer.append(content)
     finally:
+        if think_from is not None: turn_think += time.time() - think_from
         wait.stop(); md.close()
         if phase=="answer" and not md.col0: sys.stdout.write("\n")
         elif phase!="answer": sys.stdout.write(f"{R}\r\033[K")
@@ -3821,8 +4021,8 @@ def run_turn(history):
     if not ensure_server(): return      # e.g. still reloading after an image
     typed.start()
     try:
-        global turn_tok
-        turn_tok = 0; began = time.time(); retried = made_room = False; recent = []
+        global turn_tok, turn_think
+        turn_tok = 0; turn_think = 0.0; began = time.time(); retried = made_room = False; recent = []
         label = "Reading"
         for _ in range(MAX_STEPS):
             if fold(history): label = "Reading"
@@ -3875,7 +4075,12 @@ def run_turn(history):
                 took = time.time() - began
                 got = len(learned); learned.clear()
                 note = f"remembered {got} new thing{'s' if got > 1 else ''} about you (/memory)" if got else ""
-                if sys.stdout.isatty() and took >= 1: print(f"\n{DIM}≈ done in {fmt(took)} · {turn_tok} tok{' · ' + note if note else ''}{R}")
+                if sys.stdout.isatty() and took >= 1:
+                    bits = [f"done in {fmt(took)}", f"{turn_tok} tok"]
+                    if turn_think >= 1: bits.append(f"thought {fmt(turn_think)}")
+                    if REMOTE: bits.append(f"~${card_rate() * took / 3600:.3f}")
+                    if note: bits.append(note)
+                    print(f"\n{DIM}≈ {' · '.join(bits)}{R}")
                 elif note: print(f"\n{DIM}≈ {note}{R}")
                 if took >= 30: ping_if_away("done: " + " ".join(re.sub(r"[*#`>|_]", "", text or "finished").split())[:160])
                 hooks_done(text or "", took)
@@ -4148,11 +4353,13 @@ def menu(rows, at=0, hint="↑↓ to move · enter to pick · esc to cancel"):
         w = W(); out = "" if first else f"\033[{shown}A"
         top = min(max(0, at - (shown - 1) // 2), len(rows) - (shown - 1))
         for i, (label, detail) in list(enumerate(rows))[top:top + shown - 1]:
+            if len(label) > w - 6: label = label[:max(1, w - 7)] + "…"      # a wrapped row breaks the redraw
             room = max(0, w - len(label) - 6)
             tail = f"  {DIM}{detail[:room]}{R}" if detail and room > 8 else ""
             out += f"\r\033[K  {GOLD}❯ {BOLD}{label}{R}{tail}\n" if i == at else f"\r\033[K    {label}{tail}\n"
         more = f" · {at + 1} of {len(rows)}" if len(rows) > shown - 1 else ""
-        RAW.write(out + f"\r\033[K  {DIM}{(hint + more)[:w - 2]}{R}\n"); RAW.flush()
+        tip = hint.replace("enter to pick", f"enter or 1-{len(rows)} to pick") if 1 < len(rows) <= 9 else hint
+        RAW.write(out + f"\r\033[K  {DIM}{(tip + more)[:w - 2]}{R}\n"); RAW.flush()
     try:
         tty.setcbreak(fd, termios.TCSANOW); RAW.write("\033[?25l"); draw(True)
         while True:
@@ -4237,7 +4444,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/hooks", "your own commands before or after its tools"), ("/check", "check a site on phone, tablet and desktop · /check localhost:5173"), ("/notify", "notifications when it finishes in the background"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
             ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"),
-            ("/password", "a password your phone has to send before it can use it"), ("/cloud", "run the model on a graphics card in your own Modal account"), ("/cost", "what the cloud card has cost"), ("/export", "save this chat as a document"),
+            ("/password", "a password your phone has to send before it can use it"), ("/cloud", "run the model on a graphics card in your own Modal account"), ("/cost", "what the cloud card has cost"), ("/doctor", "check the model, key, updates and errors"), ("/export", "save this chat as a document"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
@@ -4611,6 +4818,29 @@ if sys.argv[1:2] == ["--run-schedule"] and len(sys.argv) > 2:
     run_schedule(sys.argv[2]); sys.exit(0)
 
 # ---- one-shot ----
+if sys.argv[1:2] in (["-p"], ["--print"]):      # for scripts and pipes: bxzex-ai -p "question" < file   prints just the answer
+    words = sys.argv[2:]
+    if "--yes" in words: words.remove("--yes"); allow_all = True       # may act without asking; risky commands still never run
+    said = " ".join(words)
+    if not sys.stdin.isatty():
+        piped = sys.stdin.read()
+        if piped.strip(): said = (said + "\n\n" if said else "") + clip(piped, PAGE_CHARS * 4)
+    if not said.strip(): sys.stderr.write('usage: bxzex-ai -p "what to do"   (text piped in is added to it; --yes lets it act)\n'); sys.exit(2)
+    out = sys.stdout
+    if not out.isatty(): RAW = sys.stdout = open(os.devnull, "w")      # piped or captured: only the answer goes out, none of the working lines
+    h = [user_message("(This was run from a script. Nobody can answer questions, so don't ask any. "
+                      + ("" if allow_all else "Anything that needs an OK is refused, so only look and read. ") + "Reply with just the answer.)\n\n" + said)]
+    code = 0
+    try:
+        if not ensure_server(): sys.stderr.write("couldn't reach the model\n"); sys.exit(1)
+        if load_config().get("mcp"): connect_mcp()
+        refresh_system(); run_turn(h)
+    except KeyboardInterrupt: code = 130
+    answer = next((m["content"] for m in reversed(h) if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip()), "")
+    if not out.isatty():
+        sys.stdout = out; print(answer); sys.stdout.flush()
+    sys.exit(code or (0 if answer else 1))
+
 if len(sys.argv) > 1:
     if not ensure_server(): sys.exit(1)
     refresh_system()
@@ -4819,6 +5049,7 @@ while True:
             if len(pw) < 6: print(f"{DIM}use at least 6 characters{R}"); continue
             set_bridge_password(pw); RAW.write("\033[1A\r\033[K"); print(f"{GOLD}●{R} {BOLD}Password set{R} {DIM}· send it from your phone to unlock · /lock there locks it · /password off removes it{R}"); continue
         if user == "/cost": show_cost(); continue
+        if user == "/doctor": doctor(); continue
         if user.split()[0] == "/cloud":
             if setup_cloud(user[6:]): reload_app(note="Now running on " + ("your cloud card" if load_config().get("remote") else "this computer"))
             continue
