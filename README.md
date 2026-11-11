@@ -164,7 +164,8 @@ Type and press Enter. For a quick one-off without opening the app: `bxzex-ai "yo
 | `/compact` | Fold the chat so far into a short summary to make room. |
 | `/init` | It looks around the folder you're in and writes a `BXZEX.md` about the project, which it reads every time you work there. |
 | `/allow` | Turn "always allow" on or off. Risky commands like `rm` still ask. |
-| `/reset` | Start a fresh conversation. `/clear` does the same. |
+| `/new` | Start a fresh conversation. `/reset` and `/clear` do the same. |
+| `/cd ~/project` | Work in another folder. |
 | `exit` | Quit. |
 
 When it opens it asks where to start: continue from your last save, a new chat, or an earlier one, picked with the arrow keys. Type `/` and it shows you the commands as you go, and Tab finishes the name. Ctrl+V pastes a screenshot from the clipboard. Ctrl+R searches what you sent before. Pasted text keeps its line breaks, and the up arrow brings back what you typed, even from earlier sessions. Looking at files and read-only commands (`ls`, `cat`, `grep`, `git status`) never ask; any change to a file shows you exactly which lines change before you allow it. Press `f` at a question to always allow that kind of command (like `npm test`) or file changes in that folder, kept between sessions; `/allow clear` forgets them. Tables come out as grids and code in color. The whole thing redraws itself when you resize the window.

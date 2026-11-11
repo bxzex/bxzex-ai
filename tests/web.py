@@ -70,7 +70,7 @@ saved = json.load(open(chat))["messages"]
 print("saved back into that chat:", saved[0]["content"].endswith("PINEAPPLE") and any(m.get("content") == "Made **the file**." for m in saved) and len(saved) >= 5)
 print("asked on the page:", any(e["kind"] == "ask" and "made.txt" in e["body"] and e.get("choices") == ["Yes", "No", "Always, this chat"] for e in shown))
 print("file made after the tap:", os.path.exists(target) and open(target).read() == "hi\n")
-print("work shown:", any(e["kind"] == "log" and "write_file" in e["body"] for e in shown))
+print("work shown:", any(e["kind"] == "log" and "Write " in e["body"] for e in shown))
 print("no escape codes shown:", not any("\x1b" in e["body"] for e in shown))
 print("reply shown:", any(e["kind"] == "reply" and e["body"] == "Made **the file**." for e in shown))
 print("ask before its reply:", "ask" in kinds[:first] and shown[first - 1]["kind"] == "reply")

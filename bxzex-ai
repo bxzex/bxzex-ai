@@ -7,7 +7,7 @@ Usage:  bxzex-ai            (interactive)
         bxzex-ai "prompt"    (one-shot)
         bxzex-ai -p "prompt" (for scripts and pipes: prints just the answer; piped text is added; --yes lets it act)
 Commands: /v speak instead of typing, /color pick a theme, /fast toggle reasoning,
-          /think show reasoning, /memory what it remembers, /skills list skills, /reset clear, exit/quit.
+          /think show reasoning, /memory what it remembers, /skills list skills, /new a new chat, exit/quit.
 Files:  ~/.bxzex-ai/BXZEX.md is its guide (add your own instructions there),
         ~/.bxzex-ai/memory.md is what it has been asked to remember,
         ~/.bxzex-ai/skills/ holds its skills, one .md file each,
@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.15.2"
+VERSION = "1.16.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -304,6 +304,8 @@ def splash_fits():
     size = shutil.get_terminal_size((90, 30))
     return sys.stdout.isatty() and size.lines >= len(CAR) + 6 and size.columns >= len(CAR[0]) + 4
 
+LINKS_CLICK = os.environ.get("TERM_PROGRAM") != "Apple_Terminal"      # Terminal.app shows link text but can't open it
+
 def link(url, text):
     """Clickable where the terminal supports hyperlinks; plain text everywhere else."""
     return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
@@ -316,7 +318,7 @@ def banner():
     insta = link("https://instagram.com/bxzex", "instagram.com/bxzex")
     print(f"\n  {BOLD}BXZEX AI{R} {DIM}· uncensored · {'cloud GPU' if REMOTE else 'local'} · private{R}")
     print(f"  {GOLD}{site}{R} {DIM}· {insta} · © 2026 bxzex · v{VERSION}{R}")
-    print(f"  {DIM}{os.getcwd().replace(HOME, '~')}{R}")
+    print(f"  {DIM}{squeeze(os.getcwd().replace(HOME, '~'), W() - 4)}{R}")
     print(f"\n  {DIM}/help for commands · drop an image to show it · keep typing while it works{R}")
 
 def header(label, ramp=None):
@@ -880,7 +882,7 @@ def write_file(path, content):
     if not confirm(f"{'update' if old is not None else 'write'} {path}", shown, always_ask=bool(SENSITIVE.search(os.path.abspath(path))),
                    diff=old is not None, rule="edits" if here else "", rule_label="file changes"): return "The user declined to write this file."
     save_file(path, content)
-    return f"wrote {len(content)} chars to {path}" + check_file(path, content)
+    return f"wrote {path} ({content.count(chr(10)) + (not content.endswith(chr(10)) and bool(content))} lines)" + check_file(path, content)
 
 def edit_file(path, old_text, new_text, replace_all="false"):
     if PLAN: return plan_block()
@@ -894,7 +896,7 @@ def edit_file(path, old_text, new_text, replace_all="false"):
                    rule="edits" if here else "", rule_label="file changes"):
         return "The user declined this edit."
     save_file(path, new)
-    return f"edited {path}: {n} change(s){note}" + check_file(path, new)
+    return f"edited {path}: {n} change{'' if n == 1 else 's'}{note}" + check_file(path, new)
 
 def undo(arg=""):
     """Put back the file the last write or edit changed."""
@@ -1325,11 +1327,11 @@ def helper_file(name, args, over):
         return clip(over[path][1], PAGE_CHARS)
     if name == "write_file":
         over[path][1] = str(args.get("content") or "")
-        return f"wrote {len(over[path][1])} chars to {path}" + check_file(path, over[path][1])
+        return f"wrote {path} ({over[path][1].count(chr(10)) + 1} lines)" + check_file(path, over[path][1])
     made = make_edit(over[path][1], str(args.get("old_text") or ""), str(args.get("new_text") or ""), str(args.get("replace_all")).lower() == "true")
     if isinstance(made, str): return made
     over[path][1] = made[0]
-    return f"edited {path}: {made[1]} change(s){made[2]}" + check_file(path, made[0])
+    return f"edited {path}: {made[1]} change{'' if made[1] == 1 else 's'}{made[2]}" + check_file(path, made[0])
 
 def keep_helper_changes(n, over):
     """After a working helper is done: show everything it changed in one question and save it only on a yes. Returns a line for its report."""
@@ -3136,7 +3138,8 @@ def web_poller():
             if kind == "answer": WEB_ANSWERS[str(m.get("ask"))] = m.get("pick")
             elif kind == "stop":
                 if PHONE: os.kill(os.getpid(), signal.SIGINT)      # the same as esc at the keyboard: stops the reply, keeps the work
-            elif m.get("body"): WEB_QUEUE.append(str(m["body"]))
+            elif m.get("body"):                                    # written while it works: a note for this reply, the same as typing in the terminal
+                body = str(m["body"]); (typed.notes if PHONE and body.strip()[:1] not in "/!" else WEB_QUEUE).append(body.strip() if PHONE else body)
         time.sleep(1.5 if PHONE or time.time() - WEB_ACTIVE < 180 else 10)
 
 def web_choose(question, choices, detail=""):
@@ -3243,6 +3246,7 @@ def web_loop():
     real = sys.stdout
     while True:
         try:                                              # a stop from the page can land at any moment: it ends the reply, never this service
+            if not WEB_QUEUE: WEB_QUEUE.extend(typed.drain())      # a note that came in just as the reply ended is the next message
             if not WEB_QUEUE: time.sleep(0.3); continue
             text = WEB_QUEUE.pop(0).strip()
             if text: one(text)
@@ -3374,7 +3378,7 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 - /allow: turn "always allow" on or off for this conversation.
 - !<command>: they run a command themselves; you see its output.
 - @<file>: they attach a file; its text is in their message.
-- /reset or /clear: start a new conversation. exit: quit.
+- /new (also /reset or /clear): start a new conversation. /cd folder: work in another folder. exit: quit.
 - Dragging an image file into the window lets you see it.
 - Esc or Ctrl-C stops your reply.
 - They can type while you are working and press Enter; it reaches you as a "By the way" note. /btw <note> adds one without asking for a reply.
@@ -3627,6 +3631,11 @@ def system_prompt():
 RUNNING = {"run_shell": "Running", "check_job": "Checking the job", "web_search": "Searching the web", "fetch_page": "Opening page", "read_file": "Reading",
            "list_files": "Looking through files", "search_files": "Searching files", "write_file": "Saving", "edit_file": "Saving",
            "use_skill": "Loading skill", "schedule_task": "Scheduling", "test_page": "Checking the page", "safari": "Working in Safari", "imessage": "Working in Messages"}
+# how each step is named on screen
+SAYS = {"run_shell": "Run", "check_job": "Job", "web_search": "Search the web", "fetch_page": "Open", "read_file": "Read", "write_file": "Write",
+        "edit_file": "Edit", "list_files": "List", "search_files": "Search", "update_todos": "To-do", "ask_user": "Ask", "remember": "Remember",
+        "delegate": "Helper", "test_page": "Check", "safari": "Safari", "imessage": "Messages", "schedule_task": "Schedule", "use_skill": "Skill",
+        "generate_image": "Image"}
 tool_wait = None; tool_label = ""
 LAST_TOOLS = []     # (call shown, full output) for this reply, for ctrl-o
 
@@ -3653,12 +3662,15 @@ def run_tool(call):
     if not isinstance(args, dict): return "error: arguments must be a JSON object with the tool's named fields"
     if name in ("read_file", "write_file", "edit_file") and args.get("path"):    # files: just which one, the rest is noise on screen
         shown = short_path(args["path"]) + (f" · lines {args['lines']}" if args.get("lines") else "")
+    elif name == "update_todos": shown = ""                # the list itself is drawn right under it
     else: shown = short_path(" ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " "))
-    print(f"{TEAL}◆{R} {BOLD}{name}{R}{DIM}({shown[:W()-len(name)-6]}){R}")
+    says = SAYS.get(name) or (MCP[name][0] + " · " + MCP[name][1].replace("_", " ") if name in MCP else name)
+    title = (says + " " + " ".join(shown.split())).strip()[:W() - 4]
+    print(f"{TEAL}◆{R} {BOLD}{title[:len(says)]}{R}{DIM}{title[len(says):]}{R}")
     if name not in TOOL_FUNCS and name not in MCP: return f"error: no tool named {name}"
     blocked = hooks_before(name, args)
     if blocked:
-        LAST_TOOLS.append((f"{name}({shown[:W() - len(name) - 6]})", blocked)); print(f"  {DIM}└ blocked by your hook{R}\n"); return blocked
+        LAST_TOOLS.append((title, blocked)); print(f"  {DIM}└ blocked by your hook{R}\n"); return blocked
     global tool_wait, tool_label
     tool_label = RUNNING.get(name, "Working with " + MCP[name][0] if name in MCP else "")
     if tool_label: sys.stdout.write("\033[?25l"); tool_wait = Waiting(tool_label)
@@ -3672,9 +3684,15 @@ def run_tool(call):
     out += hooks_after(name, args, out)
     lines = [l for l in out.strip().splitlines() if l.strip()]
     first = short_path(lines[0]) if lines else "(empty)"
-    LAST_TOOLS.append((f"{name}({shown[:W() - len(name) - 6]})", out))
+    LAST_TOOLS.append((title, out))
     more = f" (+{len(lines)-1} lines · ctrl-o)" if len(lines) > 1 else ""
-    print(f"  {DIM}└ {first[:W()-len(more)-6]}{more}{R}\n")
+    plural = lambda n, word: f"{n:,} {word}{'' if n == 1 else 's'}"
+    if out.startswith(("error", "The user declined", "Plan mode")): pass
+    elif name == "read_file": first, more = plural(out.count("\n") + 1, "line"), " · ctrl-o"       # how much it read, not the file's first line
+    elif name == "list_files" and out != "no files": first, more = plural(len(lines), "file"), " · ctrl-o"
+    elif name == "search_files" and out != "no matches": first, more = plural(len(lines), "match").replace("matchs", "matches"), " · ctrl-o"
+    tone = c(174) if out.startswith("error") else DIM
+    print(f"  {DIM}└{R} {tone}{first[:W()-len(more)-6]}{more}{R}\n")
     return out
 
 # ---- images ----
@@ -3819,6 +3837,8 @@ class Markdown:
         self.word = []; self.word_w = 0; self.word_style = R
         self.codeline = ""    # the code line being written inside a ``` block, coloured when it ends
         self.tline = None     # the table row being collected, from its first |
+        self.link = None      # a [text](address) being collected, shown as the text you can click
+        self.under = False; self.as_typed = False
         self.trows = []       # rows of a table, drawn as a grid once the table ends
 
     def style(self):
@@ -3826,6 +3846,7 @@ class Markdown:
         if self.fence or self.code: s += TEAL
         if self.bold or self.head: s += BOLD
         if self.ital: s += ITAL
+        if self.under: s += "\033[4m"
         return s
 
     def hold(self, s, w):
@@ -3868,6 +3889,8 @@ class Markdown:
         self.restyle()
 
     def newline(self):
+        if self.col0 and re.fullmatch(r"-{3,}|_{3,}", "".join(self.word)):      # a line of --- is a rule across
+            self.word = [f"{R}{DIM}{'─' * min(48, TW() - 4)}{R}"]; self.word_w = min(48, TW() - 4)
         self.flush_word()
         self.bold = self.ital = self.code = self.head = False
         sys.stdout.write(R + "\n"); self.bol = self.col0 = True; self.prev = "\n"; self.col = 0
@@ -3933,6 +3956,25 @@ class Markdown:
             if ch == "\n": self.code_line()
             else: self.codeline += ch
             return
+        if self.link is not None:                          # [text](address): held until it is whole, then shown as the text
+            self.link += ch
+            m = re.fullmatch(r"\[([^\[\]\n]+)\]\((\S+?)\)", self.link)
+            if m or ch == "\n" or len(self.link) > 500 or not re.fullmatch(r"\[[^\[\]\n]*(\](\([^\s()]*)?)?", self.link):
+                held, self.link, self.as_typed = self.link, None, True
+                if m and re.match(r"https?://|mailto:", m.group(2)):
+                    self.under = True; self.hold(f"\033]8;;{m.group(2)}\033\\", 0)
+                    for x in m.group(1): self.char(x)
+                    self.under = False; self.hold("\033]8;;\033\\\033[24m", 0)
+                    if not LINKS_CLICK and m.group(1) != m.group(2):       # this terminal can't open them: show where it goes
+                        for x in f" ({m.group(2)})": self.char(x)
+                else:
+                    for x in held: self.char(x)                # not a link after all: as it was written
+                self.as_typed = False
+            return
+        if ch == "[" and not self.as_typed and not self.code:
+            self.link = "["; return
+        if ch == ">" and self.bol and self.col0 and not self.word:       # a quoted line
+            self.hold(f"{R}{DIM}▎{R}", 1); self.out(" "); self.eat_space = True; self.restyle(); return
         if self.dash:
             self.dash = False
             if ch == " ": self.out("•"); self.bullet = True
@@ -3962,6 +4004,9 @@ class Markdown:
             if getattr(self, r): self.resolve(r, "\n")
         if self.codeline: self.code_line()
         if self.dash: self.out("-")
+        if self.link is not None:
+            held, self.link, self.as_typed = self.link, None, True
+            for x in held: self.char(x)
         self.flush_word()
         sys.stdout.write(R)
 
@@ -4706,7 +4751,7 @@ def open_chat(pick=None):
     if not REMOTE: print(f"{DIM}it has to re-read the conversation, so the next reply starts slower{R}")
 
 # ---- the input box, pinned to the bottom of the window ----
-import atexit, codecs, signal
+import atexit, codecs, signal, unicodedata
 resized = False
 def _on_resize(*_):
     global resized
@@ -4731,7 +4776,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
-            ("/update", "get the newest version · /update full adds new downloads"), ("/reset", "start a new conversation · /clear"), ("/help", "this list"), ("exit", "quit")]
+            ("/update", "get the newest version · /update full adds new downloads"), ("/new", "start a new conversation · also /reset and /clear"), ("/cd", "work in another folder · /cd ~/project"), ("/help", "this list"), ("exit", "quit")]
 PAST_FILE = f"{APP_HOME}/input_history"
 try:
     with open(PAST_FILE, errors="replace") as _f: past = [json.loads(l) for l in _f.read().splitlines()[-300:] if l.startswith('"')]
@@ -4764,8 +4809,15 @@ def fit_ansi(text, width):
         out.append(part[:width - used]); used += len(part[:width - used])
     return "".join(out)
 
-def status_text(buf, working=False):
+def squeeze(path, room):
+    """A path cut from the left to fit: the end of it is what says where you are."""
+    if len(path) <= room: return path
+    keep = path[-max(1, room - 1):]; cut = keep.find("/")
+    return "…" + (keep[cut:] if 0 <= cut < len(keep) - 1 else keep)
+
+def status_text(buf, working=False, offer=""):
     if FIND_NOTE: return FIND_NOTE
+    if offer: return f"  ↑↓ to choose · tab to fill in · enter to {offer} · esc to close"
     if buf.startswith("/"):
         hits = [f"{n} {d}" for n, d in COMMANDS + [(c, "your command") for c in custom_commands()] if n.startswith(buf.split()[0])]
         if hits: return "  " + "   ".join(hits)
@@ -4773,10 +4825,13 @@ def status_text(buf, working=False):
     badge = mode_badge(); lead = "  " + (badge + f"{DIM} · " if badge else "")
     if working: return lead + "esc to stop · type and press Enter to add a note" + running_bits()
 
-    branch = git_branch(); where = os.getcwd().replace(HOME, "~") + (" · " + branch if branch else "")
-    if badge: return lead + where + running_bits() + " · /help"
-    return (f"  bxzex-ai v{VERSION}{' · lite' if LITE else ''} · {THEME} · fast {'on' if fast else 'off'} · {where}"
-            + running_bits() + " · shift+tab for modes · /help")
+    branch = git_branch(); here = os.getcwd().replace(HOME, "~"); extra = (" · " + branch if branch else "") + running_bits()
+    head = lead if badge else f"  bxzex-ai v{VERSION}{' · lite' if LITE else ''} · {THEME} · fast {'on' if fast else 'off'} · "
+    tail = " · /help" if badge else " · shift+tab for modes · /help"
+    room = W() - len(re.sub(r"\x1b\[[0-9;]*m", "", head)) - len(extra)        # the folder gives way first, then the hints
+    if room - len(tail) >= min(len(here), 24): room -= len(tail)
+    else: tail = ""
+    return head + squeeze(here, max(8, room)) + extra + tail
 
 _branch = ("", 0.0, "")
 def git_branch():
@@ -4801,11 +4856,57 @@ def custom_commands():
         except OSError: pass
     return found
 
+def char_w(ch):
+    """Columns a character takes: two for wide ones (most emoji, Chinese, Japanese, Korean), none for marks that sit on another letter."""
+    if ch < "\u0300": return 1
+    if unicodedata.combining(ch) or ch in "\u200d\ufe0f": return 0
+    return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+
+def box_rows(text, room):
+    """What is typed, as the rows it takes in the box, plus the (row, column) of every place the cursor can be."""
+    rows, spots, wide = [""], [], 0
+    for ch in text:
+        if ch == "\n": spots.append((len(rows) - 1, wide)); rows.append(""); wide = 0; continue
+        w = char_w(ch)
+        if wide + w > room:
+            cut = rows[-1].rfind(" ") + 1
+            tail = rows[-1][cut:] if ch != " " and cut and len(rows[-1]) - cut < room // 2 else ""
+            if tail:                                   # the word being typed moves down whole instead of being cut in two
+                rows[-1] = rows[-1][:cut]
+                for k in range(len(tail)): spots[k - len(tail)] = (len(rows), sum(char_w(x) for x in tail[:k]))
+            rows.append(tail); wide = sum(char_w(x) for x in tail)
+        spots.append((len(rows) - 1, wide)); rows[-1] += ch; wide += w
+    spots.append((len(rows) - 1, wide))
+    return rows, spots
+
+def offers(text, pos):
+    """What the list above the box offers for what is being typed: commands after a /, files after an @.
+    Returns (kind, where the word starts, [(what goes in, a note about it)])."""
+    if text.startswith("/") and not re.search(r"\s", text):
+        hits = [(n, d) for n, d in COMMANDS + [(n, "your command") for n in custom_commands()] if n.startswith(text)]
+        order = " ".join(names for _, names in HELP_GROUPS).split()             # in the order /help lists them
+        return "command", 0, sorted(hits, key=lambda h: (h[0] != text, order.index(h[0]) if h[0] in order else 99))
+    start = max(text.rfind(" ", 0, pos), text.rfind("\n", 0, pos)) + 1
+    word = text[start:pos]
+    if not word.startswith("@") or len(word) > 300: return "", 0, []
+    folder, stem = os.path.split(word[1:])
+    try: names = sorted(os.listdir(os.path.expanduser(folder) or "."), key=str.lower)
+    except OSError: return "", 0, []
+    hits = []
+    for n in names:
+        if not n.lower().startswith(stem.lower()) or " " in n or (n.startswith(".") and not stem.startswith(".")): continue
+        full = os.path.join(folder, n); is_dir = os.path.isdir(os.path.expanduser(full))
+        if is_dir and n in SKIP_DIRS: continue
+        hits.append(("@" + full + ("/" if is_dir else ""), "folder" if is_dir else ""))
+        if len(hits) >= 300: break
+    if len(hits) == 1 and hits[0][0] == word: return "", 0, []                    # already typed in full
+    return "file", start, sorted(hits, key=lambda h: not h[0].endswith("/"))
+
 class Box:
     """Keeps the input box on the last four rows. Everything else scrolls in the area above it,
     so the box stays put while a reply streams."""
     ROWS = 4
-    def __init__(self): self.on = False; self.h = 0; self.size = None
+    def __init__(self): self.on = False; self.h = 0; self.size = None; self.free = 0; self.first = 0
     def pin(self):
         if self.on or not (RAW.isatty() and sys.stdin.isatty()): return
         size = shutil.get_terminal_size((90, 30)); self.h = size.lines
@@ -4824,6 +4925,7 @@ class Box:
         try:
             past_output = sys.stdout.replay() if hasattr(sys.stdout, "replay") else ""
             RAW.write(f"\033[r\033[H\033[2J\033[3J\033[1;{self.h - self.ROWS}r\033[H{past_output}\0337"); RAW.flush()
+            self.free = 0
         finally:
             if lock: lock.release()
         return True
@@ -4841,11 +4943,42 @@ class Box:
         self.fit()
         s, _ = self.frame(text, pos, working)
         RAW.write("\0337" + s + "\0338"); RAW.flush()
-    def focus(self, text, pos):
-        """Redraw at the prompt: the cursor stays in the box."""
+    def reserve(self, need):
+        """Free rows above the box for it to grow into. The conversation moves up to make them; none of it is lost."""
+        if need <= self.free: return
+        RAW.write("\0338" + "\n" * need + f"\033[{need}A\0337"); self.free = need
+    def wipe(self):
+        """Take the grown part of the box and its list off the screen again."""
+        top = self.h - self.ROWS + 1
+        if self.free: RAW.write("".join(f"\033[{r};1H\033[2K" for r in range(max(1, top - self.free), top)))
+        self.free = 0; self.first = 0
+    def focus(self, text, pos, offer=(), sel=0, kind=""):
+        """Redraw at the prompt. The box grows upward as the text gets longer, the list of commands or files sits
+        above it, and the cursor stays in the box."""
         self.fit()
-        s, col = self.frame(text, pos, False)
-        RAW.write(f"{s}\033[{self.h - self.ROWS + 2};{col}H"); RAW.flush()
+        w = W(); top = self.h - self.ROWS + 1
+        rows, spots = box_rows(text, max(4, w - 2))
+        row, col = spots[min(pos, len(spots) - 1)]
+        tall = max(1, min(8, (self.h - self.ROWS) // 3))                      # long text scrolls inside the box past this
+        self.first = max(0, min(self.first, row, len(rows) - tall)) if row < self.first + tall else row - tall + 1
+        shown = rows[self.first:self.first + tall]; grow = len(shown) - 1
+        listed = min(len(offer), 7, max(0, self.h - self.ROWS - grow - 3))
+        self.reserve(grow + listed)
+        out = [f"\033[{r};1H\033[2K" for r in range(max(1, top - self.free), top)]
+        base = top - grow; a = max(0, min(sel - listed // 2, len(offer) - listed))
+        name_w = max([len(n) for n, _ in offer[a:a + listed]] + [0])
+        for k in range(listed):
+            n, d = offer[a + k]; on = a + k == sel
+            line = f"{GOLD}{BOLD}❯ {n.ljust(name_w)}{R}  {d}" if on else f"  {n.ljust(name_w)}  {DIM}{d}"
+            out.append(f"\033[{base - listed + k};1H{fit_ansi(line, w)}{R}")
+        rule = f"{DIM}{'─' * w}{R}"
+        more = f"{DIM} {a + listed} of {len(offer)} {R}" if listed and len(offer) > listed else ""
+        out.append(f"\033[{base};1H\033[J{rule}" + (f"\033[{base};{max(1, w - 14)}H{more}" if more else ""))
+        for k, line in enumerate(shown):
+            out.append(f"\033[{base + 1 + k};1H" + (f"{GOLD}❯{R} " if self.first + k == 0 else "  ") + line)
+        st = fit_ansi(status_text(text, False, {"command": "run", "file": "pick"}.get(kind, "") if listed else ""), w)
+        out.append(f"\033[{top + 2};1H{rule}\033[{top + 3};1H{DIM}{st}{R}")
+        RAW.write("".join(out) + f"\033[{base + 1 + row - self.first};{3 + col}H"); RAW.flush()
     def unpin(self):
         if not self.on: return
         self.on = False
@@ -4871,6 +5004,8 @@ def ask(prefill=""):
     buf = list(prefill); pos = len(buf); at = len(past); draft = ""; pasting = False
     find = None; found = -1; before_find = []
     last_esc = 0.0; last_key = time.time()
+    sel = 0; shut = None; kind = ""; word_at = 0; hits = []       # the list of commands or files above the box
+    box.free = 0; box.first = 0
     dec = codecs.getincrementaldecoder("utf-8")("ignore")
     print()
     tty.setcbreak(fd, termios.TCSANOW)
@@ -4879,12 +5014,35 @@ def ask(prefill=""):
     def leave():
         global FIND_NOTE
         FIND_NOTE = ""
+        box.wipe()
         RAW.write("\033[?2004l\0338"); RAW.flush()      # back to where the conversation left off
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         box.draw("", 0, working=True)
 
+    def look():
+        """Work out the list for what is typed right now (several keys can arrive in one go, so it is asked again before each use)."""
+        nonlocal sel, kind, word_at, hits, shut
+        text = "".join(buf)
+        if shut is not None and text != shut: shut = None
+        was = [h[0] for h in hits]
+        kind, word_at, hits = ("", 0, []) if (shut is not None or find is not None or pasting) else offers(text, pos)
+        if [h[0] for h in hits] != was: sel = 0
+        sel = max(0, min(sel, len(hits) - 1))
+    def show():
+        """Draw the box for what is typed now, with the list that goes with it."""
+        look(); box.focus("".join(buf), pos, hits, sel, kind)
+    def row_move(step):
+        """Up or down a row inside a message that takes several rows. None at the first or last row."""
+        rows, spots = box_rows("".join(buf), max(4, W() - 2)); r, col = spots[pos]
+        if not 0 <= r + step < len(rows): return None
+        return min((i for i, (rr, _) in enumerate(spots) if rr == r + step), key=lambda i: abs(spots[i][1] - col))
+    def fill():
+        """Put the picked command or file where the typed part of it is."""
+        nonlocal pos
+        name = hits[sel][0]; buf[word_at:pos] = list(name + ("" if name.endswith("/") else " ")); pos = word_at + len(name) + (not name.endswith("/"))
+
     try:
-        box.focus("", 0) if not buf else box.focus("".join(buf), pos)
+        show()
         while True:
             try:
                 if reload_ready: raise Reload("".join(buf))
@@ -4893,10 +5051,10 @@ def ask(prefill=""):
             except InterruptedError:
                 ready = []
             except KeyboardInterrupt:
-                if find is not None: find = None; FIND_NOTE = ""; buf = before_find; pos = len(buf); box.focus("".join(buf), pos); continue
-                if buf: buf = []; pos = 0; box.focus("", 0); continue    # first ctrl-c clears the line
+                if find is not None: find = None; FIND_NOTE = ""; buf = before_find; pos = len(buf); show(); continue
+                if buf: buf = []; pos = 0; show(); continue    # first ctrl-c clears the line
                 raise
-            if resized: resized = False; box.focus("".join(buf), pos)
+            if resized: resized = False; show()
             if not ready: continue
             if not buf: wake_soon()                       # they started typing: get a sleeping cloud card going now
             last_key = time.time()
@@ -4930,6 +5088,7 @@ def ask(prefill=""):
                     if rest.startswith("\x1b[201~"): pasting = False; i += 6; continue
                     m = ESC_KEY.match(rest)
                     if not m:                          # a lone Esc clears the line; twice on an empty line goes back (rewind)
+                        if len(rest) == 1 and (look() or hits): shut = "".join(buf); hits = []; i += 1; continue      # with the list open it closes the list
                         if len(rest) == 1:
                             if not buf and time.time() - last_esc < 0.8: buf = list("/rewind"); done = True; break
                             buf = []; pos = 0; last_esc = time.time()
@@ -4952,17 +5111,26 @@ def ask(prefill=""):
                     elif key in ("\x1b[F", "\x1bOF", "\x1b[4~"): pos = len(buf)
                     elif key == "\x1b[3~": del buf[pos:pos + 1]
                     elif key == "\x1b[Z": cycle_mode()                     # shift-tab: asks first, plan mode, always allow
+                    elif key in ("\x1b\r", "\x1b\n", "\x1b[13;2u", "\x1b[27;2;13~"):  # alt-enter or shift-enter: a new line
+                        buf.insert(pos, "\n"); pos += 1
+                    elif key in ("\x1b[A", "\x1bOA", "\x1b[B", "\x1bOB") and (look() or hits):    # the list is open: the arrows move in it
+                        sel = (sel + (-1 if key[-1] == "A" else 1)) % len(hits)
+                    elif key in ("\x1b[A", "\x1bOA", "\x1b[B", "\x1bOB") and row_move(-1 if key[-1] == "A" else 1) is not None:
+                        pos = row_move(-1 if key[-1] == "A" else 1)       # a message of several rows: move inside it first
                     elif key in ("\x1b[A", "\x1bOA") and at > 0:
                         if at == len(past): draft = "".join(buf)
-                        at -= 1; buf = list(past[at]); pos = len(buf)
+                        at -= 1; buf = list(past[at]); pos = len(buf); shut = past[at]      # an earlier message as it was: no list over it
                     elif key in ("\x1b[B", "\x1bOB") and at < len(past):
-                        at += 1; buf = list(past[at] if at < len(past) else draft); pos = len(buf)
+                        at += 1; buf = list(past[at] if at < len(past) else draft); pos = len(buf); shut = "".join(buf)
                     continue
                 i += 1
                 if ch in "\r\n":
                     if pasting:
                         if ch == "\r" and data[i:i + 1] == "\n": i += 1    # one break for \r\n
                         buf.insert(pos, "\n"); pos += 1
+                    elif pos and buf[pos - 1] == "\\": buf[pos - 1] = "\n"       # a \ before Enter: a new line instead of sending
+                    elif (look() or hits) and kind == "file" and hits[sel][0] != "".join(buf[word_at:pos]): fill()
+                    elif hits and kind == "command": buf = list(hits[sel][0]); pos = len(buf); done = True; break
                     else: done = True; break
                 elif ch in "\x7f\b":
                     if pos: del buf[pos - 1]; pos -= 1
@@ -4984,15 +5152,11 @@ def ask(prefill=""):
                     while j and buf[j - 1] != " ": j -= 1
                     del buf[j:pos]; pos = j
                 elif ch == "\t":
-                    word = "".join(buf)
-                    hits = [n for n in [n for n, _ in COMMANDS] + list(custom_commands()) if n.startswith("/") and n.startswith(word)] if word.startswith("/") and " " not in word else []
-                    if hits:
-                        common = os.path.commonprefix(hits)
-                        buf = list(common + (" " if len(hits) == 1 else "")); pos = len(buf)
+                    if not pasting and (look() or hits): fill()
                     else: buf.insert(pos, "\t" if pasting else " "); pos += 1
                 elif ch >= " ": buf.insert(pos, ch); pos += 1
             if done: break
-            box.focus("".join(buf), pos)
+            show()
     except BaseException:
         leave(); raise
     leave()
@@ -5050,15 +5214,43 @@ def clipboard_image():
     except OSError: pass
     return ""
 
+HELP_GROUPS = [("The chat", "/new /cd /history /resume /rewind /compact /context /btw /export /memory"),
+               ("Getting work done", "! @ /plan /allow /undo /todos /jobs /last /commit /review /check /init /image"),
+               ("The model", "/fast /think /device /cloud /warm /cost /doctor"),
+               ("From anywhere", "/phone /imessage /remote /password /notify /schedule"),
+               ("Add to it", "/skills /apps /mcp /hooks"),
+               ("The app", "/color /v /say /update /help exit")]
+
 def show_help():
-    print(header("Commands"))
-    for n, d in COMMANDS: print(f"  {GOLD}{n:<8}{R} {DIM}{d}{R}")
-    print(f"  {DIM}ctrl-r searches what you sent before · ctrl-o shows the last tools' output · ctrl-v pastes a screenshot · shift-tab plan mode{R}")
-    print(f"  {DIM}Drag an image in to show it. Keep typing while it works and press Enter to add a note. Esc stops a reply.")
-    print(f"  Looking at files and read-only commands (ls, cat, grep, git status) never ask. File changes show what changes first.{R}")
+    import textwrap
+    notes = dict(COMMANDS); wide = max(len(n) for n in notes) + 2; room = max(24, W() - wide - 4)
+    def rows(names):
+        for n in names:
+            first, *rest = textwrap.wrap(notes[n], room) or [""]
+            print(f"  {GOLD}{n.ljust(wide)}{R}{DIM}{first}{R}")
+            for more in rest: print(f"  {' ' * wide}{DIM}{more}{R}")
+    listed = set()
+    for title, names in HELP_GROUPS:
+        names = [n for n in names.split() if n in notes]; listed.update(names)
+        print(f"\n{GOLD}●{R} {BOLD}{title}{R}"); rows(names)
+    left = [n for n in notes if n not in listed]
+    if left: print(f"\n{GOLD}●{R} {BOLD}More{R}"); rows(left)
     mine = custom_commands()
-    if mine: print(f"  {DIM}your commands: {' '.join(mine)}{R}")
-    print(f"  {DIM}make your own: save a prompt as {APP_HOME.replace(HOME, '~')}/commands/name.md and type /name (use $ARGUMENTS for what you type after it){R}")
+    print(f"\n{GOLD}●{R} {BOLD}Your own commands{R}")
+    said = (" ".join(mine) + " · " if mine else "") + (f"save a prompt as {APP_HOME.replace(HOME, '~')}/commands/name.md and type /name "
+            "($ARGUMENTS in it is what you type after the name)")
+    for line in textwrap.wrap(said, max(30, W() - 4)): print(f"  {DIM}{line}{R}")
+    print(f"\n{GOLD}●{R} {BOLD}Keys{R}")
+    keys = [("enter", "send · alt-enter, or \\ then enter, starts a new line"), ("/ and @", "list commands and files as you type · tab fills one in"),
+            ("↑ ↓", "what you sent before · ctrl-r searches it"), ("esc", "clears the line, or stops a reply · twice goes back to an earlier message"),
+            ("shift-tab", "asks first, plan mode, always allow"), ("ctrl-o", "the full output of the last steps"),
+            ("ctrl-v", "paste a screenshot · or drag an image in")]
+    for k, d in keys:
+        first, *rest = textwrap.wrap(d, room) or [""]
+        print(f"  {GOLD}{k.ljust(wide)}{R}{DIM}{first}{R}")
+        for more in rest: print(f"  {' ' * wide}{DIM}{more}{R}")
+    for line in textwrap.wrap("Keep typing while it works and press Enter to add a note. Looking at files and read-only commands (ls, cat, grep, "
+                              "git status) never ask. File changes show what changes first.", max(30, W() - 4)): print(f"  {DIM}{line}{R}")
 
 # ---- installer helpers ----
 # ---- what both the keyboard and the bridges (phone, iMessage, the web remote) use ----
@@ -5246,7 +5438,11 @@ def command(user):
         try: own_command(user[1:].strip())
         except Exception as e: print(f"{DIM}couldn't run it: {e}{R}")
         save_chat(); return
-    if user in ("/reset", "/clear"):
+    if user.split()[0] == "/cd":
+        try: os.chdir(os.path.expanduser(user[3:].strip() or "~")); mark_current(); refresh_system(); print(f"{DIM}working in {os.getcwd().replace(HOME, '~')}{R}")
+        except OSError as e: print(f"{DIM}can't work there: {e.strerror}{R}")
+        return
+    if user in ("/reset", "/clear", "/new"):
         history=[]; chat_file=None; allow_all=False; UNDO.clear(); TODOS.clear(); PLAN=False; refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); return
     if user=="/history": open_chat(); return
     if user=="/resume": open_chat(0); return
@@ -5274,6 +5470,9 @@ def command(user):
         except KeyboardInterrupt: result = "stopped"
         print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
         return
+    if re.fullmatch(r"/[a-z][a-z-]*", user.split()[0]) and not os.path.exists(user.split()[0]):      # a mistyped command is not a message for the model
+        near = difflib.get_close_matches(user.split()[0], [n for n, _ in COMMANDS if n.startswith("/")] + list(custom_commands()), 1, 0.6)
+        print(f"{DIM}no command called {user.split()[0]}" + (f" · did you mean {near[0]}?" if near else "") + f" · /help lists them all{R}"); return
     turn(user)
 
 if sys.argv[1:2] in (["--version"], ["-v"]):
