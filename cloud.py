@@ -4,43 +4,65 @@
 #
 # /cloud in bxzex-ai does all of this for you. By hand it is:
 #   modal secret create bxzex-gpu ENGINE_KEY=<any long random text>
-#   modal run cloud.py::fetch      copies the model into your Modal account, once (about 23GB)
+#   modal run cloud.py::fetch      copies the model into your Modal account, once (about 23GB, or 120GB for the bigger one)
 #   modal deploy cloud.py          puts it online and prints its address
 # then "remote" (that address) and "remote_key" (the same random text) in ~/.bxzex-ai/config.json.
 import os, subprocess
 import modal
 
-GPU = "H100"              # or A100-80GB or L40S: a bit slower, and they cost less per hour
+GPU = "H100"              # or A100-80GB or L40S: a bit slower, and they cost less per hour. H200 runs the bigger model
+BIG = GPU == "H200"       # the bigger, sharper model only fits on the H200's 141GB
 IDLE_SECONDS = 300        # the card switches off this long after the last request, and Modal stops billing
-CTX = 65536 if GPU == "L40S" else 131072     # the L40S has less memory, so it holds a shorter chat
+CTX = 65536 if GPU in ("L40S", "H200") else 131072     # less memory to spare on these, so they hold a shorter chat
 
 app = modal.App("bxzex-ai-gpu")
 models = modal.Volume.from_name("bxzex-gpu-models", create_if_missing=True)
 
-WEIGHTS = "bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF"
-MODEL = "orcarouter_Qwen3.8-27B-Uncensored-Q6_K.gguf"
-VISION = "mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf"
+if BIG:
+    WEIGHTS = "mradermacher/Qwen3.8-Flash-Next-Uncensored-GGUF"
+    MODEL = "Qwen3.8-Flash-Next-Uncensored.Q4_K_M.gguf"
+    PARTS = [f"{MODEL}.part{i}of3" for i in (1, 2, 3)]      # it comes as three plain pieces of one file, joined after the download
+    VISION = "Qwen3.8-Flash-Next-Uncensored.mmproj-f16.gguf"
+    FAST_DRAFT = []                                         # this build has no draft layers to speed it up, and doesn't need them
+else:
+    WEIGHTS = "bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF"
+    MODEL = "orcarouter_Qwen3.8-27B-Uncensored-Q6_K.gguf"
+    PARTS = []
+    VISION = "mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf"
+    FAST_DRAFT = ["--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "--spec-draft-p-min", "0.4"]
 
 # pinned: newer engine builds read prompts far slower on these cards
 image = modal.Image.from_registry("ghcr.io/ggml-org/llama.cpp:server-cuda-b11382", add_python="3.12").entrypoint([])
 
 
 @app.function(image=modal.Image.debian_slim().pip_install("huggingface_hub[hf_transfer]").env({"HF_HUB_ENABLE_HF_TRANSFER": "1"}),
-              volumes={"/models": models}, timeout=3600, cpu=4)
+              volumes={"/models": models}, timeout=4 * 3600, cpu=8)
 def fetch():
     from huggingface_hub import hf_hub_download
-    for name in (MODEL, VISION):
+    for name in (VISION,) if PARTS else (MODEL, VISION):
         if os.path.exists(f"/models/{name}"): print("already there:", name); continue
         print(hf_hub_download(WEIGHTS, name, local_dir="/models"))
+    if PARTS and os.path.exists(f"/models/{MODEL}"): print("already there:", MODEL)
+    elif PARTS:
+        for name in PARTS: print(hf_hub_download(WEIGHTS, name, local_dir="/tmp/parts"))
+        with open(f"/models/{MODEL}.joining", "wb") as out:
+            for name in PARTS:
+                with open(f"/tmp/parts/{name}", "rb") as f:
+                    while True:
+                        block = f.read(64 << 20)
+                        if not block: break
+                        out.write(block)
+        os.rename(f"/models/{MODEL}.joining", f"/models/{MODEL}")
+        print("joined:", MODEL)
     models.commit()
 
 
 # 4 requests at once (the chat, helpers side by side, the background learner) sharing one memory pool
-@app.function(image=image, gpu=GPU, cpu=4, memory=16384, volumes={"/models": models},
+@app.function(image=image, gpu=GPU, cpu=8 if BIG else 4, memory=32768 if BIG else 16384, volumes={"/models": models},
               secrets=[modal.Secret.from_name("bxzex-gpu")], scaledown_window=IDLE_SECONDS,
               timeout=3600, max_containers=1)
 @modal.concurrent(max_inputs=8)
-@modal.web_server(port=8080, startup_timeout=600)
+@modal.web_server(port=8080, startup_timeout=1500 if BIG else 600)
 def engine():
     # copy the model onto the card's own disk first: read straight off the network volume it runs at 1 tok/s
     for f in (MODEL, VISION): subprocess.run(["cp", f"/models/{f}", f"/tmp/{f}"], check=True)
@@ -51,13 +73,13 @@ def engine():
         "--ctx-size", str(CTX), "--parallel", "4", "--kv-unified", "--n-gpu-layers", "99", "--flash-attn", "on",
         "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--batch-size", "2048", "--ubatch-size", "512",
         "--threads", "4", "--threads-batch", "4",
-        "--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "--spec-draft-p-min", "0.4",
+        *FAST_DRAFT,
         "--temp", "0.7", "--top-k", "20", "--top-p", "0.95", "--min-p", "0.0", "--repeat-penalty", "1.0",
         "--jinja"])
     # the very first request on a fresh card is slow (about 1 tok/s) while the engine sets itself up, so make it here
     import json, time, urllib.request
     key = {"Authorization": f"Bearer {os.environ['ENGINE_KEY']}", "Content-Type": "application/json"}
-    for _ in range(600):
+    for _ in range(1200 if BIG else 600):
         try:
             urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=2); break
         except Exception:

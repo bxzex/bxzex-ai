@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -396,7 +396,9 @@ def wake_remote(block=True):
     if not block:
         threading.Thread(target=loaded_model, daemon=True).start(); return True
     sys.stdout.write("\033[?25l")
-    wait = Waiting("Waking the cloud GPU · it sleeps after 5 min idle and takes about 2 min to start")
+    mins = 4 if (load_config().get("cloud") or {}).get("card") == "H200" else 2          # the bigger model takes longer to load
+    wait = Waiting(f"Waking the cloud GPU · it sleeps after 5 min idle and takes about {mins} min to start")
+    if CHANNEL == "web" and PHONE: web_push("note", f"Waking the cloud card. It sleeps after 5 minutes idle and takes about {mins} minutes to start.")
     try:
         if loaded_model(): return True
     except KeyboardInterrupt:
@@ -677,7 +679,11 @@ def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
     global allow_all
     if allow_all and not always_ask: return True
     if rule and not always_ask and allowed_here(rule): return True
-    if PHONE: return phone_choose(f"Allow: {what}?", ["Yes", "No"], detail) == 0
+    if PHONE:
+        more = CHANNEL == "web" and not always_ask           # the page has room for a third button
+        pick = phone_choose(f"Allow: {what}?", ["Yes", "No"] + (["Always, this chat"] if more else []), detail)
+        if more and pick == 2: allow_all = True; return True
+        return pick == 0
     if not sys.stdin.isatty(): return False
     global tool_wait
     if tool_wait: tool_wait.stop(); tool_wait = None       # the loader steps aside for the question
@@ -2245,6 +2251,7 @@ def phone_send(text, **extra):
 def phone_choose(question, choices, detail=""):
     """Buttons on the phone. Waits up to 15 minutes for a tap and returns the choice's number, or None."""
     if CHANNEL == "imessage": return im_choose(question, choices, detail)
+    if CHANNEL == "web": return web_choose(question, choices, detail)
     nonce = f"{random.randrange(10**8)}"
     sent = phone_send(f"{question}\n\n{detail[:1800]}" if detail else question,
                       reply_markup={"inline_keyboard": [[{"text": c[:40], "callback_data": f"{nonce}:{i}"}] for i, c in enumerate(choices)]})
@@ -2381,9 +2388,10 @@ def phone_loop():
 def phone_service(on=True): return bridge_service(on, "phone")
 
 def bridge_service(on=True, kind="phone"):
-    """Keep a phone bridge (Telegram or iMessage) running in the background (launchd on a Mac, a user service on Linux)."""
+    """Keep a bridge (Telegram, iMessage or the web page) running in the background (launchd on a Mac, a user service on Linux)."""
     if os.environ.get("BXZEX_NO_TICKER"): return ""
-    PHONE_LABEL = IM_LABEL if kind == "imessage" else "com.bxzex.ai.phone"
+    PHONE_LABEL = IM_LABEL if kind == "imessage" else WEB_LABEL if kind == "web" else "com.bxzex.ai.phone"
+    unit_name = "bxzex-web" if kind == "web" else "bxzex-phone"
     me = [sys.executable, os.path.abspath(__file__), f"--{kind}"]
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": HOME}
     if "BXZEX_HOME" in os.environ: env["BXZEX_HOME"] = APP_HOME
@@ -2402,18 +2410,18 @@ def bridge_service(on=True, kind="phone"):
             r = subprocess.run(["launchctl", "bootstrap", where, plist], capture_output=True, text=True)
             return "" if r.returncode == 0 else f"couldn't start it in the background: {r.stderr.strip()[:160]}"
         if kind == "imessage": return "iMessage only works on a Mac"
-        unit = f"{HOME}/.config/systemd/user/bxzex-phone.service"
+        unit = f"{HOME}/.config/systemd/user/{unit_name}.service"
         if not shutil.which("systemctl"): return "this computer has no systemd: start it yourself with  bxzex-ai --phone &"
         if not on:
-            subprocess.run(["systemctl", "--user", "disable", "--now", "bxzex-phone"], capture_output=True)
+            subprocess.run(["systemctl", "--user", "disable", "--now", unit_name], capture_output=True)
             if os.path.exists(unit): os.remove(unit)
             return ""
         os.makedirs(os.path.dirname(unit), exist_ok=True)
         with open(unit, "w") as f:
-            f.write("[Unit]\nDescription=bxzex-ai phone bridge\n\n[Service]\nExecStart=" + " ".join(shlex.quote(x) for x in me)
+            f.write(f"[Unit]\nDescription=bxzex-ai {kind} bridge\n\n[Service]\nExecStart=" + " ".join(shlex.quote(x) for x in me)
                     + "\nRestart=always\nRestartSec=20\n" + "".join(f"Environment={k}={v}\n" for k, v in env.items()) + "\n[Install]\nWantedBy=default.target\n")
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-        r = subprocess.run(["systemctl", "--user", "enable", "--now", "bxzex-phone"], capture_output=True, text=True)
+        r = subprocess.run(["systemctl", "--user", "enable", "--now", unit_name], capture_output=True, text=True)
         return "" if r.returncode == 0 else f"couldn't start it: {r.stderr.strip()[:160]}"
     except Exception as e:
         log_error(type(e), e, e.__traceback__); return f"couldn't start it: {e}"
@@ -2423,6 +2431,10 @@ def restart_phone():
     if os.environ.get("BXZEX_NO_TICKER"): return
     if MAC and (load_config().get("imessage") or {}).get("to"):     # whatever keeps it running (launchd or a loop) starts it again
         subprocess.run(["pkill", "-f", "bxzex-ai --imessage"], capture_output=True)
+    if (load_config().get("web") or {}).get("key"):
+        if MAC and os.path.exists(f"{HOME}/Library/LaunchAgents/{WEB_LABEL}.plist"):
+            subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{WEB_LABEL}"], capture_output=True)
+        elif not MAC and shutil.which("systemctl"): subprocess.run(["systemctl", "--user", "try-restart", "bxzex-web"], capture_output=True)
     if not (load_config().get("phone") or {}).get("chat"): return
     if MAC: subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{PHONE_LABEL}"], capture_output=True)
     elif shutil.which("systemctl"): subprocess.run(["systemctl", "--user", "restart", "bxzex-phone"], capture_output=True)
@@ -2549,9 +2561,10 @@ def doctor():
 # ---- /cloud: the model on a graphics card in their own Modal account ----
 CLOUD_APP = "bxzex-ai-gpu"
 CLOUD_CARDS = [("H100", "fastest · the one to pick if unsure"), ("A100-80GB", "a bit slower, costs less per hour"),
-               ("L40S", "slowest, costs the least per hour, holds a shorter chat")]
+               ("L40S", "slowest, costs the least per hour, holds a shorter chat"),
+               ("H200", "the bigger, sharper model · better at code and long jobs · costs a little more · 120GB to copy the first time")]
 
-CARD_RATE = {"H100": 3.95, "A100-80GB": 2.50, "L40S": 1.95}   # Modal's price per hour, roughly
+CARD_RATE = {"H100": 3.95, "A100-80GB": 2.50, "L40S": 1.95, "H200": 4.54}   # Modal's price per hour, roughly
 
 def card_rate():
     """Dollars per hour the cloud card costs while it's awake (H100 unless /cloud picked another)."""
@@ -2677,7 +2690,9 @@ def setup_cloud(arg=""):
         worked, out = quietly("Making the card's private key", [modal, "secret", "create", "bxzex-gpu", "--from-json", f.name, "--force"], 120, env)
     if not worked: print(f"  {DIM}Modal didn't take the key: {out.strip()[-300:]}{R}"); return False
     print(f"  {GOLD}✓{R} private key, only this computer has it")
-    worked, out = quietly("Copying the AI model into your Modal account · about 23GB, only the first time", [modal, "run", "cloud.py::fetch"], 3600, env, folder)
+    big = card == "H200"
+    worked, out = quietly(f"Copying the AI model into your Modal account · about {'120GB, 20 to 30 minutes' if big else '23GB'}, only the first time",
+                          [modal, "run", "cloud.py::fetch"], 4 * 3600 if big else 3600, env, folder)
     if not worked: print(f"  {DIM}the model didn't copy: {out.strip()[-300:]}{R}"); return False
     print(f"  {GOLD}✓{R} AI model in your Modal account")
     worked, out = quietly("Putting it online", [modal, "deploy", "cloud.py"], 900, env, folder)
@@ -2690,8 +2705,8 @@ def setup_cloud(arg=""):
     try: os.chmod(CONFIG, 0o600)
     except OSError: pass
     print(f"  {GOLD}✓{R} online")
-    worked, out = quietly("Starting the card for the first time · about 3 minutes", ["curl", "-sL", "-m", "900", "-H", "@-", f"{url}/v1/models"],
-                          960, data=f"Authorization: Bearer {key}\n")
+    worked, out = quietly(f"Starting the card for the first time · about {5 if big else 3} minutes", ["curl", "-sL", "-m", "1500" if big else "900", "-H", "@-", f"{url}/v1/models"],
+                          1560 if big else 960, data=f"Authorization: Bearer {key}\n")
     if '"data"' in out:
         print(f"{GOLD}●{R} {BOLD}Your cloud card is ready{R} {DIM}· {card} in Modal account {workspace} · /cost shows what it costs · /cloud off runs it here again{R}")
     else:
@@ -3039,6 +3054,217 @@ TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": r
               "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task, edits="false": one_helper(1, str(task)), "schedule_task": schedule_task, "test_page": test_page, "safari": safari, "imessage": imessage,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
               "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
+
+# ---- remote control from a web page you own: write there, it works here, and answers and questions go back ----
+# config.json "web": {"url": "https://your.site/api/public/ai/remote", "key": "<device key>"}. The site only passes
+# messages along (pull: what was written there, push: what to show there). Nothing on this side trusts it for more.
+WEB_LABEL = "com.bxzex.ai.web"
+WEB_QUEUE = []          # what was written on the page, waiting its turn
+WEB_ANSWERS = {}        # taps on a question's buttons: {question id: which choice}
+WEB_TEE = None          # while a reply is being worked on: collects what would be printed, to show on the page
+WEB_ACTIVE = 0.0        # when something last happened, so it checks often only while in use
+WEB_KEYBOARD = ("/password", "/remote", "/phone", "/imessage", "/v", "/voice")     # these ask things at the keyboard or use its microphone
+
+def web_api(path, timeout=20, **body):
+    conf = load_config().get("web") or {}
+    url = f"{conf['url'].rstrip('/')}/{path}"; data = json.dumps(body)
+    if shutil.which("curl"):                         # this Python may have no certificates; curl uses the system's
+        heads = f"{APP_HOME}/.web-headers"; want = f"x-bxzex-remote: {conf.get('key', '')}\nContent-Type: application/json\n"
+        if read_text(heads, 2000) != want.strip():
+            fd = os.open(heads, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)      # a file only you can read: the key never shows in the process list
+            with os.fdopen(fd, "w") as f: f.write(want)
+        r = subprocess.run(["curl", "-sS", "--max-time", str(timeout), "-A", f"bxzex-ai/{VERSION}", "-H", f"@{heads}", "-d", "@-", url],
+                           input=data, capture_output=True, text=True)
+        if r.returncode: raise RuntimeError(r.stderr.strip()[:200] or "no answer")
+        return json.loads(r.stdout or "{}")
+    req = urllib.request.Request(url, data.encode(), {"Content-Type": "application/json", "x-bxzex-remote": conf.get("key", ""), "User-Agent": f"bxzex-ai/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r: return json.load(r)
+
+def web_push(kind, body, **more):
+    """Show something on the page: "log" (what it's doing), "reply", "ask" (a question with buttons) or "note"."""
+    if kind != "log" and WEB_TEE: WEB_TEE.flush()          # what it printed before this comes first
+    for _ in range(2):
+        try: web_api("push", events=[dict(more, kind=kind, body=str(body)[:20000])]); return True
+        except Exception: time.sleep(2)
+    return False
+
+class WebTee:
+    """Stands in for the screen while it works from the page: the lines it would print are sent there about once a second."""
+    def __init__(self, quiet=False):
+        self.buf = ""; self.lock = threading.Lock(); self.done = threading.Event()
+        self.quiet = quiet; self.all = []      # quiet: a command's output is kept and sent whole at the end, not line by line
+        threading.Thread(target=self.run, daemon=True).start()
+    def write(self, text):
+        with self.lock: self.buf += text
+    def flush(self):
+        with self.lock:
+            cut = self.buf.rfind("\n") + 1                    # only whole lines; the rest waits for its ending
+            out, self.buf = self.buf[:cut], self.buf[cut:]
+        out = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\|\x1b[78]|\r|\a", "", out)
+        rows = [l.rstrip() for l in out.split("\n") if l.strip()]
+        self.all += rows
+        if rows and not self.quiet:
+            try: web_api("push", events=[{"kind": "log", "body": "\n".join(rows)[:20000]}])
+            except Exception: pass
+    def run(self):
+        while not self.done.wait(1.2): self.flush()
+    def close(self):
+        self.done.set(); self.buf += "\n"; self.flush()
+    def isatty(self): return False
+
+def web_poller():
+    """Keeps asking the site what was written there: often while in use, every ten seconds when quiet."""
+    while True:
+        try:
+            got = web_api("pull", busy=bool(PHONE), cwd=os.getcwd().replace(HOME, "~"), version=VERSION)
+        except Exception:
+            time.sleep(10); continue
+        global WEB_ACTIVE
+        for m in got.get("messages") or []:
+            WEB_ACTIVE = time.time(); kind = m.get("kind")
+            if kind == "answer": WEB_ANSWERS[str(m.get("ask"))] = m.get("pick")
+            elif kind == "stop":
+                if PHONE: os.kill(os.getpid(), signal.SIGINT)      # the same as esc at the keyboard: stops the reply, keeps the work
+            elif m.get("body"): WEB_QUEUE.append(str(m["body"]))
+        time.sleep(1.5 if PHONE or time.time() - WEB_ACTIVE < 180 else 10)
+
+def web_choose(question, choices, detail=""):
+    """Buttons on the page. Waits up to 15 minutes for a tap and returns the choice's number, or None."""
+    ask = f"{random.randrange(10**9)}"
+    if not web_push("ask", question, ask=ask, choices=[str(x)[:80] for x in choices], detail=detail[:8000]): return None
+    end = time.time() + 900
+    while time.time() < end:
+        if ask in WEB_ANSWERS:
+            try: pick = int(WEB_ANSWERS.pop(ask))
+            except (TypeError, ValueError): return None
+            return pick if 0 <= pick < len(choices) else None
+        time.sleep(0.4)
+    web_push("note", "No answer in 15 minutes, so I skipped it.")
+    return None
+
+def web_loop():
+    """Runs on its own (started by the system): works on what you write on your page, one message at a time."""
+    global PHONE, CHANNEL, WEB_TEE, WEB_ACTIVE, history
+    conf = load_config().get("web") or {}
+    if not (conf.get("url") and conf.get("key")): print("remote control isn't set up: run /remote in the app"); return
+    CHANNEL = "web"
+    try: os.chdir(HOME)                                   # the system starts it in /, which is no place to work
+    except OSError: pass
+    if load_config().get("mcp"): connect_mcp()
+    refresh_skills(); refresh_system()
+    threading.Thread(target=web_poller, daemon=True).start()
+    keep = save_chat
+    started = [False]                                     # True once this service has opened or made a chat
+    def shared():
+        """Open the chat that is open in the terminal (or the last one that was), in its folder, with everything said so far."""
+        global history, chat_file, last_saved
+        path = cwd = ""
+        try:
+            with open(CURRENT) as f: cur = json.load(f)
+            path, cwd = str(cur.get("chat") or ""), str(cur.get("cwd") or "")
+        except (OSError, ValueError, AttributeError): pass
+        if not (path and os.path.isfile(path)):
+            try: path = max((os.path.join(CHATS, f) for f in os.listdir(CHATS) if f.endswith(".json")), key=os.path.getmtime, default="")
+            except OSError: path = ""
+        if not path: return                              # no chat anywhere yet: this message starts the first one
+        if chat_file is None and last_saved is None and started[0]: return      # /new was sent: stay on the fresh chat until it has been saved
+        try:
+            with open(path) as f: raw = f.read()
+            msgs = json.loads(raw).get("messages", [])
+        except (OSError, ValueError, AttributeError): return
+        switched = path != chat_file
+        history = msgs; chat_file = path; last_saved = chat_data(); started[0] = True
+        if not switched: return
+        if cwd and os.path.isdir(cwd):
+            try: os.chdir(cwd)
+            except OSError: pass
+        said = [m for m in msgs if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str) and m["content"].strip()]
+        title = " ".join((next((m["content"] for m in said if m["role"] == "user"), "") or "").split())[:70]
+        web_push("note", f"Carrying on your terminal chat{': ' + title if title else ''} · {len(said)} messages so far · in {os.getcwd().replace(HOME, '~')}")
+        recap = [{"kind": "said" if m["role"] == "user" else "reply", "body": m["content"][:1500]} for m in said[-6:]]
+        if recap:
+            try: web_api("push", events=recap)
+            except Exception: pass
+    def one(text):
+        global PHONE, WEB_TEE, WEB_ACTIVE, history, allow_all, chat_file, last_saved
+        if text.lower() in ("/new", "new chat", "/reset", "/clear"):
+            history = []; chat_file = None; last_saved = None; allow_all = False       # the next message starts a new chat, and the terminal's "continue" finds it
+            UNDO.clear(); TODOS.clear(); web_push("note", "New chat. Your earlier one is kept."); return
+        if text.startswith("/cd"):
+            try: os.chdir(os.path.expanduser(text[3:].strip() or "~")); web_push("note", "Working in " + os.getcwd().replace(HOME, "~"))
+            except OSError as e: web_push("note", f"Can't work there: {e.strerror}")
+            return
+        shared()
+        # Everything the terminal takes works from the page too: /commands, !shell lines and plain requests. A few need the keyboard.
+        word = text.split()[0].lower() if text[:1] in "/!" else ""
+        if text.lower() in ("exit", "quit"): web_push("note", "The remote stays on. /remote off on the computer turns it off."); return
+        if word in WEB_KEYBOARD or (word == "/cloud" and text.strip() != "/cloud") or text.lower() == "/update full":
+            web_push("note", f"{word} asks things at the keyboard, so it only works on the computer itself."); return
+        if word == "/update":
+            if check_update(quiet=True): web_push("note", "Updated. The remote is restarting on the new version."); sys.exit(0)
+            web_push("note", f"You have the latest version, v{VERSION}."); return
+        if word == "/history":
+            chats = [c for c in list_chats() if c[0] != chat_file]; pick = text[8:].strip()
+            if pick.isdigit() and 0 < int(pick) <= len(chats):
+                history, chat_file = chats[int(pick) - 1][3], chats[int(pick) - 1][0]; last_saved = chat_data(); mark_current()
+                web_push("note", f"Opened: {chats[int(pick) - 1][2][:70] or 'untitled'} · {len(history)} messages"); return
+            web_push("reply", "Earlier chats. Send `/history 2` to open the second one.\n\n" + "\n".join(f"{i}. {w} · {t[:60] or 'untitled'}" for i, (_, w, t, _) in enumerate(chats[:15], 1))
+                     if chats else "No earlier chats yet."); return
+        works = not word or word in ("/commit", "/check", "/review", "/init") or word in custom_commands()     # these have it work and answer
+        start = len(history); PHONE = "web"; tee = WEB_TEE = sys.stdout = WebTee(quiet=not works)
+        try:
+            if word: command(text)
+            else:
+                msg = user_message(text)
+                msg["_hint"] = msg.get("_hint", "") + "\n\n(Sent from their phone through a web page: keep the reply short and easy to read on a small screen.)"
+                history.append(msg); run_turn(history)
+            reply = "\n\n".join(m["content"] for m in history[start:] if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip())
+            if word and not works:                                 # a command's printed output is its answer
+                tee.flush(); reply = "```\n" + "\n".join(tee.all)[:15000] + "\n```" if tee.all else "Done."
+        except KeyboardInterrupt:
+            close_open_calls(); reply = "Stopped. Everything done so far is kept."
+        except Exception as e:
+            log_error(type(e), e, e.__traceback__); close_open_calls(); reply = f"Something went wrong: {e}"
+        PHONE = None
+        keep(); mark_current()
+        web_push("reply", reply or "Done.")
+    real = sys.stdout
+    while True:
+        try:                                              # a stop from the page can land at any moment: it ends the reply, never this service
+            if not WEB_QUEUE: time.sleep(0.3); continue
+            text = WEB_QUEUE.pop(0).strip()
+            if text: one(text)
+        except KeyboardInterrupt: pass
+        except Exception as e: log_error(type(e), e, e.__traceback__)
+        finally:
+            if PHONE or WEB_TEE:
+                PHONE = None; sys.stdout = real; tee, WEB_TEE = WEB_TEE, None; WEB_ACTIVE = time.time()
+                try:
+                    if tee: tee.close()
+                    PENDING_SHOTS.clear(); keep()
+                except (KeyboardInterrupt, Exception): pass
+
+def setup_web(arg=""):
+    """/remote: status, on, off, or a new address to connect to."""
+    arg = arg.strip(); conf = load_config().get("web") or {}
+    if arg == "off":
+        bridge_service(False, "web"); print(f"{DIM}remote control off · /remote on turns it back on{R}"); return
+    if arg.startswith("http"):
+        print(f"  {DIM}paste the device key your site gave you{R}")
+        try: key = line_input("  key: ").strip()
+        except (EOFError, KeyboardInterrupt): print(); return
+        RAW.write("\033[1A\r\033[K"); RAW.flush()          # the key doesn't stay on the screen
+        if len(key) < 32: print(f"{DIM}that key is too short to be one{R}"); return
+        conf = {"url": arg.rstrip("/"), "key": key}; save_config(web=conf); arg = "on"
+    if not (conf.get("url") and conf.get("key")):
+        print(f"{DIM}remote control needs a page of your own to talk through. /remote https://your.site/api/public/ai/remote connects one{R}"); return
+    if arg == "on":
+        trouble = bridge_service(True, "web")
+        if trouble: print(f"{DIM}{trouble}{R}"); return
+    try: web_api("pull", busy=False, cwd="", version=VERSION, timeout=10); reach = "the page answers"
+    except Exception as e: reach = f"couldn't reach the page ({str(e)[:80]})"
+    print(header("Remote"))
+    print(f"  {DIM}{urllib.parse.urlparse(conf['url']).netloc} · {reach} · /remote on · /remote off{R}")
 
 def tool(tool_name, desc, **props):
     return {"type": "function", "function": {"name": tool_name, "description": desc, "parameters": {
@@ -4311,12 +4537,36 @@ def chat_data():
     title = next((m["content"] for m in msgs if m["role"] == "user"), "")[:80]
     return json.dumps({"title": title, "messages": msgs})
 
+CURRENT = f"{APP_HOME}/current-chat.json"     # which chat is open and in which folder, so the remote carries on the same one
+
+def mark_current():
+    """Note the chat that is open now. The remote control reads this to continue the same conversation in the same folder."""
+    if not chat_file: return
+    try:
+        with open(CURRENT + ".tmp", "w") as f: json.dump({"chat": chat_file, "cwd": os.getcwd()}, f)
+        os.replace(CURRENT + ".tmp", CURRENT)
+    except OSError: pass
+
+def sync_chat():
+    """Another bxzex-ai (the remote, from your phone) may have carried this chat on. If this one has nothing unsaved,
+    take the newer copy. Returns how many messages were added."""
+    global history, last_saved
+    if not chat_file or last_saved is None or chat_data() != last_saved: return 0
+    try:
+        with open(chat_file) as f: raw = f.read()
+        if raw == last_saved: return 0
+        msgs = json.loads(raw).get("messages", [])
+    except (OSError, ValueError, AttributeError): return 0
+    added = len(msgs) - len(history)
+    history = msgs; last_saved = chat_data()
+    return max(added, 0)
+
 def save_chat():
     global chat_file, last_saved
     if not history: return
     try:
         os.makedirs(CHATS, exist_ok=True)
-        if not chat_file: chat_file = f"{CHATS}/{time.strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        if not chat_file: chat_file = f"{CHATS}/{time.strftime('%Y-%m-%d_%H-%M-%S')}.json"; mark_current()
         data = chat_data()
         if data == last_saved and os.path.exists(chat_file): return    # nothing new: never overwrite another window's newer save
         with open(chat_file + ".tmp", "w") as f: f.write(data)
@@ -4413,6 +4663,7 @@ def open_chat(pick=None):
     path, when, title, msgs = chats[pick]
     global last_saved
     history = msgs; chat_file = path; last_saved = chat_data()      # just opened: nothing to save until it changes
+    mark_current()
     try: saved = time.strftime("%b %d at %-I:%M %p", time.localtime(os.path.getmtime(path)))
     except OSError: saved = when
     print(f"{GOLD}●{R} {BOLD}Continuing from last save{R} {DIM}{saved} · {len(msgs)} messages{R}")
@@ -4443,7 +4694,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/commit", "commit your changes with a message it writes"), ("/review", "review your changes for bugs before you push"),
             ("/hooks", "your own commands before or after its tools"), ("/check", "check a site on phone, tablet and desktop · /check localhost:5173"), ("/notify", "notifications when it finishes in the background"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
-            ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"),
+            ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"), ("/remote", "control it from a web page of your own"),
             ("/password", "a password your phone has to send before it can use it"), ("/cloud", "run the model on a graphics card in your own Modal account"), ("/cost", "what the cloud card has cost"), ("/doctor", "check the model, key, updates and errors"), ("/export", "save this chat as a document"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
@@ -4778,6 +5029,220 @@ def show_help():
     print(f"  {DIM}make your own: save a prompt as {APP_HOME.replace(HOME, '~')}/commands/name.md and type /name (use $ARGUMENTS for what you type after it){R}")
 
 # ---- installer helpers ----
+# ---- what both the keyboard and the bridges (phone, iMessage, the web remote) use ----
+def reload_app(typed_text="", note=""):
+    """Start the new version in this same window, on the same chat, with the same settings. Nothing is lost."""
+    save_chat(); box.unpin()
+    if COOKED:
+        try: termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, COOKED)
+        except termios.error: pass
+    sys.stdout.flush()
+    stop_jobs()
+    state = {"chat": chat_file or "", "fast": fast, "think": show_think, "allow": allow_all, "typed": typed_text, "plan": PLAN, "note": note}
+    try:
+        os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)], dict(os.environ, BXZEX_RELOAD=json.dumps(state)))
+    except OSError:
+        keys_mode(); print(f"{DIM}couldn't reload by itself: quit and open bxzex-ai again to use the new version{R}")
+
+def close_open_calls():
+    """After a stop or an error: keep the work done so far; only close calls that never got a result."""
+    answered = {m.get("tool_call_id") for m in history if m["role"] == "tool"}
+    for m in list(history):
+        for call in m.get("tool_calls") or []:      # not "c": that name is the colour function every loader uses
+            if call.get("id") not in answered:
+                history.append({"role": "tool", "tool_call_id": call.get("id"), "content": "Stopped by the user before this ran."})
+
+def rewind():
+    """Go back to an earlier message: the chat is cut there and the message comes back into the box to change and send again."""
+    global spoken
+    picks = [(i, m) for i, m in enumerate(history) if m["role"] == "user" and isinstance(m.get("content"), (str, list))
+             and not plain(m["content"]).startswith(("(", "By the way", SUMMARY_HEAD))][-20:][::-1]
+    if not picks: print(f"{DIM}nothing to go back to yet{R}"); return
+    print(header("Go back to"))
+    at = menu([(" ".join(plain(m["content"]).split())[:W() - 10], "") for _, m in picks], hint="↑↓ to move · enter to go back to it · esc to cancel")
+    if at is None: print(f"  {DIM}cancelled{R}"); return
+    i, m = picks[at]
+    mark = m.get("_undo", len(UNDO)); changed = len(UNDO) - mark
+    put_back = False
+    if changed > 0:
+        how = menu([("Go back in the chat only", "files stay as they are now"),
+                    ("Go back and put files back too", f"undoes {changed} file change{'s' if changed > 1 else ''} made after it")])
+        if how is None: print(f"  {DIM}cancelled{R}"); return
+        put_back = how == 1
+    if put_back:
+        while len(UNDO) > mark:
+            path, old = UNDO.pop()
+            try:
+                if old is None: os.remove(path)
+                else:
+                    with open(path, "w") as f: f.write(old)
+            except OSError: pass
+    del history[i:]
+    spoken = plain(m["content"])
+    print(f"{GOLD}●{R} {BOLD}Went back{R} {DIM}· {'files put back · ' if put_back else ''}your message is in the box: change it and press Enter{R}")
+    save_chat()
+
+def turn(text):
+    print()
+    hush()
+    LAST_TOOLS.clear()
+    history.append(dict(user_message(text), _undo=len(UNDO)))
+    try:
+        run_turn(history)
+        maybe_learn()                                # every few messages, what's new about the user is saved in the background
+    except KeyboardInterrupt:
+        close_open_calls(); print(f"\n{DIM}stopped · everything done so far is kept{R}")
+    except Exception as e:                           # never lose the app or the chat over one bad step
+        log_error(type(e), e, e.__traceback__); close_open_calls()
+        print(f"\n{DIM}something went wrong ({e.__class__.__name__}: {str(e)[:120]}) · the chat is kept · details in {ERROR_LOG.replace(HOME, '~')}{R}")
+    save_chat()
+
+def own_command(cmd):
+    """!command: run it yourself. The output shows here and the assistant sees it too."""
+    print(f"{TEAL}◆{R} {BOLD}{cmd}{R}")
+    p = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, errors="replace", start_new_session=True)
+    got = []
+    try:
+        for line in p.stdout: got.append(line); sys.stdout.write(f"  {line}"); sys.stdout.flush()
+        p.wait()
+    except KeyboardInterrupt:
+        try: os.killpg(p.pid, 9)
+        except OSError: pass
+        got.append("[stopped]\n")
+    out = "".join(got)
+    print(f"  {DIM}└ exit code {p.returncode}{R}")
+    history.append({"role": "user", "content": f"(I ran this myself: `{cmd}`)\nexit code {p.returncode}\n{clip(out, OUT_CHARS)}"})
+
+def command(user):
+    """One line from the keyboard or from the remote: a /command, a !shell line, or something to work on.
+    Returns "quit" when it asks to leave."""
+    global fast, show_think, speak, allow_all, history, chat_file, PLAN, spoken
+    if not user: return
+    if user in ("exit","quit"): return "quit"
+    if user in ("/help", "/", "/?"): show_help(); return
+    if user == "/update":
+        if check_update(quiet=False): reload_app()
+        return
+    if user == "/update full": full_update(); return
+    if user.startswith("/color"): choose_color(user[6:]); return
+    if user.startswith("/device"): choose_device(user[7:]); return
+    if user=="/fast":
+        fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); return
+    if user=="/think":
+        show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); return
+    if user=="/undo": undo(); return
+    if user=="/plan": toggle_plan(); return
+    if user=="/rewind": rewind(); return
+    if user=="/last": show_last(); return
+    if user.startswith("/apps"): show_apps(user[5:]); return
+    if user=="/say":
+        speak = not speak; hush()
+        print(f"{DIM}reading replies out loud {'on' if speak else 'off'}{R}" if (shutil.which("say") or shutil.which("spd-say") or shutil.which("espeak"))
+              else f"{DIM}no voice on this computer · on Linux: sudo apt install speech-dispatcher{R}"); return
+    if user=="/todos":
+        if TODOS: print(header("To-do")); show_todos()
+        else: print(f"{DIM}no to-do list yet · it makes one for jobs with a few steps{R}")
+        return
+    if user=="/jobs": show_jobs(); return
+    if user=="/context": show_context(); return
+    if user.startswith("/mcp"): show_mcp(user[4:]); return
+    if user.startswith("/schedule"): show_schedules(user[9:]); return
+    if user.startswith("/hooks"): show_hooks(user[6:]); return
+    if user.startswith("/warm"): keep_warm(user[5:]); return
+    if user.startswith("/phone"): setup_phone(user[6:]); return
+    if user.startswith("/imessage"): setup_imessage(user[9:]); return
+    if user.startswith("/remote"): setup_web(user[7:]); return
+    if user.startswith("/password"):
+        if user[9:].strip() == "off": save_config(bridge_lock={}); print(f"{DIM}no password on the phone bridges any more{R}"); return
+        pw = line_input(f"  {GOLD}❯{R} new password for Telegram and iMessage: ").strip()
+        if len(pw) < 6: print(f"{DIM}use at least 6 characters{R}"); return
+        set_bridge_password(pw); RAW.write("\033[1A\r\033[K"); print(f"{GOLD}●{R} {BOLD}Password set{R} {DIM}· send it from your phone to unlock · /lock there locks it · /password off removes it{R}"); return
+    if user == "/cost": show_cost(); return
+    if user == "/doctor": doctor(); return
+    if user.split()[0] == "/cloud":
+        if setup_cloud(user[6:]): reload_app(note="Now running on " + ("your cloud card" if load_config().get("remote") else "this computer"))
+        return
+    if user.startswith("/export"): export_chat(user[7:]); return
+    if user == "/notify":
+        on = not load_config().get("notify", True); save_config(notify=on)
+        print(f"{DIM}notifications {'on · when a reply takes 30s or more, or it needs you, while you are in another window' if on else 'off'}{R}"); return
+    if user.split()[0] == "/commit":
+        turn("Commit my changes in this git repo. Run git status, git diff and git diff --staged, and git log -5 --oneline to see how "
+             "commit messages are written here. Stage only the files that belong to this change (never .env files, keys or other secrets; "
+             "ask me if something looks private), then commit with a short message in that style saying what changed and why. "
+             "Don't push unless I say so." + (f" Also: {user[7:].strip()}" if user[7:].strip() else "")); return
+    if user.split()[0] == "/check":
+        if not user[6:].strip(): print(f"{DIM}/check <url> checks a site on phone, tablet and desktop · /check localhost:5173 · /check bxzex.com android{R}"); return
+        turn(f"Check {user[6:].strip()} on phones, tablets and desktop with test_page (use the devices I named, if any). Look at the "
+             "screenshots as well as the numbers. Tell me what's broken or looks off on each, worst first. If it's my own project and you can "
+             "find its code here, offer to fix it."); return
+    if user.split()[0] == "/review":
+        turn("Review my code changes before I push them. Look at git diff and git diff --staged; if both are empty, review the commits on "
+             "this branch that aren't on main or master (git log and git diff <base>...HEAD). Read the code around each change. Look for real "
+             "problems: bugs, crashes, security holes, leaked secrets, broken edge cases, missing error handling. Change nothing. List what "
+             "you found worst first, each with file:line, what goes wrong and the fix. If it all looks good, say so in one line."
+             + (f" Also: {user[7:].strip()}" if user[7:].strip() else "")); return
+    if user.split()[0] in custom_commands():
+        name, _, rest = user.partition(" ")
+        text = read_text(custom_commands()[name], 20000)
+        text = re.sub(r"(?s)\A---.*?---\s*", "", text)
+        turn(text.replace("$ARGUMENTS", rest.strip()) if "$ARGUMENTS" in text else (text + ("\n\n" + rest if rest.strip() else "")))
+        return
+    if user=="/allow clear":
+        allow = load_config().get("allow") or {}; allow.pop(os.getcwd(), None); save_config(allow=allow)
+        print(f"{DIM}nothing is always allowed in this folder any more{R}"); return
+    if user=="/allow":
+        allow_all = not allow_all
+        if folder_rules(): print(f"{DIM}always allowed in this folder: {', '.join(r.replace('cmd:', '') for r in folder_rules())} · /allow clear to wipe{R}")
+        print(f"{DIM}always allow {'on · commands and file changes run without asking, risky ones still ask' if allow_all else 'off · it asks first'}{R}"); return
+    if user=="/compact":
+        if len(history) < 3: print(f"{DIM}nothing to fold yet{R}"); return
+        if ensure_server():
+            try:
+                if not fold(history, force=True, everything=True): print(f"{DIM}nothing to fold yet{R}")
+            except KeyboardInterrupt: print(f"{DIM}stopped{R}")
+            save_chat()
+        return
+    if user=="/init":
+        turn("Look around this folder with list_files and read the main files (README, package or build files, entry points). "
+             "Then write BXZEX.md here with write_file: what this project is, how to run, build and test it, the layout, and the "
+             "conventions to follow. Keep it under 60 lines and only state what you saw. If BXZEX.md already exists, improve it with edit_file.")
+        refresh_system(); return
+    if user.startswith("!") and len(user) > 1:
+        try: own_command(user[1:].strip())
+        except Exception as e: print(f"{DIM}couldn't run it: {e}{R}")
+        save_chat(); return
+    if user in ("/reset", "/clear"):
+        history=[]; chat_file=None; allow_all=False; UNDO.clear(); TODOS.clear(); PLAN=False; refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); return
+    if user=="/history": open_chat(); return
+    if user=="/resume": open_chat(0); return
+    if user.startswith("/memory"): show_memory(user[7:]); return
+    if user=="/skills": show_skills(); return
+    if user.startswith("/btw"):
+        if user[4:].strip():
+            history.append({"role": "user", "content": "By the way: " + user[4:].strip()})
+            print(f"{DIM}noted, no reply needed{R}")
+        else:
+            print(f"{DIM}/btw <note> adds a note without a reply · or just type while it's working and press Enter{R}")
+        return
+    if user in ("/v", "/voice"):
+        spoken = listen(); return
+    if user.startswith("/image"):
+        want = user[6:].strip()
+        if not want:
+            print(f"{DIM}/image <description> makes a picture · to show it one, drag the file into this window{R}"); return
+        shape, quality = "square", "fast"
+        while want.split(" ", 1)[0].lower() in ("hd", "fast", "square", "portrait", "landscape") and " " in want:
+            word, want = want.split(" ", 1)
+            if word.lower() in ("hd", "fast"): quality = word.lower()
+            else: shape = word.lower()
+        try: result = generate_image(want, shape, quality, wait_for_chat=False)   # the chat model reloads while you look
+        except KeyboardInterrupt: result = "stopped"
+        print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
+        return
+    turn(user)
+
 if sys.argv[1:2] in (["--version"], ["-v"]):
     print(f"bxzex-ai {VERSION} · © 2026 bxzex · https://bxzex.com"); sys.exit(0)
 if sys.argv[1:2] == ["--car"]:
@@ -4810,6 +5275,8 @@ if sys.argv[1:2] == ["--tick"]:
     tick(); sys.exit(0)
 if sys.argv[1:2] == ["--phone"]:             # the phone bridge, kept running by the system
     phone_loop(); sys.exit(0)
+if sys.argv[1:2] == ["--web"]:               # remote control from your own web page, kept running by the system
+    web_loop(); sys.exit(0)
 if sys.argv[1:2] == ["--imessage"]:          # the iMessage bridge, kept running by the system
     imessage_loop(); sys.exit(0)
 if sys.argv[1:2] == ["--ticker"]:            # set the system timer on or off to match what's scheduled
@@ -4900,7 +5367,7 @@ if unseen_results():
 if RELOAD.get("chat") and os.path.exists(RELOAD["chat"]):
     try:
         with open(RELOAD["chat"]) as _f: history = json.load(_f).get("messages", [])
-        chat_file = RELOAD["chat"]; last_saved = chat_data()
+        chat_file = RELOAD["chat"]; last_saved = chat_data(); mark_current()
     except (OSError, ValueError): pass
 elif not RELOAD and load_config().get("continue", True): start_menu()   # continue the last chat, start a new one, or pick an earlier one
 threading.Thread(target=autosave, daemon=True).start()
@@ -4913,91 +5380,9 @@ if os.environ.get("BXZEX_NO_UPDATE") != "1":      # look for a newer version whe
             if reload_ready: return
             time.sleep(int(os.environ.get("BXZEX_UPDATE_EVERY") or 1200))
     threading.Thread(target=_updates, daemon=True).start()
-def reload_app(typed_text="", note=""):
-    """Start the new version in this same window, on the same chat, with the same settings. Nothing is lost."""
-    save_chat(); box.unpin()
-    if COOKED:
-        try: termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, COOKED)
-        except termios.error: pass
-    sys.stdout.flush()
-    stop_jobs()
-    state = {"chat": chat_file or "", "fast": fast, "think": show_think, "allow": allow_all, "typed": typed_text, "plan": PLAN, "note": note}
-    try:
-        os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)], dict(os.environ, BXZEX_RELOAD=json.dumps(state)))
-    except OSError:
-        keys_mode(); print(f"{DIM}couldn't reload by itself: quit and open bxzex-ai again to use the new version{R}")
-
-def close_open_calls():
-    """After a stop or an error: keep the work done so far; only close calls that never got a result."""
-    answered = {m.get("tool_call_id") for m in history if m["role"] == "tool"}
-    for m in list(history):
-        for call in m.get("tool_calls") or []:      # not "c": that name is the colour function every loader uses
-            if call.get("id") not in answered:
-                history.append({"role": "tool", "tool_call_id": call.get("id"), "content": "Stopped by the user before this ran."})
-
-def rewind():
-    """Go back to an earlier message: the chat is cut there and the message comes back into the box to change and send again."""
-    global spoken
-    picks = [(i, m) for i, m in enumerate(history) if m["role"] == "user" and isinstance(m.get("content"), (str, list))
-             and not plain(m["content"]).startswith(("(", "By the way", SUMMARY_HEAD))][-20:][::-1]
-    if not picks: print(f"{DIM}nothing to go back to yet{R}"); return
-    print(header("Go back to"))
-    at = menu([(" ".join(plain(m["content"]).split())[:W() - 10], "") for _, m in picks], hint="↑↓ to move · enter to go back to it · esc to cancel")
-    if at is None: print(f"  {DIM}cancelled{R}"); return
-    i, m = picks[at]
-    mark = m.get("_undo", len(UNDO)); changed = len(UNDO) - mark
-    put_back = False
-    if changed > 0:
-        how = menu([("Go back in the chat only", "files stay as they are now"),
-                    ("Go back and put files back too", f"undoes {changed} file change{'s' if changed > 1 else ''} made after it")])
-        if how is None: print(f"  {DIM}cancelled{R}"); return
-        put_back = how == 1
-    if put_back:
-        while len(UNDO) > mark:
-            path, old = UNDO.pop()
-            try:
-                if old is None: os.remove(path)
-                else:
-                    with open(path, "w") as f: f.write(old)
-            except OSError: pass
-    del history[i:]
-    spoken = plain(m["content"])
-    print(f"{GOLD}●{R} {BOLD}Went back{R} {DIM}· {'files put back · ' if put_back else ''}your message is in the box: change it and press Enter{R}")
-    save_chat()
-
-def turn(text):
-    print()
-    hush()
-    LAST_TOOLS.clear()
-    history.append(dict(user_message(text), _undo=len(UNDO)))
-    try:
-        run_turn(history)
-        maybe_learn()                                # every few messages, what's new about the user is saved in the background
-    except KeyboardInterrupt:
-        close_open_calls(); print(f"\n{DIM}stopped · everything done so far is kept{R}")
-    except Exception as e:                           # never lose the app or the chat over one bad step
-        log_error(type(e), e, e.__traceback__); close_open_calls()
-        print(f"\n{DIM}something went wrong ({e.__class__.__name__}: {str(e)[:120]}) · the chat is kept · details in {ERROR_LOG.replace(HOME, '~')}{R}")
-    save_chat()
-
-def own_command(cmd):
-    """!command: run it yourself. The output shows here and the assistant sees it too."""
-    print(f"{TEAL}◆{R} {BOLD}{cmd}{R}")
-    p = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         text=True, errors="replace", start_new_session=True)
-    got = []
-    try:
-        for line in p.stdout: got.append(line); sys.stdout.write(f"  {line}"); sys.stdout.flush()
-        p.wait()
-    except KeyboardInterrupt:
-        try: os.killpg(p.pid, 9)
-        except OSError: pass
-        got.append("[stopped]\n")
-    out = "".join(got)
-    print(f"  {DIM}└ exit code {p.returncode}{R}")
-    history.append({"role": "user", "content": f"(I ran this myself: `{cmd}`)\nexit code {p.returncode}\n{clip(out, OUT_CHARS)}"})
 
 spoken = RELOAD.get("typed", ""); last_break = 0
+
 while True:
     try:
         user = ask(spoken or typed.leftover); spoken = typed.leftover = ""
@@ -5009,129 +5394,12 @@ while True:
         if time.time() - last_break < 2: break
         last_break = time.time(); print(f"{DIM}press ctrl-c again to quit, or type exit{R}"); continue
     try:
-        if not user: continue
-        if user in ("exit","quit"): break
-        if user in ("/help", "/", "/?"): show_help(); continue
-        if user == "/update":
-            if check_update(quiet=False): reload_app()
-            continue
-        if user == "/update full": full_update(); continue
-        if user.startswith("/color"): choose_color(user[6:]); continue
-        if user.startswith("/device"): choose_device(user[7:]); continue
-        if user=="/fast":
-            fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); continue
-        if user=="/think":
-            show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); continue
-        if user=="/undo": undo(); continue
-        if user=="/plan": toggle_plan(); continue
-        if user=="/rewind": rewind(); continue
-        if user=="/last": show_last(); continue
-        if user.startswith("/apps"): show_apps(user[5:]); continue
-        if user=="/say":
-            speak = not speak; hush()
-            print(f"{DIM}reading replies out loud {'on' if speak else 'off'}{R}" if (shutil.which("say") or shutil.which("spd-say") or shutil.which("espeak"))
-                  else f"{DIM}no voice on this computer · on Linux: sudo apt install speech-dispatcher{R}"); continue
-        if user=="/todos":
-            if TODOS: print(header("To-do")); show_todos()
-            else: print(f"{DIM}no to-do list yet · it makes one for jobs with a few steps{R}")
-            continue
-        if user=="/jobs": show_jobs(); continue
-        if user=="/context": show_context(); continue
-        if user.startswith("/mcp"): show_mcp(user[4:]); continue
-        if user.startswith("/schedule"): show_schedules(user[9:]); continue
-        if user.startswith("/hooks"): show_hooks(user[6:]); continue
-        if user.startswith("/warm"): keep_warm(user[5:]); continue
-        if user.startswith("/phone"): setup_phone(user[6:]); continue
-        if user.startswith("/imessage"): setup_imessage(user[9:]); continue
-        if user.startswith("/password"):
-            if user[9:].strip() == "off": save_config(bridge_lock={}); print(f"{DIM}no password on the phone bridges any more{R}"); continue
-            pw = line_input(f"  {GOLD}❯{R} new password for Telegram and iMessage: ").strip()
-            if len(pw) < 6: print(f"{DIM}use at least 6 characters{R}"); continue
-            set_bridge_password(pw); RAW.write("\033[1A\r\033[K"); print(f"{GOLD}●{R} {BOLD}Password set{R} {DIM}· send it from your phone to unlock · /lock there locks it · /password off removes it{R}"); continue
-        if user == "/cost": show_cost(); continue
-        if user == "/doctor": doctor(); continue
-        if user.split()[0] == "/cloud":
-            if setup_cloud(user[6:]): reload_app(note="Now running on " + ("your cloud card" if load_config().get("remote") else "this computer"))
-            continue
-        if user.startswith("/export"): export_chat(user[7:]); continue
-        if user == "/notify":
-            on = not load_config().get("notify", True); save_config(notify=on)
-            print(f"{DIM}notifications {'on · when a reply takes 30s or more, or it needs you, while you are in another window' if on else 'off'}{R}"); continue
-        if user.split()[0] == "/commit":
-            turn("Commit my changes in this git repo. Run git status, git diff and git diff --staged, and git log -5 --oneline to see how "
-                 "commit messages are written here. Stage only the files that belong to this change (never .env files, keys or other secrets; "
-                 "ask me if something looks private), then commit with a short message in that style saying what changed and why. "
-                 "Don't push unless I say so." + (f" Also: {user[7:].strip()}" if user[7:].strip() else "")); continue
-        if user.split()[0] == "/check":
-            if not user[6:].strip(): print(f"{DIM}/check <url> checks a site on phone, tablet and desktop · /check localhost:5173 · /check bxzex.com android{R}"); continue
-            turn(f"Check {user[6:].strip()} on phones, tablets and desktop with test_page (use the devices I named, if any). Look at the "
-                 "screenshots as well as the numbers. Tell me what's broken or looks off on each, worst first. If it's my own project and you can "
-                 "find its code here, offer to fix it."); continue
-        if user.split()[0] == "/review":
-            turn("Review my code changes before I push them. Look at git diff and git diff --staged; if both are empty, review the commits on "
-                 "this branch that aren't on main or master (git log and git diff <base>...HEAD). Read the code around each change. Look for real "
-                 "problems: bugs, crashes, security holes, leaked secrets, broken edge cases, missing error handling. Change nothing. List what "
-                 "you found worst first, each with file:line, what goes wrong and the fix. If it all looks good, say so in one line."
-                 + (f" Also: {user[7:].strip()}" if user[7:].strip() else "")); continue
-        if user.split()[0] in custom_commands():
-            name, _, rest = user.partition(" ")
-            text = read_text(custom_commands()[name], 20000)
-            text = re.sub(r"(?s)\A---.*?---\s*", "", text)
-            turn(text.replace("$ARGUMENTS", rest.strip()) if "$ARGUMENTS" in text else (text + ("\n\n" + rest if rest.strip() else "")))
-            continue
-        if user=="/allow clear":
-            allow = load_config().get("allow") or {}; allow.pop(os.getcwd(), None); save_config(allow=allow)
-            print(f"{DIM}nothing is always allowed in this folder any more{R}"); continue
-        if user=="/allow":
-            allow_all = not allow_all
-            if folder_rules(): print(f"{DIM}always allowed in this folder: {', '.join(r.replace('cmd:', '') for r in folder_rules())} · /allow clear to wipe{R}")
-            print(f"{DIM}always allow {'on · commands and file changes run without asking, risky ones still ask' if allow_all else 'off · it asks first'}{R}"); continue
-        if user=="/compact":
-            if len(history) < 3: print(f"{DIM}nothing to fold yet{R}"); continue
-            if ensure_server():
-                try:
-                    if not fold(history, force=True, everything=True): print(f"{DIM}nothing to fold yet{R}")
-                except KeyboardInterrupt: print(f"{DIM}stopped{R}")
-                save_chat()
-            continue
-        if user=="/init":
-            turn("Look around this folder with list_files and read the main files (README, package or build files, entry points). "
-                 "Then write BXZEX.md here with write_file: what this project is, how to run, build and test it, the layout, and the "
-                 "conventions to follow. Keep it under 60 lines and only state what you saw. If BXZEX.md already exists, improve it with edit_file.")
-            refresh_system(); continue
-        if user.startswith("!") and len(user) > 1:
-            try: own_command(user[1:].strip())
-            except Exception as e: print(f"{DIM}couldn't run it: {e}{R}")
-            save_chat(); continue
-        if user in ("/reset", "/clear"):
-            history=[]; chat_file=None; allow_all=False; UNDO.clear(); TODOS.clear(); PLAN=False; refresh_system(); print(f"{DIM}new conversation · the old one is in /history{R}"); continue
-        if user=="/history": open_chat(); continue
-        if user=="/resume": open_chat(0); continue
-        if user.startswith("/memory"): show_memory(user[7:]); continue
-        if user=="/skills": show_skills(); continue
-        if user.startswith("/btw"):
-            if user[4:].strip():
-                history.append({"role": "user", "content": "By the way: " + user[4:].strip()})
-                print(f"{DIM}noted, no reply needed{R}")
-            else:
-                print(f"{DIM}/btw <note> adds a note without a reply · or just type while it's working and press Enter{R}")
-            continue
-        if user in ("/v", "/voice"):
-            spoken = listen(); continue
-        if user.startswith("/image"):
-            want = user[6:].strip()
-            if not want:
-                print(f"{DIM}/image <description> makes a picture · to show it one, drag the file into this window{R}"); continue
-            shape, quality = "square", "fast"
-            while want.split(" ", 1)[0].lower() in ("hd", "fast", "square", "portrait", "landscape") and " " in want:
-                word, want = want.split(" ", 1)
-                if word.lower() in ("hd", "fast"): quality = word.lower()
-                else: shape = word.lower()
-            try: result = generate_image(want, shape, quality, wait_for_chat=False)   # the chat model reloads while you look
-            except KeyboardInterrupt: result = "stopped"
-            print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
-            continue
-        turn(user)
+        got = sync_chat()                                # what the remote did in this chat while this window sat idle
+        if got:
+            print(f"{DIM}picked up {got} new message{'s' if got > 1 else ''} from your remote · this chat carried on from your phone{R}")
+            tail = next((m["content"] for m in reversed(history) if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip()), "")
+            if tail: print(f"{GOLD}●{R} {DIM}{' '.join(tail.split())[:W() * 2 - 8]}{R}")
+        if command(user) == "quit": break
     except KeyboardInterrupt:                          # ctrl-c in any command stops that command, never the app
         print(f"\n{DIM}stopped{R}")
     except Exception as e:

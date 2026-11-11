@@ -46,4 +46,15 @@ print("kept:", "saved" in g["keep_helper_changes"](1, over), "x = 5" in open(f).
 over = {}; g["helper_file"]("edit_file", {"path": f, "old_text": "x = 5", "new_text": "x = 6"}, over); open(f, "a").write("# moved on\n")
 print("stale skipped:", "Not kept" in g["keep_helper_changes"](1, over), "x = 5" in open(f).read())
 print("helper blocked from ssh:", g["helper_file"]("write_file", {"path": "~/.ssh/x", "content": "k"}, {})[:5] == "error")
+# the terminal takes the newer copy of its chat that the remote saved, but never throws away its own unsaved lines
+import json
+cf = d + "/chat.json"; base = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+g["history"] = list(base); g["chat_file"] = cf; open(cf, "w").write(g["chat_data"]()); g["last_saved"] = g["chat_data"]()
+print("nothing new:", g["sync_chat"]() == 0)
+g2 = dict(g); newer = base + [{"role": "user", "content": "from the phone"}, {"role": "assistant", "content": "done on the phone"}]
+open(cf, "w").write(json.dumps({"title": "hi", "messages": newer}))
+print("picked up the remote's turns:", g["sync_chat"]() == 2 and g["history"][-1]["content"] == "done on the phone")
+g["history"].append({"role": "user", "content": "typed here, not saved yet"})
+open(cf, "w").write(json.dumps({"title": "hi", "messages": base}))
+print("own unsaved lines kept:", g["sync_chat"]() == 0 and g["history"][-1]["content"].startswith("typed here"))
 shutil.rmtree(d)
