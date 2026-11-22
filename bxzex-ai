@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.16.0"
+VERSION = "1.16.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -255,16 +255,35 @@ LOGO = [   # "bxzex" in the TheDraw font Bio Hazard: (characters, one hex color 
     ('  ▀▀▀▀▀▀      ▀░    ▀░    ▀▀▀▀▀▀▀▀      ▀▀▀▀▀▀      ▀░    ▀░  ', '0707080808080808070700000707080807070707080800000707080808080808080807070000070708080808080807070000070708080707070708080000'),
 ]
 
-def logo_rows():
-    """The logo keeps its white and grey; its blue becomes the theme color."""
+_CUBE = [0, 95, 135, 175, 215, 255]
+_BASE16 = [(0,0,0),(128,0,0),(0,128,0),(128,128,0),(0,0,128),(128,0,128),(0,128,128),(192,192,192),
+           (128,128,128),(255,0,0),(0,255,0),(255,255,0),(0,0,255),(255,0,255),(0,255,255),(255,255,255)]
+
+def dim256(n, t):
+    """A 256-color index faded toward black by t (0 = black, 1 = unchanged), as the nearest 256-color index."""
+    if t >= 1: return n
+    if n < 16: r, g, b = _BASE16[n]
+    elif n < 232: n -= 16; r, g, b = _CUBE[n // 36], _CUBE[n // 6 % 6], _CUBE[n % 6]
+    else: r = g = b = 8 + 10 * (n - 232)
+    r, g, b = r * t, g * t, b * t
+    near = lambda v: min(range(6), key=lambda i: abs(_CUBE[i] - v))
+    cube = (near(r), near(g), near(b)); cr, cg, cb = (_CUBE[i] for i in cube)
+    gi = max(0, min(23, round(((r + g + b) / 3 - 8) / 10))); gv = 8 + 10 * gi
+    if (r-gv)**2 + (g-gv)**2 + (b-gv)**2 < (r-cr)**2 + (g-cg)**2 + (b-cb)**2: return 232 + gi
+    return 16 + 36 * cube[0] + 6 * cube[1] + cube[2]
+
+def logo_rows(t=1.0):
+    """The logo keeps its white and grey; its blue becomes the theme color. t below 1 fades it toward black."""
     fg = {15: 231, 7: 248, 8: 240, 1: T[2]}
     bg = {1: T[2], 7: 248}
+    if t < 1:
+        fg = {k: dim256(v, t) for k, v in fg.items()}; bg = {k: dim256(v, t) for k, v in bg.items()}
     out = []
     for chars, attrs in LOGO:
         row = []; last = None
         for i, ch in enumerate(chars):
             a = int(attrs[2*i:2*i+2], 16)
-            code = f"\033[0;38;5;{fg.get(a & 15, 231)}" + (f";48;5;{bg[a >> 4]}m" if (a >> 4) in bg else "m")
+            code = f"\033[0;38;5;{fg.get(a & 15, dim256(231, t))}" + (f";48;5;{bg[a >> 4]}m" if (a >> 4) in bg else "m")
             if code != last: row.append(code); last = code
             row.append(ch)
         out.append("".join(row) + R)
@@ -310,14 +329,42 @@ def link(url, text):
     """Clickable where the terminal supports hyperlinks; plain text everywhere else."""
     return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
 
-def banner():
+def intro():
+    """The bxzex logo fades in in the middle of the screen, then fades away and the chat opens.
+    Drawn on the terminal's second screen, so nothing above the prompt is touched."""
+    size = shutil.get_terminal_size((90, 30))
+    if not RAW.isatty() or size.columns < len(LOGO[0][0]) + 4 or size.lines < len(LOGO) + 4: return
+    top = (size.lines - len(LOGO)) // 2 + 1; left = (size.columns - len(LOGO[0][0])) // 2 + 1
+    def draw(t):
+        RAW.write("".join(f"\033[{top + i};{left}H{row}" for i, row in enumerate(logo_rows(t)))); RAW.flush()
+    def wait(s):     # a key pressed skips the rest; the key itself stays for the chat
+        try: return bool(select.select([sys.stdin], [], [], s)[0])
+        except (OSError, ValueError): time.sleep(s); return False
+    RAW.write("\033[?1049h\033[?25l\033[2J"); RAW.flush()
+    try:
+        frames = [(0.08 + 0.92 * (i / 24) ** 1.6, 0.05) for i in range(1, 25)] + [(1, 0.5)] + [(i / 12, 0.03) for i in range(12, -1, -1)]
+        for t, s in frames:
+            draw(t)
+            if wait(s): break
+    finally:
+        RAW.write("\033[2J\033[?1049l\033[?25h"); RAW.flush()
+
+def banner(fade=False):
     print()
-    for row in logo_rows():
-        sys.stdout.write("  " + row + "\n"); sys.stdout.flush(); time.sleep(0.02)
-    site = link("https://bxzex.com", "https://bxzex.com")
-    insta = link("https://instagram.com/bxzex", "instagram.com/bxzex")
+    if fade and RAW.isatty():                      # after the intro the logo fades up into its place at the top of the chat
+        RAW.write("\033[?25l")
+        for i in range(1, 11):
+            if select.select([sys.stdin], [], [], 0)[0]: i = 10      # typing already: show it whole now
+            RAW.write((f"\033[{len(LOGO)}A" if i > 1 else "") + "".join(f"\r\033[K  {row}\n" for row in logo_rows(i / 10))); RAW.flush()
+            if i == 10: break
+            time.sleep(0.035)
+        RAW.write("\033[?25h")
+    else:
+        for row in logo_rows():
+            sys.stdout.write("  " + row + "\n"); sys.stdout.flush(); time.sleep(0.02)
+    site = link("https://bxzex.com", "bxzex")
     print(f"\n  {BOLD}BXZEX AI{R} {DIM}· uncensored · {'cloud GPU' if REMOTE else 'local'} · private{R}")
-    print(f"  {GOLD}{site}{R} {DIM}· {insta} · © 2026 bxzex · v{VERSION}{R}")
+    print(f"  {GOLD}{site}{R} {DIM}· © 2026 bxzex · v{VERSION}{R}")
     print(f"  {DIM}{squeeze(os.getcwd().replace(HOME, '~'), W() - 4)}{R}")
     print(f"\n  {DIM}/help for commands · drop an image to show it · keep typing while it works{R}")
 
@@ -333,21 +380,25 @@ def loaded_model():
         with urllib.request.urlopen(f"{HOST}/v1/models", timeout=600 if REMOTE else 3) as r:
             d = json.load(r)["data"]
         MODEL_ID = d[0]["id"] if d else ""
-        if REMOTE and MODEL_ID: global last_ok; last_ok = time.time()     # it answered, so it's awake
+        if REMOTE and MODEL_ID: global last_ok, wake_began; last_ok = time.time(); wake_began = 0.0     # it answered, so it's awake
         return MODEL_ID or None
     except Exception:
         MODEL_ID = ""
         return None
 
 waking = threading.Lock()
+wake_began = 0.0     # when the cloud card was first asked to wake, so the logo fade picks up from there
 
 def wake_soon():
     """Start waking a sleeping cloud card in the background, e.g. as soon as they start typing."""
+    global wake_began
     def go():
         if waking.acquire(blocking=False):
             try: loaded_model()
             finally: waking.release()
-    if REMOTE and not awake(): threading.Thread(target=go, daemon=True).start()
+    if REMOTE and not awake():
+        if not wake_began: wake_began = time.time()
+        threading.Thread(target=go, daemon=True).start()
 
 def awake():
     """True when the cloud card answered in the last minute: it can't have gone to sleep, so no need to check."""
@@ -395,18 +446,24 @@ def ensure_server(block=True):
 
 def wake_remote(block=True):
     """The cloud card sleeps when idle; the first request wakes it, which takes up to a minute or two."""
+    global wake_began
+    if not wake_began: wake_began = time.time()
     if not block:
         threading.Thread(target=loaded_model, daemon=True).start(); return True
     sys.stdout.write("\033[?25l")
     mins = 4 if (load_config().get("cloud") or {}).get("card") == "H200" else 2          # the bigger model takes longer to load
-    wait = Waiting(f"Waking the cloud GPU · it sleeps after 5 min idle and takes about {mins} min to start")
+    size = shutil.get_terminal_size((90, 30))
+    if RAW.isatty() and size.columns >= len(LOGO[0][0]) + 4 and size.lines >= len(LOGO) + 4:
+        wait = LogoFade(max(8, mins * 60 - (time.time() - wake_began)))                    # the bxzex logo slowly fades in where the reply will go
+    else:
+        wait = Waiting(f"Waking the cloud GPU · it sleeps after 5 min idle and takes about {mins} min to start")
     if CHANNEL == "web" and PHONE: web_push("note", f"Waking the cloud card. It sleeps after 5 minutes idle and takes about {mins} minutes to start.")
     try:
         if loaded_model(): return True
     except KeyboardInterrupt:
         pass
     finally:
-        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush()
+        wait.stop(); sys.stdout.write("\033[?25h"); sys.stdout.flush(); wake_began = 0.0
     print(f"{DIM}the cloud GPU didn't answer. Check \"remote\" and \"remote_key\" in {CONFIG.replace(HOME, '~')}{R}"); return False
 
 # ---- processor or graphics card ----
@@ -4027,6 +4084,31 @@ def highlight(line):
         else: out.append(f"{c(252)}{t}{R}")
     return "".join(out)
 
+class LogoFade:
+    """Shown in the chat while a sleeping cloud card wakes: the bxzex logo fades in from black over about
+    the time the card takes to start, then breathes gently until it answers. Erased once it's awake."""
+    def __init__(self, seconds):
+        self.seconds = seconds; self.t0 = time.time(); self.drawn = False
+        self.stop_ev = threading.Event()
+        self.th = threading.Thread(target=self.run, daemon=True); self.th.start()
+    def frame(self, t):
+        up = f"\033[{len(LOGO)}A" if self.drawn else ""
+        RAW.write(up + "".join(f"\r\033[K  {row}\n" for row in logo_rows(t))); RAW.flush(); self.drawn = True
+    def run(self):
+        last = None
+        while True:
+            el = time.time() - self.t0
+            p = min(1.0, el / self.seconds)
+            t = 0.08 + 0.92 * (p * p * (3 - 2 * p))          # ease in and out
+            if p >= 1: t = 0.85 + 0.15 * math.cos((el - self.seconds) * 1.6)   # awake soon: a slow breath
+            t = round(t, 2)
+            if t != last: self.frame(t); last = t
+            if self.stop_ev.wait(0.1): return
+    def stop(self):
+        if self.stop_ev.is_set(): return
+        self.stop_ev.set(); self.th.join()
+        if self.drawn: RAW.write(f"\033[{len(LOGO)}A\r\033[J"); RAW.flush()
+
 class Waiting:
     """One-line status shown while it loads, reads or thinks: flames, what it's doing, how long, how many tokens."""
     def __init__(self, label):
@@ -5556,18 +5638,19 @@ if not REMOTE and load_config().get("size") == "cloud" and sys.stdin.isatty():
 keys_mode()
 try: RELOAD = json.loads(os.environ.pop("BXZEX_RELOAD", "") or "null") or {}
 except ValueError: RELOAD = {}
-splash = splash_fits() and not RELOAD
+splash = splash_fits() and not RELOAD and not REMOTE     # a cloud card wakes in the background while they type: straight to the chat
 if splash:
     began = time.time()
     print()
     for row in car_rows():
         sys.stdout.write("  " + row + "\n"); sys.stdout.flush(); time.sleep(0.015)
     print()
-up = ensure_server(block=not RELOAD)     # after an update it doesn't wait: the card wakes while they type
+up = ensure_server(block=not (RELOAD or REMOTE))     # a cloud card isn't waited for: it wakes while they type, and the logo fades in if it's still waking when they send
 if splash:
     time.sleep(max(0, 1.2 - (time.time() - began)))      # long enough to be seen when the model is already loaded
     sys.stdout.write(f"\033[{len(CAR) + 2}A\r\033[J"); sys.stdout.flush()
 if not up: sys.exit(1)
+if REMOTE and not RELOAD: intro()        # the card is already waking in the background meanwhile
 if RELOAD:
     fast, show_think, allow_all, PLAN = bool(RELOAD.get("fast", fast)), bool(RELOAD.get("think")), bool(RELOAD.get("allow")), bool(RELOAD.get("plan"))
     if RELOAD.get("note"): print(f"{GOLD}●{R} {BOLD}{RELOAD['note']}{R} {DIM}· carrying on where you were{R}")
@@ -5578,7 +5661,7 @@ if RELOAD:
             if news: print(f"  {DIM}new: {news}{R}")
         except (OSError, IndexError): pass
 else:
-    banner()
+    banner(fade=REMOTE)
 refresh_system()
 def _skills():
     if refresh_skills() and not history: refresh_system()      # a new list joins before the first message
