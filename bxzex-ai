@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.17.1"
+VERSION = "1.17.2"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -403,10 +403,12 @@ def intro():
     Drawn on the terminal's second screen, so nothing above the prompt is touched."""
     size = shutil.get_terminal_size((90, 30))
     if not RAW.isatty() or size.columns < len(LOGO[0][0]) + 4 or size.lines < len(LOGO) + 4: return
-    top = (size.lines - len(LOGO)) // 2 + 1; left = (size.columns - len(LOGO[0][0])) // 2 + 1
+    top = (size.lines - len(LOGO) - 2) // 2 + 1; left = (size.columns - len(LOGO[0][0])) // 2 + 1
     reveal = logo_reveal(1.1)
+    tag = f"bxzex-ai v{VERSION}"
     def draw(el, fade=1.0, shine=False):
-        RAW.write("".join(f"\033[{top + i};{left}H{row}" for i, row in enumerate(logo_frame(el, reveal, shine, fade)))); RAW.flush()
+        under = f"\033[{top + len(LOGO) + 1};{left + (len(LOGO[0][0]) - len(tag)) // 2}H{c(dim256(250, min(1.0, el / 1.1) * fade))}{tag}{R}"
+        RAW.write("".join(f"\033[{top + i};{left}H{row}" for i, row in enumerate(logo_frame(el, reveal, shine, fade))) + under); RAW.flush()
     def wait(s):     # a key pressed skips the rest; the key itself stays for the chat
         try: return bool(select.select([sys.stdin], [], [], s)[0])
         except (OSError, ValueError): time.sleep(s); return False
@@ -4438,6 +4440,7 @@ def run_tool(call):
     blocked = hooks_before(name, args)
     if blocked:
         LAST_TOOLS.append((title, blocked)); print(f"  {DIM}└ blocked by your hook{R}\n"); return blocked
+    USAGE["tools"][name] = USAGE["tools"].get(name, 0) + 1
     global tool_wait, tool_label
     tool_label = RUNNING.get(name, "Working with " + MCP[name][0] if name in MCP else "")
     if tool_label: sys.stdout.write("\033[?25l"); tool_wait = Waiting(tool_label)
@@ -4823,7 +4826,8 @@ class LogoFade:
         self.th = threading.Thread(target=self.run, daemon=True); self.th.start()
     def frame(self, el):
         up = f"\033[{self.ROWS}A" if self.drawn else ""
-        rows = [f"  {row}" for row in logo_frame(el, self.reveal, shine=el > 2.6)] + [""] + ["  " + w for w in wave_rows(el, len(LOGO[0][0]))]
+        width = len(LOGO[0][0]); tag = f"bxzex-ai v{VERSION}"
+        rows = [f"  {row}" for row in logo_frame(el, self.reveal, shine=el > 2.6)] + ["  " + " " * ((width - len(tag)) // 2) + f"{c(dim256(250, min(1.0, el / 2.4)))}{tag}{R}"] + ["  " + w for w in wave_rows(el, width)]
         left = self.eta - el
         if not self.eta: when = f"{DIM}{fmt(el)}"
         elif left >= 1: when = f"{GOLD}≈ {fmt(left)} left"                    # one number while the estimate holds
@@ -5003,6 +5007,21 @@ def fold(history, force=False, everything=False):
     return changed
 
 turn_tok = 0   # tokens generated in the current turn, for the summary line
+USAGE = {"start": time.time(), "replies": 0, "out": 0, "read": 0, "busy": 0.0, "cost": 0.0, "requests": 0, "tools": {}}
+USAGE_FILE = f"{APP_HOME}/usage.json"     # totals per day, kept on this computer only
+
+def add_usage(**kw):
+    """Count this session and add to today's totals on disk."""
+    for k, v in kw.items(): USAGE[k] = USAGE.get(k, 0) + v
+    try:
+        with open(USAGE_FILE) as f: days = json.load(f)
+    except (OSError, ValueError): days = {}
+    today = days.setdefault(time.strftime("%Y-%m-%d"), {})
+    for k, v in kw.items(): today[k] = round(today.get(k, 0) + v, 4)
+    for old in sorted(days)[:-120]: days.pop(old)            # four months is plenty
+    try:
+        with open(USAGE_FILE, "w") as f: json.dump(days, f)
+    except OSError: pass
 turn_think = 0.0   # seconds spent reasoning in the current turn
 stream_error = ""   # set when the server reports a failure instead of an answer
 DOING = {"update_todos": "Planning", "ask_user": "Writing a question", "delegate": "Briefing a helper",
@@ -5062,6 +5081,7 @@ def stream(messages, label="Reading"):
                 stream_error = err.get("message", "error") if isinstance(err, dict) else str(err)
                 break
             used = (event.get("usage") or {}).get("prompt_tokens")
+            if used: add_usage(read=int(used), requests=1)
             if used and plain_text and sent_chars: tok_per_char = max(0.2, min(0.6, used / sent_chars))
             try: delta = event["choices"][0]["delta"]
             except Exception: continue
@@ -5181,6 +5201,7 @@ def run_turn(history):
             elif not calls:
                 if speak and text: say_aloud(text)
                 took = time.time() - began
+                add_usage(replies=1, out=turn_tok, busy=round(took, 1), cost=round(card_rate() * took / 3600, 4) if REMOTE else 0)
                 got = len(learned); learned.clear()
                 note = f"remembered {got} new thing{'s' if got > 1 else ''} about you (/memory)" if got else ""
                 if sys.stdout.isatty() and took >= 1:
@@ -5617,7 +5638,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
-            ("/update", "get the newest version · /update full adds new downloads"), ("/version", "which version is running, and if a newer one is out"), ("/new", "start a new conversation · also /reset and /clear"), ("/cd", "work in another folder · /cd ~/project"), ("/help", "this list"), ("exit", "quit")]
+            ("/update", "get the newest version · /update full adds new downloads"), ("/version", "which version is running, and if a newer one is out"), ("/usage", "how much you've used: memory, cloud time and cost, stats · /usage budget 50"), ("/new", "start a new conversation · also /reset and /clear"), ("/cd", "work in another folder · /cd ~/project"), ("/help", "this list"), ("exit", "quit")]
 PAST_FILE = f"{APP_HOME}/input_history"
 try:
     with open(PAST_FILE, errors="replace") as _f: past = [json.loads(l) for l in _f.read().splitlines()[-300:] if l.startswith('"')]
@@ -6069,6 +6090,103 @@ def cycle_mode(busy=False):
     elif allow_all: allow_all = False
     else: toggle_plan(quiet=True, busy=busy)
 
+def usage_bar(pct, n=30):
+    pct = max(0, min(100, pct)); full = round(pct * n / 100)
+    tone = 174 if pct >= 90 else 179 if pct >= 70 else T[3]
+    return f"{c(tone)}{'█' * full}{c(238)}{'█' * (n - full)}{R} {pct:.0f}% used"
+
+def usage_days():
+    try:
+        with open(USAGE_FILE) as f: return json.load(f)
+    except (OSError, ValueError): return {}
+
+def usage_tab():
+    days = usage_days(); today = time.strftime("%Y-%m-%d")
+    week = [time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400 * k)) for k in range(7)]
+    month = time.strftime("%Y-%m")
+    sumk = lambda keys, k: sum((days.get(d) or {}).get(k, 0) for d in keys)
+    mdays = [d for d in days if d.startswith(month)]
+    size = context_size(); used = estimate(history); pct = used * 100 / max(1, size)
+    out = [f"{BOLD}This chat's memory{R}", "  " + usage_bar(pct),
+           f"  {DIM}about {used:,} of {size:,} tokens · older messages fold into a summary near full · /compact does it now{R}", ""]
+    if REMOTE:
+        budget = float(load_config().get("budget") or 0); spent = sumk(mdays, "cost")
+        out += [f"{BOLD}Cloud card this month{R}" + (f" {DIM}· budget ${budget:.0f}{R}" if budget else "")]
+        if budget: out += ["  " + usage_bar(spent * 100 / budget), f"  {DIM}about ${spent:.2f} of ${budget:.0f} · resets on the 1st · /usage budget <dollars> changes it{R}"]
+        else: out += [f"  about ${spent:.2f} so far {DIM}· set a monthly budget to get a bar: /usage budget 50{R}"]
+        out += [f"  {DIM}estimated from time awake at ${card_rate():.2f}/hour · /cost has Modal's real bill{R}", ""]
+    rows = [("This session", None, USAGE.get("replies", 0), USAGE.get("out", 0), USAGE.get("read", 0), USAGE.get("busy", 0), USAGE.get("cost", 0)),
+            ("Today", [today], 0, 0, 0, 0, 0), ("Last 7 days", week, 0, 0, 0, 0, 0), ("This month", mdays, 0, 0, 0, 0, 0)]
+    out.append(f"{BOLD}{'':<14}{'replies':>9}{'written':>10}{'read':>11}{'working':>10}" + (f"{'cost':>9}" if REMOTE else "") + R)
+    for name, keys, rp, wo, rd, bz, co in rows:
+        if keys is not None: rp, wo, rd, bz, co = (sumk(keys, k) for k in ("replies", "out", "read", "busy", "cost"))
+        k = lambda n: f"{n / 1000:.1f}k" if n >= 1000 else str(int(n))
+        out.append(f"  {name:<12}{int(rp):>9}{k(wo):>10}{k(rd):>11}{fmt(bz):>10}" + (f"{'$%.2f' % co:>9}" if REMOTE else ""))
+    out += ["", f"  {DIM}written = tokens it wrote · read = tokens it read (your chat, files, pages) · kept on this computer only{R}"]
+    return out
+
+def status_tab():
+    where = (f"cloud card ({(load_config().get('cloud') or {}).get('card') or 'H100'}) · "
+             + ("awake" if awake() else "asleep, wakes on your next message") + " · sleeps after 5 min idle") if REMOTE else \
+            ("this computer · " + ("lite build" if LITE else "full build") + " · " + ("graphics chip" if graphics() and os.environ.get("BXZEX_DEVICE", load_config().get("device", "gpu")) != "cpu" else "processor"))
+    disk = installed_version()
+    rows = [("Version", f"v{VERSION}" + (f" · v{disk} installed, /update switches" if vtuple(disk) > vtuple(VERSION) else "")),
+            ("Model", f"{AI_NAME} · {where}"), ("Folder", os.getcwd().replace(HOME, "~")),
+            ("Mode", "plan mode" if PLAN else "always allow" if allow_all else "asks first"), ("Thinking", "off (fast)" if fast else "on"),
+            ("Theme", THEME), ("Skills", f"{len(list_skills())} · /skills"), ("Apps", f"{len({v[0] for v in MCP.values()})} connected · /mcp"),
+            ("Memory", f"{len([l for l in read_text(MEMORY, 10**6).splitlines() if l.strip()]) if os.path.exists(MEMORY) else 0} things · /memory"),
+            ("Computer", system_facts()[:W() - 18])]
+    return [f"  {BOLD}{k:<10}{R} {v}" for k, v in rows]
+
+def stats_tab():
+    days = usage_days(); out = [f"{BOLD}Last 7 days{R} {DIM}· time it spent working{R}"]
+    keys = [time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400 * k)) for k in range(6, -1, -1)]
+    top = max([(days.get(d) or {}).get("busy", 0) for d in keys] + [1])
+    for d in keys:
+        b = (days.get(d) or {}).get("busy", 0); n = round(b * 30 / top)
+        out.append(f"  {time.strftime('%a', time.strptime(d, '%Y-%m-%d'))}  {c(T[3])}{'█' * n}{R}{' ' * (31 - n)}{DIM}{fmt(b) if b else '-'}{R}")
+    total = sum(v.get("replies", 0) for v in days.values())
+    out += ["", f"  {BOLD}{total:,}{R} repl{'y' if total == 1 else 'ies'} over {len(days)} day{'s' if len(days) != 1 else ''} · {fmt(sum(v.get('busy', 0) for v in days.values()))} working"]
+    tools = sorted(USAGE["tools"].items(), key=lambda kv: -kv[1])[:8]
+    if tools: out += ["", f"{BOLD}Steps this session{R}"] + [f"  {SAYS.get(n, n):<16}{c_} " for n, c_ in tools]
+    return out
+
+def show_usage(arg=""):
+    """/usage: tabs like Settings · Usage · Status · Stats. Left and right switch, esc goes back."""
+    m = re.fullmatch(r"budget\s+\$?(\d+(?:\.\d+)?)", arg.strip())
+    if m: save_config(budget=float(m.group(1))); print(f"{DIM}monthly budget set to ${float(m.group(1)):.0f}{R}"); return
+    tabs = [("Usage", usage_tab), ("Status", status_tab), ("Stats", stats_tab)]
+    if not (sys.stdin.isatty() and RAW.isatty()) or PHONE:
+        for name, fn in tabs: print(header(name)); [print(l) for l in fn()]
+        return
+    at = 0; fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd); drawn = [0]
+    room = max(8, shutil.get_terminal_size((90, 30)).lines - Box.ROWS - 3)
+    def draw():
+        w = W()
+        bar = "  ".join(f"\033[7m{c(T[3])} {n} {R}" if i == at else f"{DIM}{n}{R}" for i, (n, _) in enumerate(tabs))
+        lines = [bar, ""] + [fit_ansi(l, w - 1) + R for l in tabs[at][1]()]
+        lines = lines[:room - 1] + [f"{DIM}← → tabs · esc to go back{R}"]
+        out = (f"\033[{drawn[0]}A" if drawn[0] else "") + "".join(f"\r\033[2K{l}\n" for l in lines)
+        if drawn[0] > len(lines): out += "\r\033[2K\n" * (drawn[0] - len(lines)) + f"\033[{drawn[0] - len(lines)}A"
+        RAW.write(out); RAW.flush(); drawn[0] = max(drawn[0], len(lines)) if drawn[0] > len(lines) else len(lines)
+    try:
+        tty.setcbreak(fd, termios.TCSANOW); RAW.write("\033[?25l"); draw()
+        while True:
+            buf = finish_escapes(fd, os.read(fd, 64).decode("utf-8", "ignore"))
+            while buf:
+                mm = ESC_KEY.match(buf); key = mm.group(0) if mm else buf[0]; buf = buf[len(key):]
+                if key in ("\x1b[C", "\x1bOC", "\t", "l"): at = (at + 1) % len(tabs)
+                elif key in ("\x1b[D", "\x1bOD", "\x1b[Z", "h"): at = (at - 1) % len(tabs)
+                elif key in ("\x1b", "q", "\r", "\n", "\x03", "\x04"): return
+            draw()
+    except KeyboardInterrupt: return
+    finally:
+        RAW.write(f"\033[{drawn[0]}A" + "\r\033[2K\n" * drawn[0] + f"\033[{drawn[0]}A\033[?25h"); RAW.flush()
+        try: box.draw("", 0, working=True)
+        except Exception: pass
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        print(f"{DIM}usage closed{R}")
+
 def show_context():
     size = context_size(); used = estimate(history)
     pct = min(100, round(used * 100 / max(1, size)))
@@ -6101,7 +6219,7 @@ HELP_GROUPS = [("The chat", "/new /cd /history /resume /rewind /compact /context
                ("The model", "/fast /think /device /cloud /warm /cost /doctor"),
                ("From anywhere", "/phone /imessage /remote /password /notify /schedule"),
                ("Add to it", "/skills /apps /mcp /hooks"),
-               ("The app", "/color /v /say /update /version /help exit")]
+               ("The app", "/usage /color /v /say /update /version /help exit")]
 
 def show_help():
     import textwrap
@@ -6272,6 +6390,7 @@ def command(user):
         if len(pw) < 6: print(f"{DIM}use at least 6 characters{R}"); return
         set_bridge_password(pw); RAW.write("\033[1A\r\033[K"); print(f"{GOLD}●{R} {BOLD}Password set{R} {DIM}· send it from your phone to unlock · /lock there locks it · /password off removes it{R}"); return
     if user == "/cost": show_cost(); return
+    if user == "/usage" or user.startswith("/usage "): show_usage(user[6:]); return
     if user == "/doctor": doctor(); return
     if user.split()[0] == "/cloud":
         if setup_cloud(user[6:]): reload_app(note="Now running on " + ("your cloud card" if load_config().get("remote") else "this computer"))
