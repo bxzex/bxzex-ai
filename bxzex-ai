@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -5323,6 +5323,29 @@ def fetch(path):
 
 update_lock = threading.Lock()   # the check at startup and /update never download at the same time
 
+def vtuple(v): return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3])
+
+def installed_version():
+    """The version in the app file on disk, which can be newer than the one running if it was updated while open."""
+    try:
+        with open(os.path.realpath(__file__), errors="ignore") as f:
+            m = re.search(r'(?m)^VERSION = "([^"]+)"', f.read(60000))
+        return m.group(1) if m else VERSION
+    except OSError: return VERSION
+
+def show_version():
+    disk = installed_version()
+    print(f"{GOLD}●{R} {BOLD}bxzex-ai v{VERSION}{R} {DIM}· running now{R}")
+    if vtuple(disk) > vtuple(VERSION): print(f"  {GOLD}v{disk} is installed{R} {DIM}· /update switches to it now, your chat stays{R}")
+    try:
+        r = subprocess.run(["curl", "-fsS", "-m", "6", UPDATE_URL.rstrip("/") + "/VERSION"], capture_output=True, text=True, timeout=10)
+        latest = r.stdout.split()[0] if r.returncode == 0 and r.stdout.split() else ""
+    except Exception: latest = ""
+    newest = max([VERSION, disk] + ([latest] if latest else []), key=vtuple)
+    if latest and vtuple(latest) > vtuple(disk): print(f"  {DIM}v{latest} is out · /update gets it{R}")
+    elif latest: print(f"  {DIM}v{newest} is the newest released{R}")
+    else: print(f"  {DIM}couldn't check for a newer one right now{R}")
+
 def check_update(quiet=True):
     """Look for a newer version and put it in place, then the app reloads itself at the prompt.
     Only the app, the server launcher and the skills change here: the big model files are never touched."""
@@ -5594,7 +5617,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
-            ("/update", "get the newest version · /update full adds new downloads"), ("/new", "start a new conversation · also /reset and /clear"), ("/cd", "work in another folder · /cd ~/project"), ("/help", "this list"), ("exit", "quit")]
+            ("/update", "get the newest version · /update full adds new downloads"), ("/version", "which version is running, and if a newer one is out"), ("/new", "start a new conversation · also /reset and /clear"), ("/cd", "work in another folder · /cd ~/project"), ("/help", "this list"), ("exit", "quit")]
 PAST_FILE = f"{APP_HOME}/input_history"
 try:
     with open(PAST_FILE, errors="replace") as _f: past = [json.loads(l) for l in _f.read().splitlines()[-300:] if l.startswith('"')]
@@ -5681,7 +5704,7 @@ def custom_commands():
 
 CHIPS = {}          # an image dragged or pasted into the box: one hidden character each, drawn as [Image #1]
 IMG_PATH = re.compile(r"""(?:(?<=\s)|^)('[^'\n]+\.(?:png|jpe?g|gif|webp|heic|bmp|tiff?)'|"[^"\n]+\.(?:png|jpe?g|gif|webp|heic|bmp|tiff?)"|"""
-                      r"""(?:~|/|[A-Za-z]:\\)(?:\\.|[^\s\\])+?\.(?:png|jpe?g|gif|webp|heic|bmp|tiff?))(?=\s|$)""", re.I)
+                      r"""(?:~|/|[A-Za-z]:\\)(?:\\.|[^ \t\n\\])+?\.(?:png|jpe?g|gif|webp|heic|bmp|tiff?))(?=[ \t\n]|$)""", re.I)
 
 def chip_label(ch): return f"[Image #{ord(ch) - 0xE000}]"
 def is_chip(ch): return ch in CHIPS
@@ -6078,7 +6101,7 @@ HELP_GROUPS = [("The chat", "/new /cd /history /resume /rewind /compact /context
                ("The model", "/fast /think /device /cloud /warm /cost /doctor"),
                ("From anywhere", "/phone /imessage /remote /password /notify /schedule"),
                ("Add to it", "/skills /apps /mcp /hooks"),
-               ("The app", "/color /v /say /update /help exit")]
+               ("The app", "/color /v /say /update /version /help exit")]
 
 def show_help():
     import textwrap
@@ -6208,7 +6231,10 @@ def command(user):
     if not user: return
     if user in ("exit","quit"): return "quit"
     if user in ("/help", "/", "/?"): show_help(); return
+    if user == "/version": show_version(); return
     if user == "/update":
+        if vtuple(installed_version()) > vtuple(VERSION):         # already downloaded while this window was open
+            print(f"{GOLD}●{R} {BOLD}v{installed_version()} is already installed{R} {DIM}· switching to it, your chat stays{R}"); reload_app(); return
         if check_update(quiet=False): reload_app()
         return
     if user == "/update full": full_update(); return
