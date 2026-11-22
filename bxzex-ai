@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.16.5"
+VERSION = "1.16.6"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -94,17 +94,43 @@ class Screen:
     """Everything printed goes through here and is remembered, so the conversation can be redrawn
     cleanly when the window is resized. Spinner frames and the input box bypass it via RAW."""
     def __init__(self, real):
-        self.real = real; self.log = []; self.size = 0; self.lock = threading.RLock()
+        self.real = real; self.log = []; self.size = 0; self.base = 0; self.lock = threading.RLock()
+    @staticmethod
+    def _len(e): return len(e) if isinstance(e, str) else getattr(e, "size", 0)
     def write(self, text):
         with self.lock:
             self.real.write(text)
             self.log.append(text); self.size += len(text)
-            while self.size > 300000 and len(self.log) > 1: self.size -= len(self.log.pop(0))
-    def replay(self): return "".join(self.log)
+            while self.size > 300000 and len(self.log) > 1: self.size -= self._len(self.log.pop(0)); self.base += 1
+    def mark(self):
+        """Where the log is now, for swap() later."""
+        with self.lock: return self.base + len(self.log)
+    def swap(self, at, redraw, size):
+        """Everything printed since mark() becomes one function that draws it again at the window's new width."""
+        with self.lock:
+            i = at - self.base
+            if i < 0 or i > len(self.log): return
+            for e in self.log[i:]: self.size -= self._len(e)
+            redraw.size = size; self.log[i:] = [redraw]; self.size += size
+    def replay(self):
+        out = []
+        for e in self.log:
+            if isinstance(e, str): out.append(e); continue
+            cap = Capture()
+            try: e(cap)
+            except Exception: pass
+            out.append("".join(cap.parts))
+        return "".join(out)
     def flush(self): self.real.flush()
     def isatty(self): return self.real.isatty()
     def fileno(self): return self.real.fileno()
     def __getattr__(self, name): return getattr(self.real, name)
+
+class Capture:
+    """Collects what a redraw writes."""
+    def __init__(self): self.parts = []
+    def write(self, t): self.parts.append(t)
+    def flush(self): pass
 
 RAW = sys.stdout
 if RAW.isatty(): sys.stdout = Screen(RAW)
@@ -3940,7 +3966,11 @@ typed = TypeAhead()
 class Markdown:
     """Renders the model's streamed markdown as terminal styling, wrapped to the window
     with a hanging indent. Output is held back one word at a time so wrapping never splits a word."""
-    def __init__(self, prefix="  "):
+    def __init__(self, prefix="  ", out=None):
+        self.o = out or sys.stdout; self.src = []; self.prefix0 = prefix
+        self.at = sys.stdout.mark() if out is None and hasattr(sys.stdout, "mark") else None    # for redrawing at a new width
+        self.hang = 2         # where a wrapped line starts: further in inside a list item
+        self.first = True     # the next word is the first on its line
         self.prefix = prefix                               # start of the very first line, e.g. the reply bullet
         self.stars = self.ticks = self.hashes = 0          # pending runs, resolved by the next char
         self.bold = self.ital = self.code = self.fence = self.head = False
@@ -3976,11 +4006,11 @@ class Markdown:
         if self.col0 and not self.word_w:      # only style codes pending: nothing to put on this line yet
             self.word = []; return
         if self.col0:
-            sys.stdout.write(self.prefix + self.word_style); self.prefix = "  "
+            self.o.write(self.prefix + self.word_style); self.prefix = "  "
             self.col0 = False; self.col = 2
-        elif self.col + self.word_w > TW() and self.col > 2 and not self.fence:
-            sys.stdout.write(f"{R}\n  {self.word_style}"); self.col = 2
-        sys.stdout.write("".join(self.word)); self.col += self.word_w
+        elif self.col + self.word_w > TW() and self.col > self.hang and not self.fence:
+            self.o.write(f"{R}\n{' ' * self.hang}{self.word_style}"); self.col = self.hang
+        self.o.write("".join(self.word)); self.col += self.word_w
         self.word = []; self.word_w = 0
 
     def out(self, s):
@@ -4011,14 +4041,14 @@ class Markdown:
             self.word = [f"{R}{DIM}{'─' * min(48, TW() - 4)}{R}"]; self.word_w = min(48, TW() - 4)
         self.flush_word()
         self.bold = self.ital = self.code = self.head = False
-        sys.stdout.write(R + "\n"); self.bol = self.col0 = True; self.prev = "\n"; self.col = 0
+        self.o.write(R + "\n"); self.bol = self.col0 = True; self.prev = "\n"; self.col = 0; self.hang = 2; self.first = True
         self.word_style = self.style()
 
     def code_line(self):
         self.flush_word()
-        sys.stdout.write((self.prefix if self.col0 else "") + ("" if self.col0 else "\n  ") + highlight(self.codeline) + R + "\n")
+        self.o.write((self.prefix if self.col0 else "") + ("" if self.col0 else "\n  ") + highlight(self.codeline) + R + "\n")
         self.prefix = "  "; self.codeline = ""
-        self.bol = self.col0 = True; self.prev = "\n"; self.col = 0
+        self.bol = self.col0 = True; self.prev = "\n"; self.col = 0; self.hang = 2; self.first = True
 
     def table(self):
         """Draw the collected | rows as a grid that fits the window."""
@@ -4033,8 +4063,8 @@ class Markdown:
         room = TW() - 2 - (3 * n + 1)
         while sum(width) > room and max(width) > 8: width[width.index(max(width))] -= 1
         self.flush_word()
-        if not self.col0: sys.stdout.write("\n")
-        elif self.prefix.strip(): sys.stdout.write(self.prefix.rstrip() + "\n")
+        if not self.col0: self.o.write("\n")
+        elif self.prefix.strip(): self.o.write(self.prefix.rstrip() + "\n")
         line = lambda l, m, r: f"  {DIM}{l}" + m.join("─" * (w + 2) for w in width) + f"{r}{R}\n"
         out = [line("┌", "┬", "┐")]
         for k, r in enumerate(rows):
@@ -4044,8 +4074,8 @@ class Markdown:
                 out.append(f"  {DIM}│{R} " + f" {DIM}│{R} ".join((BOLD + x + R) if k == 0 else x for x in parts) + f" {DIM}│{R}\n")
             if k == 0 and len(rows) > 1: out.append(line("├", "┼", "┤"))
         out.append(line("└", "┴", "┘"))
-        sys.stdout.write("".join(out))
-        self.prefix = "  "; self.bol = self.col0 = True; self.prev = "\n"; self.col = 0
+        self.o.write("".join(out))
+        self.prefix = "  "; self.bol = self.col0 = True; self.prev = "\n"; self.col = 0; self.hang = 2; self.first = True
 
     def char(self, ch):
         if not self.fence:
@@ -4066,7 +4096,7 @@ class Markdown:
             if r != run and getattr(self, r): self.resolve(r, ch)
         if self.skip:
             if ch == "\n":
-                self.flush_word(); self.skip = False; self.bol = self.col0 = True; self.prev = "\n"; self.col = 0
+                self.flush_word(); self.skip = False; self.bol = self.col0 = True; self.prev = "\n"; self.col = 0; self.hang = 2; self.first = True
                 self.word_style = self.style()
             return
         if run: setattr(self, run, getattr(self, run) + 1); return
@@ -4105,15 +4135,19 @@ class Markdown:
         if ch != " ": self.bullet = False
         if ch == "\n": self.newline(); return
         if ch == " " and not self.bol and not self.fence:   # a word just ended: decide where it goes
-            self.flush_word()
-            if self.col < TW(): sys.stdout.write(" "); self.col += 1
+            first, said = self.first, "".join(w for w in self.word if not w.startswith("\x1b"))
+            self.flush_word(); self.first = False
+            if self.col < TW(): self.o.write(" "); self.col += 1
+            if self.bullet or (first and re.fullmatch(r"\d{1,3}[.)]|[•●▪◦‣–]", said)):
+                self.hang = min(self.col, TW() // 2)                 # a list item: wrapped lines line up under its text
             self.prev = " "
             return
         self.out(ch)
 
     def feed(self, text):
+        self.src.append(text)
         for ch in text: self.char(ch)
-        sys.stdout.flush()
+        self.o.flush()
 
     def close(self):
         if self.tline is not None: self.trows.append(self.tline); self.tline = None
@@ -4126,7 +4160,12 @@ class Markdown:
             held, self.link, self.as_typed = self.link, None, True
             for x in held: self.char(x)
         self.flush_word()
-        sys.stdout.write(R)
+        self.o.write(R)
+        if self.at is not None:                  # from now on a resize draws this reply again at the new width
+            src, prefix = "".join(self.src), self.prefix0
+            def redraw(o):
+                m = Markdown(prefix, out=o); m.feed(src); m.close()
+            sys.stdout.swap(self.at, redraw, len(src))
 
 CODE_WORDS = set("""def class return if elif else for while in not and or import from as with try except finally raise lambda yield await async
     function const let var new this export default switch case break continue do typeof instanceof null undefined true false True False None
