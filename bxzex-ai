@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.16.6"
+VERSION = "1.17.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2913,10 +2913,201 @@ end tabRef'''
 
 SAFARI_OPENED = set()     # pages it opened itself this session: JavaScript in any other tab always asks
 
-def safari(action, url="", script="", tab=""):
-    """Safari: list tabs, open a page, read a tab's text, or run JavaScript in a tab."""
+SAFARI_KIT = r'''(function(op, a){
+const W = window;
+const clean = s => String(s || "").replace(/\s+/g, " ").trim();
+const vis = el => { if (!el || !el.getBoundingClientRect) return false; const r = el.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2) return false; const s = getComputedStyle(el);
+  return s.visibility !== "hidden" && s.display !== "none" && +s.opacity > 0.05; };
+const inView = el => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth; };
+const SEL = 'a[href],button,input:not([type=hidden]),textarea,select,summary,label[for],[role=button],[role=link],[role=option],[role=menuitem],' +
+  '[role=menuitemradio],[role=menuitemcheckbox],[role=tab],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=treeitem],' +
+  '[contenteditable=""],[contenteditable=true],[onclick],[tabindex]:not([tabindex="-1"])';
+const name = el => {
+  const lab = el.getAttribute("aria-label") || (el.labels && el.labels[0] && el.labels[0].innerText) ||
+    (el.getAttribute("aria-labelledby") && clean((document.getElementById(el.getAttribute("aria-labelledby")) || {}).innerText));
+  const own = el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" ? "" : el.innerText;
+  return clean(lab || own || el.getAttribute("placeholder") || el.title || el.getAttribute("alt") || (el.querySelector && el.querySelector("img[alt]") || {}).alt || el.name || el.id || "").slice(0, 90);
+};
+const kind = el => { const r = el.getAttribute("role"); const t = el.tagName.toLowerCase();
+  if (r) return r; if (t === "a") return "link"; if (t === "input") return "input:" + (el.type || "text"); if (t === "label") return "label";
+  return t === "button" || t === "summary" || t === "select" || t === "textarea" ? t : "clickable"; };
+function items() {
+  const seen = new Set(), out = [];
+  const add = el => { if (seen.has(el) || !vis(el)) return; seen.add(el); out.push(el); };
+  document.querySelectorAll(SEL).forEach(add);
+  let n = 0;                                                    // things made clickable with styling only
+  for (const el of document.querySelectorAll("div,span,li,img,svg,p,td")) {
+    if (++n > 4000) break;
+    if (seen.has(el) || el.closest(SEL)) continue;
+    const s = getComputedStyle(el); if (s.cursor !== "pointer") continue;
+    const up = el.parentElement; if (up && getComputedStyle(up).cursor === "pointer") continue;
+    add(el);
+  }
+  return out;
+}
+const state = el => { const b = [];
+  const ex = el.getAttribute("aria-expanded"); if (ex) b.push(ex === "true" ? "open" : "closed");
+  if (el.checked || el.getAttribute("aria-checked") === "true") b.push("checked");
+  if (el.getAttribute("aria-selected") === "true" || el.selected) b.push("selected");
+  if (el.disabled || el.getAttribute("aria-disabled") === "true") b.push("disabled");
+  if (el === document.activeElement) b.push("focused");
+  return b.length ? " (" + b.join(", ") + ")" : ""; };
+const popups = () => [...document.querySelectorAll('[role=listbox],[role=menu],[role=dialog],[aria-modal=true],[role=alertdialog],dialog[open],[data-radix-popper-content-wrapper],[role=tooltip]')].filter(vis);
+const sig = () => ({ url: location.href, text: (document.body ? document.body.innerText : "").slice(0, 300000),
+  pop: popups().length, focus: document.activeElement ? name(document.activeElement) : "",
+  vals: [...document.querySelectorAll("input,select,textarea")].map(e => e.type === "checkbox" || e.type === "radio" ? String(e.checked) : (e.tagName === "SELECT" ? clean((e.options[e.selectedIndex] || {}).text) : e.value)) });
+const ref = n => { const el = (W.__bxRefs || [])[+n]; return el && el.isConnected ? el : null; };
+const gone = n => "error: item " + n + " isn't on the page any more (the page changed). Use look again to get fresh numbers.";
+const point = el => { el.scrollIntoView({ block: "center", inline: "center" }); const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; };
+const screenPt = p => ({ sx: Math.round(W.screenX + p.x), sy: Math.round(W.screenY + (W.outerHeight - W.innerHeight) + p.y) });
+function press(el) {
+  const p = point(el), top = document.elementFromPoint(p.x, p.y);
+  const covered = top && top !== el && !el.contains(top) && !top.contains(el) ? top : null;
+  const t = covered && covered.closest && covered.closest("[role=option],[role=menuitem],button,a") ? el : (top && el.contains(top) ? top : el);
+  const o = { bubbles: true, cancelable: true, composed: true, clientX: p.x, clientY: p.y, button: 0, buttons: 1, view: W,
+              pointerId: 1, isPrimary: true, pointerType: "mouse" };
+  t.dispatchEvent(new PointerEvent("pointerover", o)); t.dispatchEvent(new MouseEvent("mouseover", o));
+  t.dispatchEvent(new PointerEvent("pointerdown", o)); t.dispatchEvent(new MouseEvent("mousedown", o));
+  if (el.focus) el.focus({ preventScroll: true });
+  t.dispatchEvent(new PointerEvent("pointerup", Object.assign({}, o, { buttons: 0 }))); t.dispatchEvent(new MouseEvent("mouseup", Object.assign({}, o, { buttons: 0 })));
+  if (t.click) t.click(); else t.dispatchEvent(new MouseEvent("click", Object.assign({}, o, { buttons: 0 })));
+  return Object.assign({ covered: covered ? kind(covered) + ' "' + name(covered).slice(0, 40) + '"' : "" }, screenPt(p));
+}
+function setValue(el, text) {
+  const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : el.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+  const set = Object.getOwnPropertyDescriptor(proto, "value").set; set.call(el, text);
+  el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+function key(k, el) {
+  const codes = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, Backspace: 8, " ": 32, Space: 32 };
+  const kk = k === "Space" ? " " : k, o = { key: kk, code: k === " " || k === "Space" ? "Space" : k, keyCode: codes[k] || kk.toUpperCase().charCodeAt(0),
+    which: codes[k] || 0, bubbles: true, cancelable: true, composed: true };
+  const t = el || document.activeElement || document.body;
+  t.dispatchEvent(new KeyboardEvent("keydown", o)); if (kk.length === 1) t.dispatchEvent(new KeyboardEvent("keypress", o));
+  t.dispatchEvent(new KeyboardEvent("keyup", o));
+  if (kk === "Enter" && t.form && t.tagName === "INPUT") { try { t.form.requestSubmit(); } catch (e) {} }
+}
+const options = () => [...document.querySelectorAll('[role=option],[role=menuitem],[role=menuitemradio],[role=listbox] li,[role=menu] li,ul li,[cmdk-item],[data-value]')].filter(vis);
+const match = (list, want) => { want = clean(want).toLowerCase();
+  return list.find(o => clean(o.innerText || o.textContent).toLowerCase() === want) ||
+         list.find(o => clean(o.innerText || o.textContent).toLowerCase().startsWith(want)) ||
+         list.find(o => clean(o.innerText || o.textContent).toLowerCase().includes(want)); };
+
+if (op === "look") {
+  const els = items(); W.__bxRefs = els;
+  const pops = popups(), inPop = el => pops.some(p => p.contains(el));
+  const line = (el, i) => { let s = "[" + i + "] " + kind(el) + ' "' + name(el) + '"' + state(el);
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") s += el.type === "password" ? (el.value ? " value: ••••" : "") : (el.value ? ' value: "' + clean(el.value).slice(0, 60) + '"' : " empty");
+    if (el.tagName === "SELECT") s += ' value: "' + clean((el.options[el.selectedIndex] || {}).text) + '" options: ' + [...el.options].slice(0, 12).map(o => clean(o.text)).join(" | ");
+    if (!inView(el)) s += el.getBoundingClientRect().top > innerHeight ? "  ↓ below" : "  ↑ above";
+    return s; };
+  const lines = els.map((el, i) => ({ el, i })), cap = +a.max || 150;
+  const pop = lines.filter(x => inPop(x.el)), seen = lines.filter(x => !inPop(x.el) && inView(x.el)), rest = lines.filter(x => !inPop(x.el) && !inView(x.el));
+  const head = document.title + "\n" + location.href + "\nscrolled " + Math.round(scrollY) + " of " + Math.max(0, document.documentElement.scrollHeight - innerHeight) + "px";
+  const parts = [head];
+  if (pop.length) parts.push("OPEN POPUP / LIST (on top of the page, deal with this first):\n" + pop.slice(0, 80).map(x => line(x.el, x.i)).join("\n"));
+  parts.push("ON SCREEN:\n" + (seen.slice(0, cap).map(x => line(x.el, x.i)).join("\n") || "(nothing clickable on screen)"));
+  if (rest.length) parts.push("OFF SCREEN (scroll or click by number, it scrolls to them):\n" + rest.slice(0, Math.max(20, cap - seen.length)).map(x => line(x.el, x.i)).join("\n") +
+    (rest.length > cap ? "\n… " + (rest.length - cap) + " more" : ""));
+  const heads = [...document.querySelectorAll("h1,h2,h3,[role=heading]")].filter(vis).slice(0, 12).map(h => clean(h.innerText).slice(0, 70)).filter(Boolean);
+  if (heads.length) parts.splice(1, 0, "HEADINGS: " + heads.join(" · "));
+  return parts.join("\n\n");
+}
+if (op === "before") { W.__bxB = sig(); return "ok"; }
+if (op === "changed") {
+  const b = W.__bxB, n = sig(); if (!b) return "";
+  const said = [];
+  if (n.url !== b.url) said.push("the page moved to " + n.url);
+  if (n.pop > b.pop) { const p = popups().pop(); said.push("a popup or list opened: " + clean(p.innerText).slice(0, 300)); }
+  if (n.pop < b.pop) said.push("a popup or list closed");
+  const old = new Set(b.text.split("\n").map(clean)), now = n.text.split("\n").map(clean).filter(l => l.length > 1);
+  const fresh = now.filter(l => !old.has(l)), nowSet = new Set(now), lost = [...old].filter(l => l.length > 1 && !nowSet.has(l));
+  if (fresh.length) said.push("new text: " + fresh.slice(0, 8).map(l => '"' + l.slice(0, 120) + '"').join(", ") + (fresh.length > 8 ? " and " + (fresh.length - 8) + " more lines" : ""));
+  if (lost.length) said.push(lost.length + " line" + (lost.length > 1 ? "s" : "") + " of text went away" + (lost.length <= 3 ? ": " + lost.map(l => '"' + l.slice(0, 80) + '"').join(", ") : ""));
+  const fields = [...document.querySelectorAll("input,select,textarea")];
+  n.vals.forEach((v, i) => { if (b.vals[i] !== undefined && v !== b.vals[i] && fields[i]) said.push(kind(fields[i]) + ' "' + name(fields[i]).slice(0, 40) + '" is now ' + (fields[i].type === "password" ? "filled" : '"' + String(v).slice(0, 60) + '"')); });
+  if (n.focus !== b.focus && n.focus) said.push('focus is now on "' + n.focus.slice(0, 60) + '"');
+  if (n.pop && n.pop >= b.pop && b.pop) said.push("a popup or list is still open on top of the page: it may be blocking clicks, close it (key Escape) if it isn't what you want");
+  return said.length ? said.join("\n") : "NOTHING CHANGED";
+}
+if (op === "click") { const el = ref(a.ref); if (!el) return gone(a.ref); const r = press(el);
+  return JSON.stringify(Object.assign({ what: kind(el) + ' "' + name(el).slice(0, 60) + '"' }, r)); }
+if (op === "point") { const el = ref(a.ref); if (!el) return gone(a.ref); return JSON.stringify(Object.assign({ what: kind(el) + ' "' + name(el).slice(0, 60) + '"' }, screenPt(point(el)))); }
+if (op === "type") { const el = ref(a.ref); if (!el) return gone(a.ref); point(el); el.focus();
+  if (el.isContentEditable) { if (a.clear) { document.execCommand("selectAll"); document.execCommand("delete"); } document.execCommand("insertText", false, a.text); }
+  else if ("value" in el) setValue(el, (a.clear ? "" : el.value) + a.text);
+  else return "error: item " + a.ref + " isn't something you can type into: " + kind(el);
+  if (a.submit) key("Enter", el);
+  return "typed into " + kind(el) + ' "' + name(el).slice(0, 50) + '"' + (a.submit ? " and pressed Enter" : ""); }
+if (op === "select") { const el = ref(a.ref); if (!el) return gone(a.ref);
+  if (el.tagName === "SELECT") { const o = match([...el.options], a.option);
+    if (!o) return "error: no option like \"" + a.option + "\". Options: " + [...el.options].map(o => clean(o.text)).join(" | ");
+    setValue(el, o.value); return 'picked "' + clean(o.text) + '"'; }
+  press(el); return "OPENED"; }
+if (op === "pick") { const o = match(options(), a.option);
+  if (!o) return "error: opened it, but no visible option matches \"" + a.option + "\". Visible options: " + options().slice(0, 40).map(o => clean(o.innerText).slice(0, 40)).filter(Boolean).join(" | ");
+  press(o); return 'picked "' + clean(o.innerText).slice(0, 60) + '"'; }
+if (op === "key") { key(a.key, a.ref !== "" && a.ref != null ? ref(a.ref) : null); return "pressed " + a.key; }
+if (op === "scroll") { if (a.ref !== "" && a.ref != null) { const el = ref(a.ref); if (!el) return gone(a.ref); point(el); return "scrolled to item " + a.ref; }
+  const d = a.dir === "up" ? -1 : 1; const box = [...document.querySelectorAll("*")].find(e => e.scrollHeight > e.clientHeight + 40 && /(auto|scroll)/.test(getComputedStyle(e).overflowY) && vis(e) && e.clientHeight > innerHeight * 0.5);
+  const y0 = scrollY; scrollBy(0, d * innerHeight * 0.8);
+  if (scrollY === y0 && box) { box.scrollBy(0, d * box.clientHeight * 0.8); return "scrolled the inner panel " + (d > 0 ? "down" : "up"); }
+  return scrollY === y0 ? "already at the " + (d > 0 ? "bottom" : "top") : "scrolled " + (d > 0 ? "down" : "up") + " to " + Math.round(scrollY) + "px"; }
+if (op === "has") return (document.body.innerText || "").toLowerCase().includes(String(a.text).toLowerCase()) ? "yes" : "no";
+if (op === "where") return JSON.stringify({ title: document.title, url: location.href });
+return "error: unknown op";
+})(__ARGS__)'''
+
+SAFARI_OK = set()      # sites the user let it click and type on this session
+SAFARI_MISSES = {}     # the same action on the same item that changed nothing, and how often
+SAFARI_KEYS = {"escape": 53, "esc": 53, "enter": 36, "return": 36, "tab": 48, "space": 49, "backspace": 51, "delete": 51,
+               "arrowdown": 125, "down": 125, "arrowup": 126, "up": 126, "arrowleft": 123, "left": 123, "arrowright": 124, "right": 124}
+
+def safari_js(js, w, t, timeout=60):
+    return osa(SAFARI_TAB + '''
+on run argv
+  set r to tabRef((item 2 of argv) as integer, (item 3 of argv) as integer)
+  tell application "Safari" to return (do JavaScript (item 1 of argv) in r) as text
+end run''', js, str(w), str(t), timeout=timeout)
+
+def kit(op, w, t, **a):
+    return safari_js(SAFARI_KIT.replace("__ARGS__", json.dumps(op) + ", " + json.dumps(a)), w, t)
+
+def safari_ok(w, t, doing):
+    """Clicking and typing on a site asks once per site per session, unless it's a page it opened itself."""
+    url = json.loads(kit("where", w, t))["url"]; host = urllib.parse.urlparse(url).netloc or url
+    if PLAN: return plan_block()
+    if host in SAFARI_OK or any(urllib.parse.urlparse(u if "://" in u else "https://" + u).netloc == host for u in SAFARI_OPENED): return ""
+    if not confirm(f"click and type in Safari on {host}", doing): return "The user declined."
+    SAFARI_OK.add(host); return ""
+
+def safari_after(w, t, did, miss_key):
+    """What changed on the page after an action, so it never guesses whether a click worked."""
+    time.sleep(0.8)
+    got = kit("changed", w, t)
+    if got and got != "NOTHING CHANGED":
+        SAFARI_MISSES.pop(miss_key, None); return f"{did}\nWhat changed:\n{got}"
+    n = SAFARI_MISSES[miss_key] = SAFARI_MISSES.get(miss_key, 0) + 1
+    if n == 1: tip = ("Find out why before doing anything else: screenshot to see the page, or look again. If a popup or overlay is in "
+                      "the way, close it first (key Escape). Some pages only react to a real mouse: realclick the same item.")
+    else: tip = ("This exact action has now changed nothing " + str(n) + " times. Do NOT do it again. Use a different way: realclick or "
+                 "realkey (a real mouse and keyboard), another item, the page's own link, or tell the user what is stopping you and ask.")
+    return f"{did}\nNothing on the page changed. {tip}"
+
+def safari_real(script, *args):
+    try: return osa('tell application "Safari" to activate\ndelay 0.3\n' + script, *args)
+    except RuntimeError as e:
+        if re.search(r"-1719|-25211|assistive|not allowed to send keystrokes|accessibility", str(e), re.I):
+            raise RuntimeError("ACCESS")
+        raise
+
+def safari(action, url="", script="", tab="", ref="", text="", option="", key="", dir="down", seconds="10", clear="true", submit="false"):
+    """Safari: list tabs, open a page, see what's on it (look, screenshot, read), and use it: click, type, select, keys, scroll, wait."""
     if not MAC: return "error: Safari control only works on a Mac"
-    action = str(action).strip().lower()
+    action = str(action).strip().lower(); ref = str(ref).strip()
     w, t = (int(x) for x in str(tab).split(".")) if re.fullmatch(r"\d+\.\d+", str(tab).strip()) else (0, 0)
     try:
         if action == "tabs":
@@ -2938,35 +3129,413 @@ end tell''') or "Safari has no open tabs"
   end tell
 end run''', str(url).strip())
             SAFARI_OPENED.add(str(url).strip())
-            return f"opened {url} in a new Safari tab"
-        if action in ("read", "run"):
-            js = "document.title + '\\n' + location.href + '\\n\\n' + document.body.innerText" if action == "read" else str(script)
-            if action == "run":
-                if not js.strip(): return "error: give the JavaScript to run"
-                if PLAN: return plan_block()
-                here = osa(SAFARI_TAB + '''
-on run argv
-  set r to tabRef((item 1 of argv) as integer, (item 2 of argv) as integer)
-  tell application "Safari" to return URL of r
-end run''', str(w), str(t))
-                mine = here in SAFARI_OPENED                  # a tab it opened; any other tab is the user's, maybe signed in
-                if not confirm(f"run JavaScript in Safari · {here[:60]}", js, always_ask=not mine): return "The user declined."
-            out = osa(SAFARI_TAB + '''
-on run argv
-  set r to tabRef((item 2 of argv) as integer, (item 3 of argv) as integer)
-  tell application "Safari" to return (do JavaScript (item 1 of argv) in r) as text
-end run''', js, str(w), str(t), timeout=60)
-            return clip(out or "(no result)", PAGE_CHARS)
-        return "error: action is tabs, open, read or run"
+            time.sleep(2)
+            return f"opened {url} in a new Safari tab. Use look to see what you can click."
+        if action == "look":
+            return clip(kit("look", w, t), PAGE_CHARS)
+        if action == "read":
+            return clip(safari_js("document.title + '\\n' + location.href + '\\n\\n' + document.body.innerText", w, t), PAGE_CHARS)
+        if action == "screenshot":
+            wid = osa('tell application "Safari" to return id of front window')
+            shot = os.path.join(tempfile.gettempdir(), f"bxzex-safari-{int(time.time() * 1000)}.png")
+            r = subprocess.run(["screencapture", "-x", "-o", f"-l{wid}", shot], capture_output=True, text=True, timeout=20)
+            if r.returncode != 0 or not os.path.exists(shot) or os.path.getsize(shot) < 1000:
+                return ("error: couldn't take the screenshot. Tell the user: System Settings > Privacy & Security > Screen & System Audio "
+                        "Recording > turn on their terminal app.")
+            kept = keep_shot(shot, "safari")
+            return f"Screenshot of the Safari window taken: it follows, look at it. Saved as {kept.replace(HOME, '~')}."
+        if action == "wait":
+            want = str(text).strip()
+            if not want: time.sleep(min(30, float(seconds or 2))); return "waited"
+            end = time.time() + min(60, float(seconds or 10))
+            while time.time() < end:
+                if kit("has", w, t, text=want) == "yes": return f'"{want}" is on the page now'
+                time.sleep(0.5)
+            return f'"{want}" did not show up within {seconds}s. Look or screenshot to see what the page shows instead.'
+        if action == "run":
+            js = str(script)
+            if not js.strip(): return "error: give the JavaScript to run"
+            if PLAN: return plan_block()
+            here = json.loads(kit("where", w, t))["url"]
+            mine = here in SAFARI_OPENED
+            if not confirm(f"run JavaScript in Safari · {here[:60]}", js, always_ask=not mine): return "The user declined."
+            return clip(safari_js(js, w, t) or "(no result)", PAGE_CHARS)
+        acts = ("click", "type", "select", "key", "scroll", "realclick", "realkey", "realtype")
+        if action not in acts:
+            return "error: action is tabs, open, look, screenshot, read, click, type, select, key, scroll, wait, realclick, realkey, realtype or run"
+        if action in ("click", "type", "select", "realclick") and not ref: return f"error: {action} needs ref, the item's number from look"
+        if action not in ("scroll",):
+            no = safari_ok(w, t, f"{action} {ref} {text or option or key}".strip())
+            if no: return no
+        miss = (action, ref, str(text or option or key))
+        kit("before", w, t)
+        if action == "click":
+            got = kit("click", w, t, ref=ref)
+            if got.startswith("error"): return got
+            d = json.loads(got); did = f"clicked {d['what']}" + (f" (it was covered by {d['covered']}, which may have caught the click)" if d.get("covered") else "")
+        elif action == "type":
+            did = kit("type", w, t, ref=ref, text=str(text), clear=str(clear).lower() != "false", submit=str(submit).lower() == "true")
+            if did.startswith("error"): return did
+        elif action == "select":
+            did = kit("select", w, t, ref=ref, option=str(option or text))
+            if did.startswith("error"): return did
+            if did == "OPENED":
+                time.sleep(0.6); did = kit("pick", w, t, option=str(option or text))
+                if did.startswith("error"): return did
+        elif action == "key":
+            did = kit("key", w, t, key=str(key or text or "Escape"), ref=ref)
+        elif action == "scroll":
+            did = kit("scroll", w, t, ref=ref, dir=str(dir))
+            return did
+        elif action == "realclick":
+            got = kit("point", w, t, ref=ref)
+            if got.startswith("error"): return got
+            d = json.loads(got)
+            safari_real('tell application "System Events" to tell process "Safari" to click at {' + str(d["sx"]) + ", " + str(d["sy"]) + "}")
+            did = f"real mouse click on {d['what']}"
+        elif action == "realkey":
+            k = str(key or text or "escape").lower()
+            if k not in SAFARI_KEYS: return f"error: realkey knows {', '.join(sorted(set(SAFARI_KEYS)))}"
+            safari_real(f'tell application "System Events" to key code {SAFARI_KEYS[k]}')
+            did = f"pressed the real {k} key"
+        else:
+            safari_real('on run argv\ntell application "System Events" to keystroke (item 1 of argv)\nend run', str(text))
+            did = "typed it with the real keyboard"
+        return safari_after(w, t, did, miss)
     except subprocess.TimeoutExpired:
         return "error: Safari took too long to answer"
     except RuntimeError as e:
+        if str(e) == "ACCESS":
+            return ("error: real clicks and keys need permission once. Tell the user: System Settings > Privacy & Security > Accessibility > "
+                    "turn on their terminal app. Until then use click, type, key and select.")
         if re.search(r"(?i)javascript.*apple ?events|allow javascript", str(e)):
             return ("error: Safari blocks this until it's allowed once. Tell the user: Safari > Settings > Advanced > tick \"Show features for "
                     "web developers\", then the Develop menu > \"Allow JavaScript from Apple Events\".")
         if re.search(r"-1743|not authori[sz]ed|not allowed", str(e)):
             return "error: this terminal isn't allowed to control Safari. Tell the user: System Settings > Privacy & Security > Automation > their terminal app > turn on Safari."
         return f"error: {e}"
+    except (ValueError, KeyError) as e:
+        return f"error: Safari answered something unexpected ({e}). Use look again."
+
+# ---- desktop: any app, the way a person uses it ----
+SCRATCH = os.path.join(APP_HOME, "scratch")       # every screenshot it takes, kept so the user can look back at the progress
+SHOW_SHOTS = []                                   # screenshots to preview under this step's result line
+DESK = {"scale": (1.0, 1.0), "refs": [], "app": ""}
+DESK_OK = [False]                                 # the user said yes to it using the mouse and keyboard this session
+
+def keep_shot(path, label):
+    """File a screenshot in the scratch folder (numbered, by day), queue it for the model to see and for a preview here."""
+    day = os.path.join(SCRATCH, time.strftime("%Y-%m-%d")); os.makedirs(day, exist_ok=True)
+    n = len([f for f in os.listdir(day) if f.endswith(".png")]) + 1
+    dst = os.path.join(day, f"{n:03d}-{re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')[:30]}.png")
+    shutil.move(path, dst)
+    PENDING_SHOTS.append((label, dst)); SHOW_SHOTS.append(dst)
+    return dst
+
+def shrink_png(path, w, h):
+    """Shrink a screenshot to at most 1024 on its long side (what the model is shown), in place. Returns the new size."""
+    k = min(1.0, 1024 / max(w, h)); nw, nh = max(1, int(w * k)), max(1, int(h * k))
+    for cmd in (["sips", "-z", str(nh), str(nw), path], ["magick", path, "-resize", f"{nw}x{nh}!", path],
+                ["convert", path, "-resize", f"{nw}x{nh}!", path],
+                ["ffmpeg", "-loglevel", "error", "-y", "-i", path, "-vf", f"scale={nw}:{nh}", path + ".png"]):
+        if shutil.which(cmd[0]) and subprocess.run(cmd, capture_output=True).returncode == 0:
+            if cmd[0] == "ffmpeg": os.replace(path + ".png", path)
+            return nw, nh
+    return w, h
+
+def png_size(path):
+    with open(path, "rb") as f: head = f.read(24)
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+DESK_LOOK = r'''function run(argv) {
+  const se = Application("System Events"), want = argv[0], max = +argv[1] || 150;
+  let p;
+  try { p = want ? se.processes.byName(want) : se.processes.whose({ frontmost: true })[0]; p.name(); }
+  catch (e) { return JSON.stringify({ error: "noapp" }); }
+  const app = p.name(); let wins;
+  try { wins = p.windows(); } catch (e) { return JSON.stringify({ error: "access", app }); }
+  if (!wins.length) return JSON.stringify({ app, win: "", items: [] });
+  let w = wins[0]; let wname = ""; try { wname = w.name(); } catch (e) {}
+  const items = []; let n = 0;
+  const ACT = /Button|TextField|TextArea|CheckBox|RadioButton|PopUpButton|MenuButton|ComboBox|Slider|Link|Tab$|SearchField|Cell|Row|DisclosureTriangle|Incrementor|Image|StaticText/;
+  function walk(e, d, path) {
+    if (items.length >= max || n > 3000 || d > 16) return;
+    let kids; try { kids = e.uiElements(); } catch (x) { return; }
+    for (let i = 0; i < kids.length && items.length < max; i++) {
+      n++; const k = kids[i]; let r = ""; try { r = k.role(); } catch (x) {}
+      if (ACT.test(r)) {
+        let t = "", v = "", pos = null, sz = null, en = true;
+        try { t = k.title() || k.description() || ""; } catch (x) {}
+        try { v = k.value(); } catch (x) {}
+        try { pos = k.position(); sz = k.size(); } catch (x) {}
+        try { en = k.enabled(); } catch (x) {}
+        v = (typeof v === "string" || typeof v === "number") ? String(v) : "";
+        const at = pos && sz ? [Math.round(pos[0] + sz[0] / 2), Math.round(pos[1] + sz[1] / 2)] : null;
+        if (r === "AXStaticText" || r === "AXImage") { if ((v || t).trim() && at) items.push({ p: path.concat(i), r: r === "AXImage" ? "image" : "text", t: (v || t).slice(0, 90), at }); }
+        else if (t || v || r !== "AXCell" && r !== "AXRow") items.push({ p: path.concat(i), r: r.replace("AX", ""), t: String(t).slice(0, 80), v: v.slice(0, 60), at, off: !en });
+      }
+      walk(k, d + 1, path.concat(i));
+    }
+  }
+  walk(w, 0, []);
+  return JSON.stringify({ app, win: wname, items });
+}'''
+
+DESK_DO = r'''function run(argv) {
+  const se = Application("System Events"), app = argv[0], how = argv[1], path = JSON.parse(argv[2] || "[]");
+  const p = se.processes.byName(app); let e = p.windows[0];
+  try { for (const i of path) e = e.uiElements[i]; e.role(); } catch (x) { return "gone"; }
+  if (how === "press") {
+    for (const a of ["AXPress", "AXConfirm", "AXPick", "AXOpen"]) { try { e.actions.byName(a).perform(); return "ok"; } catch (x) {} }
+    return "noaction";
+  }
+  if (how === "focus") { try { e.focused = true; return "ok"; } catch (x) { return "nofocus"; } }
+  if (how === "set") { try { e.value = argv[3]; return "ok"; } catch (x) { return "noset"; } }
+  return "?";
+}'''
+
+def jxa(script, *args, timeout=60):
+    r = subprocess.run(["osascript", "-l", "JavaScript", "-e", script, *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    if r.returncode != 0:
+        if re.search(r"-1719|-25211|assistive|not allowed|-1743", r.stderr, re.I): raise RuntimeError("ACCESS")
+        raise RuntimeError(r.stderr.strip()[-300:] or "the script failed")
+    return r.stdout.strip()
+
+def ps(script, timeout=60):
+    """PowerShell on the Windows side, from WSL."""
+    r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    if r.returncode != 0 and not r.stdout.strip(): raise RuntimeError(r.stderr.strip()[-300:] or "PowerShell failed")
+    return r.stdout.strip()
+
+WIN_PRE = r'''Add-Type -AssemblyName System.Windows.Forms,System.Drawing,UIAutomationClient,UIAutomationTypes
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class BxW { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+ [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+ [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, int e);
+ [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n); }
+"@
+'''
+
+def desk_look(app="", max_items=150):
+    """[(kind, name, value, (x, y) center on screen, can't-use)] for the front window, and its app and title."""
+    if MAC:
+        got = json.loads(jxa(DESK_LOOK, app, str(max_items)))
+        if got.get("error") == "access": raise RuntimeError("ACCESS")
+        if got.get("error") == "noapp": raise RuntimeError(f"no app called {app} is open")
+        DESK["app"] = got["app"]; DESK["refs"] = got["items"]
+        return got["app"], got["win"], got["items"]
+    if WSL:
+        out = ps(WIN_PRE + r'''$h=[BxW]::GetForegroundWindow(); $sb=New-Object Text.StringBuilder 300; [void][BxW]::GetWindowText($h,$sb,300)
+$root=[Windows.Automation.AutomationElement]::FromHandle($h); "WIN`t" + $sb.ToString()
+$all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition); $n=0
+foreach($e in $all){ $c=$e.Current; if($c.IsOffscreen -or ($c.Name -eq "" -and $c.ControlType.ProgrammaticName -match "Pane|Group|Custom")){continue}
+ $r=$c.BoundingRectangle; if($r.Width -lt 2){continue}; $v=""; try{$v=$e.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value}catch{}
+ "{0}`t{1}`t{2}`t{3}`t{4}`t{5}" -f $c.ControlType.ProgrammaticName.Replace("ControlType.",""),$c.Name,$v,[int]($r.X+$r.Width/2),[int]($r.Y+$r.Height/2),(-not $c.IsEnabled)
+ $n++; if($n -ge ''' + str(max_items) + r'''){break} }''')
+        lines = out.splitlines(); win = lines[0][4:] if lines and lines[0].startswith("WIN") else ""
+        items = []
+        for l in lines[1:]:
+            f = l.split("\t")
+            if len(f) >= 6 and f[3].lstrip("-").isdigit(): items.append({"r": f[0], "t": f[1][:80], "v": f[2][:60], "at": [int(f[3]), int(f[4])], "off": f[5] == "True"})
+        DESK["app"] = win; DESK["refs"] = items
+        return "Windows", win, items
+    if shutil.which("xdotool"):
+        win = subprocess.run(["xdotool", "getactivewindow", "getwindowname"], capture_output=True, text=True).stdout.strip()
+        DESK["refs"] = []; return "Linux", win, []
+    raise RuntimeError("LINUXTOOLS")
+
+def desk_lines(app, win, items):
+    out = [f"{app} · {win or '(no window)'}"]
+    for i, it in enumerate(items):
+        if it["r"] in ("text", "image", "Text"): out.append(f"     {it['r']}: {it['t']}"); continue
+        s = f"[{i}] {it['r']} \"{it['t']}\"" + (f" = \"{it['v']}\"" if it.get("v") else "") + (" (can't use now)" if it.get("off") else "")
+        out.append(s)
+    if len(out) == 1: out.append("(no buttons or fields found in this window: take a screenshot and click by position)")
+    return "\n".join(out)
+
+def desk_sig():
+    try:
+        app, win, items = desk_look(DESK["app"] if MAC and DESK["app"] else "", 120)
+        return app, win, {f"{it['r']} {it['t']} {it.get('v', '')}".strip() for it in items}
+    except Exception:
+        return "", "", set()
+
+def desk_screenshot():
+    shot = os.path.join(tempfile.gettempdir(), f"bxzex-screen-{int(time.time() * 1000)}.png")
+    if MAC:
+        r = subprocess.run(["screencapture", "-x", "-C", shot], capture_output=True, text=True, timeout=20)
+        pts = jxa('ObjC.import("AppKit"); var f = $.NSScreen.mainScreen.frame; f.size.width + "x" + f.size.height')
+        sw, sh = (float(x) for x in pts.split("x"))
+    elif WSL:
+        win_path = subprocess.run(["wslpath", "-w", shot], capture_output=True, text=True).stdout.strip()
+        dims = ps(WIN_PRE + r'''$b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object Drawing.Bitmap $b.Width,$b.Height
+$g=[Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size); $bmp.Save("''' + win_path + r'''",[Drawing.Imaging.ImageFormat]::Png); "$($b.Width)x$($b.Height)"''')
+        sw, sh = (float(x) for x in dims.splitlines()[-1].split("x"))
+    else:
+        for cmd in (["grim", shot], ["gnome-screenshot", "-f", shot], ["scrot", "-o", shot], ["import", "-window", "root", shot], ["spectacle", "-b", "-n", "-o", shot]):
+            if shutil.which(cmd[0]) and subprocess.run(cmd, capture_output=True, timeout=20).returncode == 0 and os.path.exists(shot): break
+        sw = sh = 0
+    if not os.path.exists(shot) or os.path.getsize(shot) < 1000:
+        if MAC: raise RuntimeError("SCREEN")
+        raise RuntimeError("couldn't take a screenshot" + ("" if MAC or WSL else ": install one with  sudo apt install scrot  (or grim on Wayland)"))
+    pw, ph = png_size(shot)
+    if not sw: sw, sh = pw, ph
+    nw, nh = shrink_png(shot, pw, ph)
+    DESK["scale"] = (sw / nw, sh / nh)               # clicks come in screenshot pixels, the screen uses its own points
+    return keep_shot(shot, "screen"), nw, nh
+
+def desk_click(x, y, double=False, right=False):
+    x, y = int(x), int(y)
+    if MAC:
+        jxa('function run(a){ var se = Application("System Events"); var p = se.processes.whose({frontmost: true})[0]; '
+            'p.click({at: [+a[0], +a[1]]}); if (a[2] == "1") { delay(0.08); p.click({at: [+a[0], +a[1]]}); } return "ok"; }', str(x), str(y), "1" if double else "0")
+    elif WSL:
+        down, up = (8, 16) if right else (2, 4)
+        ps(WIN_PRE + f"[BxW]::SetCursorPos({x},{y}); Start-Sleep -Milliseconds 60; " + (f"[BxW]::mouse_event({down},0,0,0,0); [BxW]::mouse_event({up},0,0,0,0); " * (2 if double else 1)))
+    else:
+        subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "--repeat", "2" if double else "1", "3" if right else "1"], check=True)
+
+KEYS_MAC = {"enter": 36, "return": 36, "tab": 48, "space": 49, "delete": 51, "backspace": 51, "escape": 53, "esc": 53, "left": 123, "right": 124,
+            "down": 125, "up": 126, "home": 115, "end": 119, "pageup": 116, "pagedown": 121, "forwarddelete": 117,
+            "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98, "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111}
+
+def desk_key(combo):
+    """A key or a combination: enter, escape, cmd+s, ctrl+shift+t, alt+tab, f5."""
+    parts = [p.strip().lower() for p in re.split(r"\s*\+\s*", str(combo).strip()) if p.strip()]
+    if not parts: raise RuntimeError("give a key, like enter or cmd+s")
+    *mods, k = parts
+    if MAC:
+        names = {"cmd": "command down", "command": "command down", "ctrl": "control down", "control": "control down", "alt": "option down",
+                 "option": "option down", "opt": "option down", "shift": "shift down", "fn": "function down"}
+        using = json.dumps([names[m] for m in mods if m in names])
+        if k in KEYS_MAC: jxa(f'Application("System Events").keyCode({KEYS_MAC[k]}, {{using: {using}}}); "ok"')
+        else: jxa(f'function run(a){{ Application("System Events").keystroke(a[0], {{using: {using}}}); return "ok"; }}', k)
+    elif WSL:
+        sk = {"enter": "{ENTER}", "return": "{ENTER}", "tab": "{TAB}", "escape": "{ESC}", "esc": "{ESC}", "backspace": "{BACKSPACE}", "delete": "{DELETE}",
+              "up": "{UP}", "down": "{DOWN}", "left": "{LEFT}", "right": "{RIGHT}", "home": "{HOME}", "end": "{END}", "pageup": "{PGUP}",
+              "pagedown": "{PGDN}", "space": " "}.get(k, "{" + k.upper() + "}" if re.fullmatch(r"f\d+", k) else k)
+        pre = "".join({"ctrl": "^", "control": "^", "shift": "+", "alt": "%"}.get(m, "") for m in mods)
+        ps(WIN_PRE + f"[System.Windows.Forms.SendKeys]::SendWait('{pre}{sk}')")
+    else:
+        xk = {"enter": "Return", "return": "Return", "escape": "Escape", "esc": "Escape", "tab": "Tab", "backspace": "BackSpace", "delete": "Delete",
+              "space": "space", "up": "Up", "down": "Down", "left": "Left", "right": "Right", "pageup": "Prior", "pagedown": "Next"}.get(k, k)
+        xm = [{"cmd": "super", "command": "super", "ctrl": "ctrl", "control": "ctrl", "alt": "alt", "option": "alt", "shift": "shift"}.get(m, m) for m in mods]
+        subprocess.run(["xdotool", "key", "+".join(xm + [xk])], check=True)
+
+def desk_type(text):
+    if MAC: jxa('function run(a){ Application("System Events").keystroke(a[0]); return "ok"; }', str(text))
+    elif WSL:
+        safe = re.sub(r"([+^%~(){}\[\]])", r"{\1}", str(text)).replace("'", "''").replace("\n", "{ENTER}")
+        ps(WIN_PRE + f"[System.Windows.Forms.SendKeys]::SendWait('{safe}')")
+    else: subprocess.run(["xdotool", "type", "--delay", "15", str(text)], check=True)
+
+def desk_apps():
+    if MAC:
+        return jxa('var se = Application("System Events"); var ps = se.processes.whose({backgroundOnly: false});'
+                   'ps.name().map(function(n, i){ return n; }).join("\\n") + "\\nfront: " + se.processes.whose({frontmost: true})[0].name()')
+    if WSL: return ps('Get-Process | Where-Object {$_.MainWindowTitle} | ForEach-Object { $_.ProcessName + "  ·  " + $_.MainWindowTitle }')
+    if shutil.which("wmctrl"): return subprocess.run(["wmctrl", "-l"], capture_output=True, text=True).stdout
+    return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", ".", "getwindowname", "%@"], capture_output=True, text=True).stdout or "no windows found"
+
+def desk_focus(name):
+    if MAC: osa('on run argv\ntell application (item 1 of argv) to activate\nend run', str(name)); DESK["app"] = ""
+    elif WSL:
+        ok = ps(f"(New-Object -ComObject WScript.Shell).AppActivate('{str(name).replace(chr(39), chr(39) * 2)}')")
+        if "False" in ok: raise RuntimeError(f"no open window matches {name}. apps lists them")
+    else: subprocess.run(["xdotool", "search", "--onlyvisible", "--name", str(name), "windowactivate"], check=True)
+
+def desk_open(what):
+    what = str(what).strip()
+    if MAC:
+        is_app = not re.match(r"[a-z]+://", what) and not os.path.exists(os.path.expanduser(what))
+        r = subprocess.run(["open", "-a", what] if is_app else ["open", os.path.expanduser(what)], capture_output=True, text=True)
+        if r.returncode != 0: raise RuntimeError(r.stderr.strip() or f"couldn't open {what}")
+        DESK["app"] = ""
+    elif WSL: subprocess.run(["cmd.exe", "/c", "start", "", what], capture_output=True)
+    else:
+        if os.path.exists(os.path.expanduser(what)) or re.match(r"[a-z]+://", what): subprocess.Popen(["xdg-open", os.path.expanduser(what)], start_new_session=True)
+        else: subprocess.Popen(shlex.split(what), start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def desk_menu(path):
+    """Mac menus: "File > Export…" clicks that menu item in the front app."""
+    names = [p.strip() for p in str(path).split(">") if p.strip()]
+    if len(names) < 2: raise RuntimeError('give the menu path like "File > Save As…"')
+    js = ('function run(a){ var se = Application("System Events"); var p = se.processes.whose({frontmost: true})[0];'
+          ' var n = JSON.parse(a[0]); var m = p.menuBars[0].menuBarItems.byName(n[0]).menus[0];'
+          ' for (var i = 1; i < n.length - 1; i++) m = m.menuItems.byName(n[i]).menus[0];'
+          ' m.menuItems.byName(n[n.length - 1]).click(); return "ok"; }')
+    try: jxa(js, json.dumps(names))
+    except RuntimeError as e:
+        if str(e) == "ACCESS": raise
+        raise RuntimeError(f'no menu item "{" > ".join(names)}" in the front app. Check the exact names (… is one character) with a screenshot')
+
+def desktop(action, ref="", x="", y="", text="", key="", app="", seconds="2"):
+    """Use any app on the computer like a person: look at its window, click, type, press keys, use its menus, switch apps, see the screen."""
+    action = str(action).strip().lower()
+    try:
+        if action == "screenshot":
+            path, w, h = desk_screenshot()
+            return (f"Screenshot taken ({w}x{h}), it follows: look at it. Saved as {path.replace(HOME, '~')}. To click something you see "
+                    "in it, give click its x and y in this screenshot's pixels.")
+        if action == "look":
+            return clip(desk_lines(*desk_look(str(app).strip(), 200)), PAGE_CHARS)
+        if action == "apps": return clip(desk_apps(), 6000)
+        if action == "wait": time.sleep(min(30, float(seconds or 2))); return "waited"
+        acts = ("click", "doubleclick", "rightclick", "type", "key", "focus", "open", "menu", "set")
+        if action not in acts:
+            return "error: action is screenshot, look, apps, click, doubleclick, rightclick, type, key, menu, focus, open, set or wait"
+        if PLAN: return plan_block()
+        if not DESK_OK[0]:
+            if not confirm("use the mouse and keyboard on this computer", f"{action} {ref or (str(x) + ',' + str(y) if x else '')} {text or key or app}".strip()):
+                return "The user declined."
+            DESK_OK[0] = True
+        before = desk_sig() if action not in ("open", "focus") else ("", "", set())
+        if action in ("click", "doubleclick", "rightclick", "set"):
+            if str(ref).strip() != "":
+                refs = DESK["refs"]; i = int(ref)
+                if not 0 <= i < len(refs): return "error: no item with that number. Use look again."
+                it = refs[i]; did = f"{action} on {it['r']} \"{it['t']}\""
+                if MAC and action == "set":
+                    if jxa(DESK_DO, DESK["app"], "set", json.dumps(it["p"]), str(text)) != "ok": return "error: that item doesn't take a value. Click it and type instead."
+                elif MAC and action == "click" and jxa(DESK_DO, DESK["app"], "press", json.dumps(it["p"])) == "ok": pass
+                elif it.get("at"): desk_click(*it["at"], double=action == "doubleclick", right=action == "rightclick")
+                else: return "error: couldn't reach that item. Take a screenshot and click by position."
+            elif str(x).strip() and str(y).strip():
+                sx, sy = DESK["scale"]; px, py = float(x) * sx, float(y) * sy
+                desk_click(px, py, double=action == "doubleclick", right=action == "rightclick"); did = f"{action} at {x},{y} on the screenshot"
+            else: return "error: give ref (a number from look) or x and y (pixels on the last screenshot)"
+        elif action == "type": desk_type(text); did = "typed it"
+        elif action == "key": desk_key(key or text); did = f"pressed {key or text}"
+        elif action == "focus": desk_focus(app or text); did = f"switched to {app or text}"
+        elif action == "open": desk_open(app or text); did = f"opened {app or text}"
+        else: desk_menu(text); did = f"clicked the menu {text}"
+        time.sleep(1.2 if action in ("open", "focus", "menu") else 0.7)
+        app_, win, now = desk_sig()
+        said = []
+        if before[0] and app_ != before[0]: said.append(f"the front app is now {app_}")
+        if win != before[1] and win: said.append(f'the window is now "{win}"')
+        new, gone = sorted(now - before[2])[:10], before[2] - now
+        if new and before[2]: said.append("new on screen: " + "; ".join(new))
+        if gone and before[2]: said.append(f"{len(gone)} thing{'s' if len(gone) > 1 else ''} went away" + (": " + "; ".join(sorted(gone)[:4]) if len(gone) <= 4 else ""))
+        if said: return did + "\nWhat changed:\n" + "\n".join(said)
+        if not now and not before[2]: return did + "\n(Can't read this window's contents to tell what changed: take a screenshot to check.)"
+        return (did + "\nNothing in the window changed. Don't repeat it: take a screenshot to see why (a dialog in front, the wrong window, "
+                "the app still loading), or try another way (a menu, a keyboard shortcut, clicking by position).")
+    except subprocess.TimeoutExpired:
+        return "error: the computer took too long to answer"
+    except RuntimeError as e:
+        if str(e) == "ACCESS":
+            return ("error: macOS needs permission once for this. Tell the user: System Settings > Privacy & Security > Accessibility > turn on "
+                    "their terminal app (Terminal, iTerm…), then quit and reopen bxzex-ai.")
+        if str(e) == "SCREEN":
+            return ("error: macOS needs permission once for screenshots. Tell the user: System Settings > Privacy & Security > Screen & System "
+                    "Audio Recording > turn on their terminal app, then quit and reopen bxzex-ai.")
+        if str(e) == "LINUXTOOLS":
+            return "error: this needs xdotool. Ask the user to run: sudo apt install xdotool scrot wmctrl (on Wayland: ydotool grim)"
+        return f"error: {e}"
+    except (ValueError, KeyError, IndexError) as e:
+        return f"error: {e}. Use look or screenshot again."
 
 MESSAGES_DB = f"{HOME}/Library/Messages/chat.db"
 
@@ -3208,7 +3777,7 @@ def setup_imessage(arg=""):
 TOOL_FUNCS = {"web_search": web_search, "fetch_page": fetch_page, "run_shell": run_shell,
               "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
               "list_files": list_files, "search_files": search_files,
-              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task, edits="false": one_helper(1, str(task)), "schedule_task": schedule_task, "test_page": test_page, "safari": safari, "imessage": imessage,
+              "update_todos": update_todos, "ask_user": ask_user, "check_job": check_job, "delegate": lambda task, edits="false": one_helper(1, str(task)), "schedule_task": schedule_task, "test_page": test_page, "safari": safari, "desktop": desktop, "imessage": imessage,
               "remember": lambda note: remember(note), "use_skill": lambda name: use_skill(name),
               "generate_image": lambda prompt, shape="square", quality="fast": generate_image(prompt, shape, quality)}
 
@@ -3467,12 +4036,31 @@ TOOLS = [
          steps="optional actions before checking, one per line: click Menu · click #signup · click 200,340 · tap 180,600 · type #email me@x.com · "
                "press Space · hold ArrowRight 1500 · drag 100,500 300,500 · scroll 1200 · wait 1000",
          see="false to skip the screenshots, default true"),
+    tool("desktop", "Use any app on this computer the way a person does: see the screen, click, type, press keys and shortcuts, use menus, "
+         "switch and open apps. The loop: look (the front window's buttons and fields, numbered) or screenshot (see it, saved so the user can "
+         "follow along) > one action > read what changed, which every action reports. Prefer look and ref; use screenshot and x,y for things look "
+         "can't see (games, canvases, custom apps). If nothing changed, don't repeat it: screenshot to see why. For websites in Safari use the "
+         "safari tool; for files and commands use run_shell.",
+         action="screenshot · look · apps (what's open) · open (an app, file or address) · focus (switch to an app) · click · doubleclick · "
+                "rightclick · type · key (enter, escape, cmd+s, ctrl+shift+t, alt+tab) · menu (Mac: File > Save As…) · set (put a value straight "
+                "into a field) · wait",
+         ref="an item's number from look, default none", x="for clicks by position: x in the last screenshot's pixels, default none",
+         y="y in the last screenshot's pixels, default none", text="what to type, the menu path, or the value for set; default none",
+         key="for key: the key or combination, default none", app="for open, focus or look: the app's name, default the front app",
+         seconds="for wait, default 2"),
 ] + ([
-    tool("safari", "Control the user's own Safari on this Mac: list their open tabs, open a page in a new tab, read a tab's text, or run "
-         "JavaScript in a tab (to click, fill in forms or pull data out of a page that needs their login). To test pages or games you built, "
-         "use test_page instead, never their Safari.", action="tabs, open, read or run",
-         url="for open: the address", script="for run: the JavaScript; the value of its last line comes back",
-         tab="which tab like 1.2 (window.tab) from tabs, default the front tab"),
+    tool("safari", "Use the user's own Safari on this Mac, signed in as them, like a person would. The loop: look (a numbered list of "
+         "everything you can click or type in, an open popup listed first) > one action on an item by its number > read what changed, which "
+         "every action reports. Never write your own osascript or JavaScript to click: use these. If an action changed nothing, do not repeat "
+         "it: screenshot to see why, close what's in the way (key Escape), or use realclick/realkey. Dropdowns: select with the option's "
+         "words. Numbers go stale when the page changes: look again. To test pages you built, use test_page instead.",
+         action="tabs · open · look · screenshot (see the page) · read (all its text) · click · type · select · key (Escape, Enter, Tab, "
+                "ArrowDown…) · scroll · wait (for text to appear) · realclick / realkey / realtype (a real mouse and keyboard, for pages that "
+                "ignore the normal ones) · run (your own JavaScript, last resort)",
+         ref="the item's number from look, default none", text="for type: what to type; for wait: the text to wait for; default none", option="for select: the option's words, default none",
+         key="for key and realkey: the key's name, default Escape", dir="for scroll without ref: down or up, default down", clear="for type: false to add to what's there, default true",
+         submit="for type: true to press Enter after, default false", seconds="for wait: how long, default 10", url="for open: the address, default none",
+         script="for run: the JavaScript, its last line's value comes back; default none", tab="which tab like 1.2 from tabs, default the front tab"),
     tool("imessage", "Messages on this Mac: send an iMessage or text, read recent messages, or find someone's number or email in Contacts. "
          "Sending always asks the user first.", action="send, read or find", to="for send: phone number or email; for read: only this person, default all",
          text="for send: the message", limit="for read: how many, default 10", who="for find: the name to look up, default none"),
@@ -3752,18 +4340,53 @@ def warm_up():
             pass
     threading.Thread(target=go, daemon=True).start()
 
+FACTS = []
+def system_facts():
+    """What this computer is and has, worked out once, so it knows where things are and which commands exist."""
+    if FACTS: return FACTS[0]
+    bits = []
+    try:
+        if MAC:
+            ver = subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True, timeout=5).stdout.strip()
+            bits.append(f"macOS {ver} on {'Apple silicon' if os.uname().machine == 'arm64' else 'Intel'}")
+            apps = [a for a in ("Safari", "Google Chrome", "Firefox", "Arc", "Microsoft Edge", "Brave Browser", "Xcode", "Android Studio",
+                                "Visual Studio Code", "Cursor", "Docker", "Simulator") if os.path.exists(f"/Applications/{a}.app")
+                    or (a == "Simulator" and os.path.exists("/Applications/Xcode.app"))]
+            if apps: bits.append("apps: " + ", ".join(apps))
+        else:
+            bits.append(system_name() + f" ({os.uname().machine})")
+            if not WSL: bits.append("desktop session: " + (os.environ.get("XDG_SESSION_TYPE") or "none found"))
+        pm = [x for x in ("brew", "apt", "dnf", "pacman", "zypper", "snap", "flatpak") if shutil.which(x)]
+        if WSL and shutil.which("winget.exe"): pm.append("winget.exe")
+        if pm: bits.append("installs with: " + ", ".join(pm))
+        dev = [x for x in ("git", "node", "npm", "bun", "python3", "uv", "docker", "xcrun", "adb", "flutter", "cargo", "go", "java", "ffmpeg")
+               if shutil.which(x)]
+        if dev: bits.append("tools: " + ", ".join(dev))
+        if not MAC and not WSL:
+            have = [x for x in ("xdotool", "ydotool", "scrot", "grim", "gnome-screenshot", "wmctrl") if shutil.which(x)]
+            bits.append("desktop control: " + (", ".join(have) if have else "none installed (sudo apt install xdotool scrot wmctrl)"))
+        bits.append(f"shell: {os.path.basename(os.environ.get('SHELL', 'sh'))}, home is ~, screenshots go to {SCRATCH.replace(HOME, '~')}")
+    except Exception:
+        pass
+    FACTS.append(". ".join(bits) + "."); return FACTS[0]
+
 def system_prompt():
     return (
         f"You are {AI_NAME}, an uncensored assistant made by bxzex (bxzex.com), running locally and "
         "privately on the user's own computer in the `bxzex-ai` terminal app. If asked what model you are, "
         f"say you are {AI_NAME}, a local uncensored model. "
         f"Today is {datetime.date.today():%A %B %d, %Y}. This computer runs {system_name()}. "
-        f"Working directory: {os.getcwd().replace(HOME, '~')}.\n"
+        f"Working directory: {os.getcwd().replace(HOME, '~')}.\nThis computer: {system_facts()}\n"
         "You can act: web_search and fetch_page for anything current or that you are unsure of; "
         "list_files, search_files and read_file to look around; edit_file to change part of a file and write_file only for "
         "new files or full rewrites; run_shell for everything else (background true for servers). For work with 3 or more steps, keep a "
         "list with update_todos and tick steps off as you go. Ask with ask_user only when a choice is really theirs. When a task needs action, do it "
         "with the tools instead of telling them how. If no tool is needed, just answer.\n"
+        "Using the computer (any app, the screen, websites in their browser): see first (desktop look or screenshot, safari look), do one "
+        "action, read what changed, which every action reports. If something changed nothing, never repeat it: screenshot to see why "
+        "(a popup in the way, the wrong window, still loading) and after two misses change approach (keyboard shortcut, menu, direct link, "
+        "a command) or ask. Check the result with a screenshot before saying it's done. Load the computer-use skill for this kind of work and "
+        "app-testing for building or testing phone, tablet and desktop apps.\n"
         "Reading tool output is slow for you, so use as few calls as the task needs and rely on search "
         "snippets before fetching whole pages. Keep answers short and plain.\n"
         "Never assume where the user lives, what their business is or any other personal detail in your work. "
@@ -3774,11 +4397,11 @@ def system_prompt():
 # what the loader says while each tool works, so nothing ever looks frozen (images draw their own)
 RUNNING = {"run_shell": "Running", "check_job": "Checking the job", "web_search": "Searching the web", "fetch_page": "Opening page", "read_file": "Reading",
            "list_files": "Looking through files", "search_files": "Searching files", "write_file": "Saving", "edit_file": "Saving",
-           "use_skill": "Loading skill", "schedule_task": "Scheduling", "test_page": "Checking the page", "safari": "Working in Safari", "imessage": "Working in Messages"}
+           "use_skill": "Loading skill", "schedule_task": "Scheduling", "test_page": "Checking the page", "safari": "Working in Safari", "desktop": "Using the computer", "imessage": "Working in Messages"}
 # how each step is named on screen
 SAYS = {"run_shell": "Run", "check_job": "Job", "web_search": "Search the web", "fetch_page": "Open", "read_file": "Read", "write_file": "Write",
         "edit_file": "Edit", "list_files": "List", "search_files": "Search", "update_todos": "To-do", "ask_user": "Ask", "remember": "Remember",
-        "delegate": "Helper", "test_page": "Check", "safari": "Safari", "imessage": "Messages", "schedule_task": "Schedule", "use_skill": "Skill",
+        "delegate": "Helper", "test_page": "Check", "safari": "Safari", "desktop": "Computer", "imessage": "Messages", "schedule_task": "Schedule", "use_skill": "Skill",
         "generate_image": "Image"}
 tool_wait = None; tool_label = ""
 LAST_TOOLS = []     # (call shown, full output) for this reply, for ctrl-o
@@ -3836,7 +4459,13 @@ def run_tool(call):
     elif name == "list_files" and out != "no files": first, more = plural(len(lines), "file"), " · ctrl-o"
     elif name == "search_files" and out != "no matches": first, more = plural(len(lines), "match").replace("matchs", "matches"), " · ctrl-o"
     tone = c(174) if out.startswith("error") else DIM
-    print(f"  {DIM}└{R} {tone}{first[:W()-len(more)-6]}{more}{R}\n")
+    print(f"  {DIM}└{R} {tone}{first[:W()-len(more)-6]}{more}{R}" + ("" if SHOW_SHOTS else "\n"))
+    for shot in SHOW_SHOTS:                          # what it saw, small, so the user can follow along
+        try:
+            for row in preview(shot, min(56, W() - 8)): print("    " + row)
+        except Exception: pass
+        print(f"    {DIM}{shot.replace(HOME, '~')}{R}\n")
+    SHOW_SHOTS.clear()
     return out
 
 # ---- images ----
@@ -3910,7 +4539,7 @@ def user_message(text):
     text = attach_files(text)
     text, imgs = split_images(text)
     if not imgs: return {"role": "user", "content": text, **({"_hint": hint} if hint else {})}
-    for p in imgs: print(f"  {DIM}└ image {p}{R}")
+    for p in imgs: print(f"  {DIM}└ {next((chip_label(k) for k, v in CHIPS.items() if v == p), 'image')} {os.path.basename(p)}{R}")
     return {"role": "user", "content": [{"type": "text", "text": text or "What is in this image?"}]
                                        + [image_part(p) for p in imgs], **({"_hint": hint} if hint else {})}
 
@@ -4212,7 +4841,8 @@ class LogoFade:
     def stop(self):
         if self.stop_ev.is_set(): return
         self.stop_ev.set(); self.th.join()
-        if self.drawn: RAW.write(f"\033[{self.ROWS}A\r\033[J"); RAW.flush()
+        if self.drawn:          # only its own rows: clearing to the end of the screen would take the input box with it
+            RAW.write(f"\033[{self.ROWS}A" + "\r\033[2K\n" * self.ROWS + f"\033[{self.ROWS}A"); RAW.flush()
 
 class Waiting:
     """One-line status shown while it loads, reads or thinks: flames, what it's doing, how long, how many tokens."""
@@ -5049,8 +5679,42 @@ def custom_commands():
         except OSError: pass
     return found
 
+CHIPS = {}          # an image dragged or pasted into the box: one hidden character each, drawn as [Image #1]
+IMG_PATH = re.compile(r"""(?:(?<=\s)|^)('[^'\n]+\.(?:png|jpe?g|gif|webp|heic|bmp|tiff?)'|"[^"\n]+\.(?:png|jpe?g|gif|webp|heic|bmp|tiff?)"|"""
+                      r"""(?:~|/|[A-Za-z]:\\)(?:\\.|[^\s\\])+?\.(?:png|jpe?g|gif|webp|heic|bmp|tiff?))(?=\s|$)""", re.I)
+
+def chip_label(ch): return f"[Image #{ord(ch) - 0xE000}]"
+def is_chip(ch): return ch in CHIPS
+
+def chipify(buf, pos):
+    """Turn image paths in what's typed into [Image #N] chips. Returns the new buffer and cursor."""
+    text = "".join(buf)
+    if not IMG_PATH.search(text): return buf, pos
+    out, at, moved = [], 0, pos
+    for m in IMG_PATH.finditer(text):
+        raw = m.group(1); path = raw[1:-1] if raw[0] in "'\"" else re.sub(r"\\(.)", r"\1", raw)
+        path = windows_path(path) if WSL and re.match(r"[A-Za-z]:\\", path) else os.path.expanduser(path)
+        if not os.path.isfile(path): continue
+        ch = chr(0xE000 + len(CHIPS) + 1); CHIPS[ch] = path
+        out.append(text[at:m.start()]); out.append(ch)
+        if pos >= m.end(): moved -= len(raw) - 1
+        elif pos > m.start(): moved = len("".join(out))
+        at = m.end()
+    if not out: return buf, pos
+    out.append(text[at:])
+    return list("".join(out)), max(0, min(moved, len("".join(out))))
+
+def show_chips(text, style=""):
+    """[Image #N] in place of each chip, for the screen."""
+    return "".join(f"{TEAL}{chip_label(ch)}{R}{style}" if ch in CHIPS else ch for ch in text) if any(ch in CHIPS for ch in text) else text
+
+def unchip(text):
+    """The message as the model gets it: each chip back to its file path."""
+    return "".join((shlex.quote(CHIPS[ch]) if " " in CHIPS[ch] else CHIPS[ch]) if ch in CHIPS else ch for ch in text)
+
 def char_w(ch):
     """Columns a character takes: two for wide ones (most emoji, Chinese, Japanese, Korean), none for marks that sit on another letter."""
+    if ch in CHIPS: return len(chip_label(ch))
     if ch < "\u0300": return 1
     if unicodedata.combining(ch) or ch in "\u200d\ufe0f": return 0
     return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
@@ -5128,7 +5792,7 @@ class Box:
         start = max(0, pos - room)
         st = fit_ansi(status_text(text, working), w)
         rule = f"{DIM}{'─' * w}{R}"
-        s = (f"\033[{top};1H\033[J{rule}\033[{top + 1};1H{GOLD}❯{R} {text[start:start + room].replace(chr(10), f'{DIM}↵{R}')}"
+        s = (f"\033[{top};1H\033[J{rule}\033[{top + 1};1H{GOLD}❯{R} {show_chips(text[start:start + room]).replace(chr(10), f'{DIM}↵{R}')}"
              f"\033[{top + 2};1H{rule}\033[{top + 3};1H{DIM}{st}{R}")
         return s, 3 + pos - start
     def draw(self, text="", pos=0, working=True):
@@ -5169,7 +5833,7 @@ class Box:
         more = f"{DIM} {a + listed} of {len(offer)} {R}" if listed and len(offer) > listed else ""
         out.append(f"\033[{base};1H\033[J{rule}" + (f"\033[{base};{max(1, w - 14)}H{more}" if more else ""))
         for k, line in enumerate(shown):
-            out.append(f"\033[{base + 1 + k};1H" + (f"{GOLD}❯{R} " if self.first + k == 0 else "  ") + line)
+            out.append(f"\033[{base + 1 + k};1H" + (f"{GOLD}❯{R} " if self.first + k == 0 else "  ") + show_chips(line))
         st = fit_ansi(status_text(text, False, {"command": "run", "file": "pick"}.get(kind, "") if listed else ""), w)
         out.append(f"\033[{top + 2};1H{rule}\033[{top + 3};1H{DIM}{st}{R}")
         RAW.write("".join(out) + f"\033[{base + 1 + row - self.first};{3 + col}H"); RAW.flush()
@@ -5350,18 +6014,19 @@ def ask(prefill=""):
                     else: buf.insert(pos, "\t" if pasting else " "); pos += 1
                 elif ch >= " ": buf.insert(pos, ch); pos += 1
             if done: break
+            if not pasting: buf, pos = chipify(buf, pos)        # a dragged or pasted image becomes [Image #N]
             show()
     except BaseException:
         leave(); raise
     leave()
-    text = "".join(buf).strip()
+    shown = "".join(buf).strip(); text = unchip(shown)
     if text:
         if (not past or past[-1] != text) and text not in ("exit", "quit"):
             past.append(text)
             try:
                 with open(PAST_FILE, "a") as f: f.write(json.dumps(text) + "\n")
             except OSError: pass
-        print(f"{GOLD}❯{R} {BOLD}" + text.replace("\n", f"{R}\n  {BOLD}") + R)
+        print(f"{GOLD}❯{R} {BOLD}" + show_chips(shown, BOLD).replace("\n", f"{R}\n  {BOLD}") + R)
     return text
 
 def toggle_plan(quiet=False, busy=False):
