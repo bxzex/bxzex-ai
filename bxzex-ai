@@ -4444,11 +4444,19 @@ def run_tool(call):
     global tool_wait, tool_label
     tool_label = RUNNING.get(name, "Working with " + MCP[name][0] if name in MCP else "")
     if tool_label: sys.stdout.write("\033[?25l"); tool_wait = Waiting(tool_label)
+    keep = threading.Event()
+    if REMOTE:                                   # the card sleeps after 5 idle minutes: a long command must not let it doze off mid-reply
+        def _keep_awake():
+            while not keep.wait(120):
+                try: urllib.request.urlopen(f"{HOST}/v1/models", timeout=20).read(); global last_ok; last_ok = time.time()
+                except Exception: pass
+        threading.Thread(target=_keep_awake, daemon=True).start()
     try:
         out = mcp_call(name, args) if name in MCP else str(TOOL_FUNCS[name](**args))
     except Exception as e:
         out = f"error: {e}"
     finally:
+        keep.set()
         if tool_wait: tool_wait.stop(); tool_wait = None
         tool_label = ""; sys.stdout.write("\033[?25h"); sys.stdout.flush()
     out += hooks_after(name, args, out)
@@ -5007,6 +5015,7 @@ def fold(history, force=False, everything=False):
     return changed
 
 turn_tok = 0   # tokens generated in the current turn, for the summary line
+LATER = []     # commands typed while it was working, run at the prompt
 USAGE = {"start": time.time(), "replies": 0, "out": 0, "read": 0, "busy": 0.0, "cost": 0.0, "requests": 0, "tools": {}}
 USAGE_FILE = f"{APP_HOME}/usage.json"     # totals per day, kept on this computer only
 
@@ -5039,6 +5048,14 @@ def lines(resp):
 
 def stream(messages, label="Reading"):
     """One model call. Returns (answer text, tool calls)."""
+    global MODEL_ID, last_ok, wake_began
+    if REMOTE and not awake():
+        try:                                     # quick look first: usually it is awake and answers at once
+            with urllib.request.urlopen(f"{HOST}/v1/models", timeout=5) as r: d = json.load(r)["data"]
+            MODEL_ID = d[0]["id"] if d else MODEL_ID; last_ok = time.time()
+        except Exception:
+            if not wake_began: wake_began = time.time()
+            if not wake_remote(True): return "", []
     model = MODEL_ID if awake() else loaded_model()
     if not model:
         print(f"{DIM}the model server isn't running. Relaunch bxzex-ai{R}"); return "", []
@@ -5138,7 +5155,6 @@ def stream(messages, label="Reading"):
         elif phase!="answer": sys.stdout.write(f"{R}\r\033[K")
         sys.stdout.write("\033[?25h")  # restore cursor
         sys.stdout.flush()
-    global last_ok
     if not stream_error: last_ok = time.time()
     else: last_ok = 0
     return "".join(answer).strip(), [calls[i] for i in sorted(calls)]
@@ -5192,6 +5208,9 @@ def run_turn(history):
             else:
                 history.append({"role": "assistant", "content": text})
             notes = typed.drain()
+            for n in [n for n in notes if re.fullmatch(r"/[a-z][a-z-]*( .*)?", n.strip())]:
+                notes.remove(n); LATER.append(n.strip())
+                print(f"{DIM}  {n.strip()} runs when this reply finishes{R}")
             if notes:
                 print()
                 for n in notes: print(f"{GOLD}❯{R} {DIM}btw{R} {n}")
@@ -5868,10 +5887,21 @@ class Box:
         self.reserve(grow + listed)
         out = [f"\033[{r};1H\033[2K" for r in range(max(1, top - self.free), top)]
         base = top - grow; a = max(0, min(sel - listed // 2, len(offer) - listed))
-        name_w = max([len(n) for n, _ in offer[a:a + listed]] + [0])
+        name_w = min(32, max([len(n) for n, _ in offer[a:a + listed]] + [0]))
+        typed_word = text.split()[-1] if text.split() else ""
+        q = typed_word.lstrip("/@").lower()
+        def lit(s, base, find):
+            """The typed letters stand out wherever they appear, the rest keeps the row's color."""
+            at = s.lower().find(find) if len(find) >= 2 else -1
+            return s if at < 0 else f"{s[:at]}{BOLD}{c(231)}{s[at:at + len(find)]}{R}{base}{s[at + len(find):]}"
+        accent = c(T[4] if T[4] != 231 else T[3])
         for k in range(listed):
             n, d = offer[a + k]; on = a + k == sel
-            line = f"{GOLD}{BOLD}❯ {n.ljust(name_w)}{R}  {d}" if on else f"  {n.ljust(name_w)}  {DIM}{d}"
+            shown_n = n if len(n) <= name_w else n[:name_w - 1] + "…"
+            room = max(0, w - name_w - 8)
+            d = d if len(d) <= room else d[:max(0, room - 1)].rstrip() + "…"
+            if on: line = f"{accent}{BOLD}❯ {R}{accent}{BOLD}{lit(shown_n, accent + BOLD, q)}{' ' * (name_w - len(shown_n))}{R}    {accent}{lit(d, accent, q)}"
+            else:  line = f"  {lit(shown_n, '', q)}{' ' * (name_w - len(shown_n))}    {DIM}{lit(d, DIM, q)}"
             out.append(f"\033[{base - listed + k};1H{fit_ansi(line, w)}{R}")
         rule = f"{DIM}{'─' * w}{R}"
         more = f"{DIM} {a + listed} of {len(offer)} {R}" if listed and len(offer) > listed else ""
@@ -6624,7 +6654,8 @@ spoken = RELOAD.get("typed", ""); last_break = 0
 
 while True:
     try:
-        user = ask(spoken or typed.leftover); spoken = typed.leftover = ""
+        if LATER and not spoken and not typed.leftover: user = LATER.pop(0); print(f"{GOLD}❯{R} {BOLD}{user}{R}")
+        else: user = ask(spoken or typed.leftover); spoken = typed.leftover = ""
     except EOFError:
         break
     except Reload as r:
