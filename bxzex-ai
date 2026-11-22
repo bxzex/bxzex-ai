@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.16.2"
+VERSION = "1.16.3"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -289,6 +289,49 @@ def logo_rows(t=1.0):
         out.append("".join(row) + R)
     return out
 
+GLITCH = "░▒▓▚▞▖▗▘▝▄▀"
+
+def logo_reveal(secs):
+    """When each cell of the logo settles out of the static: left to right, with some scatter."""
+    width = len(LOGO[0][0]); rnd = random.Random()
+    return [[secs * (0.65 * i / width + 0.35 * rnd.random()) for i in range(width)] for _ in LOGO]
+
+def logo_frame(el, reveal, shine=False, fade=1.0):
+    """The logo el seconds in: cells still in the static flicker as glitch blocks, the rest show their real colors.
+    shine sends a bright diagonal band across it every couple of seconds. fade below 1 dims it toward black."""
+    fg = {15: 231, 7: 248, 8: 240, 1: T[2]}; bg = {1: T[2], 7: 248}
+    width = len(LOGO[0][0]); band = ((el * 40) % (width + 46)) - 20 if shine else -999
+    out = []
+    for r, (chars, attrs) in enumerate(LOGO):
+        row = []; last = None
+        for i, ch in enumerate(chars):
+            a = int(attrs[2*i:2*i+2], 16); f, b = fg.get(a & 15, 231), bg.get(a >> 4)
+            if ch == " " and b is None: code, ch = "\033[0m", " "
+            elif el < reveal[r][i]:                     # still static
+                if random.random() < 0.35: code, ch = "\033[0m", " "
+                else: code, ch = f"\033[0;38;5;{dim256(T[2] if random.random() < 0.6 else 245, 0.45 * fade)}m", random.choice(GLITCH)
+            else:
+                d = abs(i + r * 1.6 - band)
+                if d < 2.5: f, b = 231, (255 if b is not None else None)        # in the light
+                elif d < 5: f, b = (255 if f != T[2] else T[4] if T[4] != 231 else 153), (252 if b is not None else None)
+                if fade < 1: f = dim256(f, fade); b = dim256(b, fade) if b is not None else None
+                code = f"\033[0;38;5;{f}" + (f";48;5;{b}m" if b is not None else "m")
+            if code != last: row.append(code); last = code
+            row.append(ch)
+        out.append("".join(row) + R)
+    return out
+
+def wave_rows(el, width):
+    """A wave of bars two rows tall rolling along under the logo, in the theme color, brighter at the crests."""
+    levels = " ▁▂▃▄▅▆▇█"; tones = [T[1] or 238, T[2], T[3], T[4] if T[4] != 231 else 153]
+    top, low = [], []
+    for j in range(width):
+        v = (math.sin(j * 0.21 - el * 4.2) * 0.6 + math.sin(j * 0.08 + el * 1.7) * 0.4 + 1) / 2      # 0..1
+        tone = c(tones[min(3, int(v * 4))])
+        low.append(tone + levels[min(8, int(v * 2 * 8))])
+        top.append(tone + (levels[min(8, int((v - 0.5) * 2 * 8))] if v > 0.5 else " "))
+    return ["".join(top) + R, "".join(low) + R]
+
 CAR = [   # the DeLorean, drawn in braille dots
     '⣀⣤⣀⣀⣀⡀⠀⠀⠀⠀⠀⢀⣀⣀⣰⣾⣿⣤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⠀⠀⠀⢀⣀⣀⣀⣀⣀⣀⣀',
     '⣿⣿⣿⣿⣿⣇⠀⠀⠀⠀⢠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⣼⣿⣷⣶⣶⣇⠀⠀⠀⠀⢘⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿',
@@ -335,17 +378,20 @@ def intro():
     size = shutil.get_terminal_size((90, 30))
     if not RAW.isatty() or size.columns < len(LOGO[0][0]) + 4 or size.lines < len(LOGO) + 4: return
     top = (size.lines - len(LOGO)) // 2 + 1; left = (size.columns - len(LOGO[0][0])) // 2 + 1
-    def draw(t):
-        RAW.write("".join(f"\033[{top + i};{left}H{row}" for i, row in enumerate(logo_rows(t)))); RAW.flush()
+    reveal = logo_reveal(1.1)
+    def draw(el, fade=1.0, shine=False):
+        RAW.write("".join(f"\033[{top + i};{left}H{row}" for i, row in enumerate(logo_frame(el, reveal, shine, fade)))); RAW.flush()
     def wait(s):     # a key pressed skips the rest; the key itself stays for the chat
         try: return bool(select.select([sys.stdin], [], [], s)[0])
         except (OSError, ValueError): time.sleep(s); return False
     RAW.write("\033[?1049h\033[?25l\033[2J"); RAW.flush()
     try:
-        frames = [(0.08 + 0.92 * (i / 24) ** 1.6, 0.05) for i in range(1, 25)] + [(1, 0.5)] + [(i / 12, 0.03) for i in range(12, -1, -1)]
-        for t, s in frames:
-            draw(t)
-            if wait(s): break
+        steps = [(i * 0.05, 1.0, False) for i in range(25)]                  # decode out of the static
+        steps += [(20 / 34 + i * 0.04, 1.0, True) for i in range(26)]        # one sweep of light
+        steps += [(9.0, k / 12, False) for k in range(12, -1, -1)]           # fade away into the chat
+        for el, fade, shine in steps:
+            draw(el, fade, shine)
+            if wait(0.04): break
     finally:
         RAW.write("\033[2J\033[?1049l\033[?25h"); RAW.flush()
 
@@ -453,8 +499,8 @@ def wake_remote(block=True):
     sys.stdout.write("\033[?25l")
     mins = 4 if (load_config().get("cloud") or {}).get("card") == "H200" else 2          # the bigger model takes longer to load
     size = shutil.get_terminal_size((90, 30))
-    if RAW.isatty() and size.columns >= len(LOGO[0][0]) + 4 and size.lines >= len(LOGO) + 4:
-        wait = LogoFade(max(8, mins * 60 - (time.time() - wake_began)))                    # the bxzex logo slowly fades in where the reply will go
+    if RAW.isatty() and size.columns >= len(LOGO[0][0]) + 4 and size.lines >= len(LOGO) + 10:
+        wait = LogoFade(max(10, mins * 60 - (time.time() - wake_began)))      # estimated time left, from when it started waking                    # the bxzex logo slowly fades in where the reply will go
     else:
         wait = Waiting(f"Waking the cloud GPU · it sleeps after 5 min idle and takes about {mins} min to start")
     if CHANNEL == "web" and PHONE: web_push("note", f"Waking the cloud card. It sleeps after 5 minutes idle and takes about {mins} minutes to start.")
@@ -4085,29 +4131,28 @@ def highlight(line):
     return "".join(out)
 
 class LogoFade:
-    """Shown in the chat while a sleeping cloud card wakes: the bxzex logo fades in from black over about
-    the time the card takes to start, then breathes gently until it answers. Erased once it's awake."""
-    def __init__(self, seconds):
-        self.seconds = seconds; self.t0 = time.time(); self.drawn = False
+    """Shown in the chat while the model gets ready: the bxzex logo decodes out of glitch static, then a light
+    sweeps across it again and again over a rolling wave of bars. No words. Erased once it's ready."""
+    ROWS = len(LOGO) + 3                              # the logo, a blank row, the wave
+    def __init__(self, eta=0):
+        self.eta = eta; self.t0 = time.time(); self.drawn = False; self.reveal = logo_reveal(2.4)
         self.stop_ev = threading.Event()
         self.th = threading.Thread(target=self.run, daemon=True); self.th.start()
-    def frame(self, t):
-        up = f"\033[{len(LOGO)}A" if self.drawn else ""
-        RAW.write(up + "".join(f"\r\033[K  {row}\n" for row in logo_rows(t))); RAW.flush(); self.drawn = True
+    def frame(self, el):
+        up = f"\033[{self.ROWS}A" if self.drawn else ""
+        rows = [f"  {row}" for row in logo_frame(el, self.reveal, shine=el > 2.6)] + [""] + ["  " + w for w in wave_rows(el, len(LOGO[0][0]))]
+        left = self.eta - el
+        when = f"≈ {fmt(left)} left" if left > 0 and self.eta else "almost ready" if self.eta else fmt(el)
+        rows[-1] += f"  {GOLD}{when}{R} {DIM}· {fmt(el)}{R}" if self.eta else f"  {DIM}{when}{R}"
+        RAW.write(up + "".join(f"\r\033[K{row}\n" for row in rows)); RAW.flush(); self.drawn = True
     def run(self):
-        last = None
         while True:
-            el = time.time() - self.t0
-            p = min(1.0, el / self.seconds)
-            t = 0.08 + 0.92 * (p * p * (3 - 2 * p))          # ease in and out
-            if p >= 1: t = 0.85 + 0.15 * math.cos((el - self.seconds) * 1.6)   # awake soon: a slow breath
-            t = round(t, 2)
-            if t != last: self.frame(t); last = t
-            if self.stop_ev.wait(0.1): return
+            self.frame(time.time() - self.t0)
+            if self.stop_ev.wait(0.06): return
     def stop(self):
         if self.stop_ev.is_set(): return
         self.stop_ev.set(); self.th.join()
-        if self.drawn: RAW.write(f"\033[{len(LOGO)}A\r\033[J"); RAW.flush()
+        if self.drawn: RAW.write(f"\033[{self.ROWS}A\r\033[J"); RAW.flush()
 
 class Waiting:
     """One-line status shown while it loads, reads or thinks: flames, what it's doing, how long, how many tokens."""
@@ -5578,6 +5623,11 @@ if sys.argv[1:2] == ["--car"]:
         print()
         for row in car_rows(): print("  " + row); time.sleep(0.015)
     sys.exit(0)
+if sys.argv[1:2] == ["--loader"]:          # the loader on its own, for a look: bxzex-ai --loader [seconds]
+
+    L = LogoFade(120); time.sleep(float(sys.argv[2]) if sys.argv[2:] else 8); L.stop(); sys.exit(0)
+if sys.argv[1:2] == ["--intro"]:
+    intro(); sys.exit(0)
 if sys.argv[1:2] == ["--logo"]:
     print()
     for row in logo_rows(): print("   " + row); time.sleep(0.035)
