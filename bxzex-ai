@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.16.4"
+VERSION = "1.16.5"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -426,7 +426,13 @@ def loaded_model():
         with urllib.request.urlopen(f"{HOST}/v1/models", timeout=600 if REMOTE else 3) as r:
             d = json.load(r)["data"]
         MODEL_ID = d[0]["id"] if d else ""
-        if REMOTE and MODEL_ID: global last_ok, wake_began; last_ok = time.time(); wake_began = 0.0     # it answered, so it's awake
+        if REMOTE and MODEL_ID:                                            # it answered, so it's awake
+            global last_ok, wake_began; last_ok = time.time()
+            took = time.time() - wake_began if wake_began else 0
+            if took > 30:                                                   # it really was asleep: learn how long a start takes
+                old = load_config().get("wake_secs") or took
+                save_config(wake_secs=int(min(420, max(60, (old + took) / 2))))
+            wake_began = 0.0
         return MODEL_ID or None
     except Exception:
         MODEL_ID = ""
@@ -508,7 +514,8 @@ def wake_remote(block=True):
     mins = 4 if (load_config().get("cloud") or {}).get("card") == "H200" else 2          # the bigger model takes longer to load
     size = shutil.get_terminal_size((90, 30))
     if RAW.isatty() and size.columns >= len(LOGO[0][0]) + 4 and size.lines >= len(LOGO) + 10:
-        wait = LogoFade(max(10, mins * 60 - (time.time() - wake_began)))      # estimated time left, from when it started waking                    # the bxzex logo slowly fades in where the reply will go
+        usual = int(load_config().get("wake_secs") or mins * 60)          # learned from the last starts
+        wait = LogoFade(max(10, usual - (time.time() - wake_began)), over="cloud is busy · still waiting")      # estimated time left, from when it started waking                    # the bxzex logo slowly fades in where the reply will go
     else:
         wait = Waiting(f"Waking the cloud GPU · it sleeps after 5 min idle and takes about {mins} min to start")
     if CHANNEL == "web" and PHONE: web_push("note", f"Waking the cloud card. It sleeps after 5 minutes idle and takes about {mins} minutes to start.")
@@ -4142,19 +4149,21 @@ class LogoFade:
     """Shown in the chat while the model gets ready: the bxzex logo decodes out of glitch static, then a light
     sweeps across it again and again over a rolling wave of bars. No words. Erased once it's ready."""
     ROWS = len(LOGO) + 3                              # the logo, a blank row, the wave
-    def __init__(self, eta=0, label="Waking up the model"):
-        self.eta = eta; self.label = label; self.t0 = time.time(); self.drawn = False; self.reveal = logo_reveal(2.4)
+    def __init__(self, eta=0, label="Waking up the model", over="taking a bit longer"):
+        self.eta = eta; self.label = label; self.over = over; self.t0 = time.time(); self.drawn = False; self.reveal = logo_reveal(2.4)
         self.stop_ev = threading.Event()
         self.th = threading.Thread(target=self.run, daemon=True); self.th.start()
     def frame(self, el):
         up = f"\033[{self.ROWS}A" if self.drawn else ""
         rows = [f"  {row}" for row in logo_frame(el, self.reveal, shine=el > 2.6)] + [""] + ["  " + w for w in wave_rows(el, len(LOGO[0][0]))]
         left = self.eta - el
-        when = f"≈ {fmt(left)} left" if left > 0 and self.eta else "almost ready" if self.eta else fmt(el)
+        if not self.eta: when = f"{DIM}{fmt(el)}"
+        elif left >= 1: when = f"{GOLD}≈ {fmt(left)} left"                    # one number while the estimate holds
+        else: when = f"{GOLD}{self.over}{R}{DIM} · {fmt(el)}"
         at = (el * 14) % (len(self.label) + 14) - 7                      # a light passing along the words
         lit = "".join(f"{c(231 if abs(i - at) < 1.5 else 252 if abs(i - at) < 3 else 246)}{ch}" for i, ch in enumerate(self.label))
         rows[-2] += f"  {BOLD}{lit}{R}"
-        rows[-1] += f"  {GOLD}{when}{R} {DIM}· {fmt(el)}{R}" if self.eta else f"  {DIM}{when}{R}"
+        rows[-1] += f"  {when}{R}"
         rows = [fit_ansi(r, W() - 1) + R for r in rows]
         RAW.write(up + "".join(f"\r\033[K{row}\n" for row in rows)); RAW.flush(); self.drawn = True
     def run(self):
