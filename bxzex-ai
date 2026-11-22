@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.16.1"
+VERSION = "1.16.2"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -327,7 +327,7 @@ LINKS_CLICK = os.environ.get("TERM_PROGRAM") != "Apple_Terminal"      # Terminal
 
 def link(url, text):
     """Clickable where the terminal supports hyperlinks; plain text everywhere else."""
-    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+    return f"\033]8;;{url}\a{text}\033]8;;\a"
 
 def intro():
     """The bxzex logo fades in in the middle of the screen, then fades away and the chat opens.
@@ -3170,7 +3170,7 @@ class WebTee:
         with self.lock:
             cut = self.buf.rfind("\n") + 1                    # only whole lines; the rest waits for its ending
             out, self.buf = self.buf[:cut], self.buf[cut:]
-        out = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\|\x1b[78]|\r|\a", "", out)
+        out = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b\a]*(?:\x1b\\|\a)|\x1b[78]|\r|\a", "", out)
         rows = [l.rstrip() for l in out.split("\n") if l.strip()]
         self.all += rows
         if rows and not self.quiet:
@@ -3615,7 +3615,7 @@ def show_skills():
         room = W() - wide - 5
         print(f"  {GOLD}{n:<{wide}}{R}  {DIM}{d if len(d) <= room else d[:room - 1] + '…'}{R}")
     if not skills: print(f"  {DIM}none installed{R}")
-    print(f"  {DIM}It picks these up on its own. The bxzex skills come from bxzex.com when it uses one. Add your own .md files in {SKILLS_DIR.replace(HOME, '~')}{R}")
+    print(f"  {DIM}Type /name to run one (/landing-page a site for my bakery), or just ask: it picks them up on its own. The bxzex skills come from bxzex.com when it uses one. Add your own .md files in {SKILLS_DIR.replace(HOME, '~')}{R}")
 
 SYSTEM = ""
 def refresh_system():
@@ -4019,9 +4019,9 @@ class Markdown:
             if m or ch == "\n" or len(self.link) > 500 or not re.fullmatch(r"\[[^\[\]\n]*(\](\([^\s()]*)?)?", self.link):
                 held, self.link, self.as_typed = self.link, None, True
                 if m and re.match(r"https?://|mailto:", m.group(2)):
-                    self.under = True; self.hold(f"\033]8;;{m.group(2)}\033\\", 0)
+                    self.under = True; self.hold(f"\033]8;;{m.group(2)}\a", 0)
                     for x in m.group(1): self.char(x)
-                    self.under = False; self.hold("\033]8;;\033\\\033[24m", 0)
+                    self.under = False; self.hold("\033]8;;\a\033[24m", 0)
                     if not LINKS_CLICK and m.group(1) != m.group(2):       # this terminal can't open them: show where it goes
                         for x in f" ({m.group(2)})": self.char(x)
                 else:
@@ -4764,7 +4764,8 @@ def menu(rows, at=0, hint="↑↓ to move · enter to pick · esc to cancel"):
         for i, (label, detail) in list(enumerate(rows))[top:top + shown - 1]:
             if len(label) > w - 6: label = label[:max(1, w - 7)] + "…"      # a wrapped row breaks the redraw
             room = max(0, w - len(label) - 6)
-            tail = f"  {DIM}{detail[:room]}{R}" if detail and room > 8 else ""
+            if detail and len(detail) > room: detail = detail[:max(1, room - 1)].rstrip() + "…"
+            tail = f"  {DIM}{detail}{R}" if detail and room > 8 else ""
             out += f"\r\033[K  {GOLD}❯ {BOLD}{label}{R}{tail}\n" if i == at else f"\r\033[K    {label}{tail}\n"
         more = f" · {at + 1} of {len(rows)}" if len(rows) > shown - 1 else ""
         tip = hint.replace("enter to pick", f"enter or 1-{len(rows)} to pick") if 1 < len(rows) <= 9 else hint
@@ -4928,6 +4929,11 @@ def git_branch():
         _branch = (here, time.time(), f"⎇ {name}" if name and name != "HEAD" else "")
     return _branch[2]
 
+def skill_commands():
+    """Every skill as a slash command: /landing-page make one for my bakery. Built-in and your own commands win a clash."""
+    taken = {n for n, _ in COMMANDS} | set(custom_commands())
+    return {"/" + n: d for n, d, _ in list_skills() if "/" + n not in taken and re.fullmatch(r"[a-z0-9][a-z0-9-]*", n)}
+
 def custom_commands():
     """Your own slash commands: a .md file in ~/.bxzex-ai/commands (or .bxzex/commands in a project) is a prompt, run with /its-name."""
     found = {}
@@ -4966,6 +4972,7 @@ def offers(text, pos):
     Returns (kind, where the word starts, [(what goes in, a note about it)])."""
     if text.startswith("/") and not re.search(r"\s", text):
         hits = [(n, d) for n, d in COMMANDS + [(n, "your command") for n in custom_commands()] if n.startswith(text)]
+        if len(text) > 1: hits += [(n, "skill · " + d) for n, d in skill_commands().items() if n.startswith(text)]
         order = " ".join(names for _, names in HELP_GROUPS).split()             # in the order /help lists them
         return "command", 0, sorted(hits, key=lambda h: (h[0] != text, order.index(h[0]) if h[0] in order else 99))
     start = max(text.rfind(" ", 0, pos), text.rfind("\n", 0, pos)) + 1
@@ -5389,11 +5396,14 @@ def rewind():
     else: print(f"{GOLD}●{R} {BOLD}Went back{R} {DIM}· {'files put back · ' if put_back else ''}your message is in the box: change it and press Enter{R}")
     save_chat()
 
-def turn(text):
+def turn(text, skill=None):
     print()
     hush()
     LAST_TOOLS.clear()
-    history.append(dict(user_message(text), _undo=len(UNDO)))
+    msg = dict(user_message(text), _undo=len(UNDO))
+    if skill:                                        # /skill-name: its instructions ride along for the model only
+        msg["_hint"] = f"\n\n(They ran the {skill} skill for this. Follow it:)\n\n<skill name=\"{skill}\">\n{use_skill(skill)}\n</skill>"
+    history.append(msg)
     try:
         run_turn(history)
         maybe_learn()                                # every few messages, what's new about the user is saved in the background
@@ -5490,6 +5500,10 @@ def command(user):
              "problems: bugs, crashes, security holes, leaked secrets, broken edge cases, missing error handling. Change nothing. List what "
              "you found worst first, each with file:line, what goes wrong and the fix. If it all looks good, say so in one line."
              + (f" Also: {user[7:].strip()}" if user[7:].strip() else "")); return
+    if user.split()[0] in skill_commands():
+        name, _, rest = user.partition(" ")
+        print(f"{TEAL}◆{R} {BOLD}skill{R} {DIM}{name[1:]}{R}")
+        turn(rest.strip() or f"Use the {name[1:]} skill. Ask me what I need if it isn't clear.", skill=name[1:]); return
     if user.split()[0] in custom_commands():
         name, _, rest = user.partition(" ")
         text = read_text(custom_commands()[name], 20000)
@@ -5553,7 +5567,7 @@ def command(user):
         print(f"{TEAL}◆{R} {BOLD}image{R}\n  {DIM}└ {result}{R}")
         return
     if re.fullmatch(r"/[a-z][a-z-]*", user.split()[0]) and not os.path.exists(user.split()[0]):      # a mistyped command is not a message for the model
-        near = difflib.get_close_matches(user.split()[0], [n for n, _ in COMMANDS if n.startswith("/")] + list(custom_commands()), 1, 0.6)
+        near = difflib.get_close_matches(user.split()[0], [n for n, _ in COMMANDS if n.startswith("/")] + list(custom_commands()) + list(skill_commands()), 1, 0.6)
         print(f"{DIM}no command called {user.split()[0]}" + (f" · did you mean {near[0]}?" if near else "") + f" · /help lists them all{R}"); return
     turn(user)
 
