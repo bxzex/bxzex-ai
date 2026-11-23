@@ -50,7 +50,7 @@ def send(text, until, wait=30):
     while time.time() < stop and not until(shown[first:]): time.sleep(0.3)
     return until(shown[first:])
 # every terminal command works from the page: its output comes back as the reply
-print("/fast from the page:", send("/fast", lambda ev: any(e["kind"] == "reply" and "fast mode" in e["body"] for e in ev)))
+print("/fast from the page:", send("/fast", lambda ev: any(e["kind"] == "reply" and "thinking:" in e["body"] for e in ev)))
 print("!shell from the page:", send("!echo shell-from-page", lambda ev: any(e["kind"] == "reply" and "shell-from-page" in e["body"] for e in ev)))
 print("/help from the page:", send("/help", lambda ev: any(e["kind"] == "reply" and "/schedule" in e["body"] for e in ev)))
 print("keyboard-only ones say so:", send("/password", lambda ev: any(e["kind"] == "note" and "keyboard" in e["body"] for e in ev)))

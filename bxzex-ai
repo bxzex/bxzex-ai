@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.1"
+VERSION = "1.18.2"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -447,6 +447,7 @@ def intro():
 
 def banner(fade=False):
     print()
+    if W() < len(re.sub(r"\x1b\[[0-9;]*m", "", logo_rows()[0])) + 3: fade = None    # too narrow for the logo: it would wrap into a mess
     if fade and RAW.isatty():                      # after the intro the logo fades up into its place at the top of the chat
         RAW.write("\033[?25l")
         for i in range(1, 11):
@@ -455,14 +456,16 @@ def banner(fade=False):
             if i == 10: break
             time.sleep(0.035)
         RAW.write("\033[?25h")
-    else:
+    elif fade is not None:
         for row in logo_rows():
             sys.stdout.write("  " + row + "\n"); sys.stdout.flush(); time.sleep(0.02)
     site = link("https://bxzex.com", "bxzex")
     print(f"\n  {BOLD}BXZEX AI{R} {DIM}· uncensored · {'cloud GPU' if REMOTE else 'local'} · private{R}")
     print(f"  {GOLD}{site}{R} {DIM}· © 2026 bxzex · v{VERSION}{R}")
     print(f"  {DIM}{squeeze(os.getcwd().replace(HOME, '~'), W() - 4)}{R}")
-    print(f"\n  {DIM}/help for commands · drop an image to show it · keep typing while it works{R}")
+    hints = ["/help for commands", "drop an image to show it", "keep typing while it works"]
+    while len(hints) > 1 and len(" · ".join(hints)) > W() - 4: hints.pop()     # a narrow window: fewer hints, never one cut in half
+    print(f"\n  {DIM}{' · '.join(hints)}{R}")
 
 def header(label, ramp=None):
     return f"{GOLD}●{R} {BOLD}{label}{R}"
@@ -762,9 +765,11 @@ def finish_escapes(fd, buf):
         buf += os.read(fd, 64).decode("utf-8", "ignore")
     return buf
 
-def read_choice(spots):
+def read_choice(spots, spill=None):
     """Read one keypress, or a mouse click on one of the buttons on the current line.
-    spots maps a key to the (first, last) columns of its button. Other keys, scrolls and clicks are ignored."""
+    spots maps a key to the (first, last) columns of its button. Other keys, scrolls and clicks are ignored.
+    With spill (a list), letters that arrive as part of fast typing are not taken as an answer: someone was writing
+    a note when the question popped up. They go into spill instead, and it waits for a real keypress."""
     if not sys.stdin.isatty(): return ""
     fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
     try:
@@ -793,8 +798,14 @@ def read_choice(spots):
                 if m: buf = buf[m.end():]; continue                # another key's escape sequence: ignored
                 if buf == "\x1b": raise KeyboardInterrupt           # Esc on its own, nothing after it: stop
                 buf = buf[1:]; continue                            # a broken sequence: drop it, never a stop
-            ch, buf = buf[0].lower(), buf[1:]
-            if ch in spots: return ch                              # stray text (the tail of a cut-off sequence) can't answer for you
+            ch, buf = buf[0], buf[1:]
+            if spill and not "".join(spill).endswith(("\r", "\n")) and (ch >= " " or ch in "\r\n\x7f\b"):
+                spill.append(ch); continue                         # they started a note: every key up to Enter is part of it
+            if spill is not None and ch >= " " and (buf or select.select([fd], [], [], 0.25)[0]):
+                text = ch + buf; buf = ""                          # more keys right behind it: that's typing, not an answer
+                while select.select([fd], [], [], 0.6)[0]: text += os.read(fd, 256).decode("utf-8", "ignore")
+                spill.append(ESC_KEY.sub("", text).replace("\x1b", "")); continue
+            if ch.lower() in spots: return ch.lower()              # stray text (the tail of a cut-off sequence) can't answer for you
     finally:
         RAW.write("\033[?1006l\033[?1000l"); RAW.flush()
         while select.select([fd], [], [], 0.05)[0]: os.read(fd, 256)   # the click's release and late scroll events, so they don't land in the note box
@@ -859,6 +870,7 @@ def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
     if tool_wait: tool_wait.stop(); tool_wait = None       # the loader steps aside for the question
     busy = typed.th is not None
     typed.stop()                      # hand the keyboard back for the question
+    half = typed.leftover if busy else ""; spill = []      # a note they were halfway through, put back after
     sys.stdout.write("\033[?25h")
     ping_if_away(f"needs your OK: {what}")
     print(f"{GOLD}?{R} {BOLD}Allow: {what}{R}")
@@ -871,19 +883,34 @@ def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
     if len(shown) > room: print(f"  {DIM}│ … {len(shown) - room} more lines{R}")
     buttons = [("y", " y  yes "), ("n", " n  no ")] + ([] if always_ask else [("a", " a  always, this chat ")]) \
               + ([("f", f" f  always here: {rule_label[:28]} ")] if rule and not always_ask else [])
+    hint = "click or press a key"
+    def width_of(bs): return 5 + sum(len(l) + 2 for _, l in bs)
+    if width_of(buttons) + len(hint) > W() - 1: hint = ""                  # a narrow window: buttons on one row, whole words only
+    if width_of(buttons) > W() - 1:
+        buttons = [(k, {"y": " y  yes ", "n": " n  no ", "a": " a  always "}.get(k, l)) for k, l in buttons]
+    if width_of(buttons) > W() - 1 and rule and not always_ask:
+        room = W() - 1 - width_of(buttons[:-1]) - len(" f  always:  ") - 2
+        buttons[-1] = ("f", f" f  always: {rule_label[:max(0, room)]} " if room >= 6 else " f  always here ")
     line, col, spots = f"  {GOLD}❯{R} ", 5, {}
     for key, label in buttons:
         line += f"\033[7m{label}{R}  "; spots[key] = (col, col + len(label) - 1); col += len(label) + 2
     if always_ask: line += f"{DIM}this kind always asks{R}  "
-    sys.stdout.write(line + f"{DIM}click or press a key{R}  "); sys.stdout.flush()
+    sys.stdout.write(line + (f"{DIM}{hint}{R}  " if hint else "")); sys.stdout.flush()
     try:
-        a = read_choice(spots)
+        a = read_choice(spots, spill if busy else None)
     except EOFError:
         a = "n"
     except KeyboardInterrupt:                         # esc or ctrl-c at the question: stop the whole reply, not just this step
         print(); raise
     finally:
-        if busy: typed.start()
+        if busy:
+            typed.start(); typed.buf = half
+            for ch in "".join(spill):                 # what they typed while it asked joins their note, Enter sends it as usual
+                if ch in "\r\n":
+                    if typed.buf.strip(): typed.notes.append(typed.buf.strip())
+                    typed.buf = ""
+                elif ch in "\x7f\b": typed.buf = typed.buf[:-1]
+                elif ch >= " ": typed.buf += ch
     print(a if a in "ynaf" else "")
     if a == "f" and rule:
         allow_here(rule); print(f"  {DIM}saved: {rule_label} is always allowed in {os.getcwd().replace(HOME, '~')} · /allow clear to undo{R}")
@@ -4108,7 +4135,7 @@ MEMORY = f"{APP_HOME}/memory.md"   # what it has been asked to remember, across 
 ABOUT = f"{APP_HOME}/about.md"     # who the user is, written by them; stays on this computer, empty on a fresh install
 DEFAULT_GUIDE = """# BXZEX AI
 
-You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own computer. Everything stays on this machine.
+You are BXZEX AI, inside the bxzex-ai terminal app on the user's own computer. Your files, chats and memory stay on this computer.
 
 ## What the user can type
 - /v: speak instead of typing. They press Enter when done and their words appear at the prompt.
@@ -4406,9 +4433,12 @@ WORK_WAY = """How you work on real tasks (code, fixes, builds, files, research):
 
 def system_prompt():
     return (
-        f"You are {AI_NAME}, an uncensored assistant made by bxzex (bxzex.com), running locally and "
-        "privately on the user's own computer in the `bxzex-ai` terminal app. If asked what model you are, "
-        f"say you are {AI_NAME}, a local uncensored model. "
+        f"You are {AI_NAME}, an uncensored assistant made by bxzex (bxzex.com). "
+        + ("You run on a private cloud graphics card in the user's own account, driven from the `bxzex-ai` terminal app on their computer: "
+           "your tools act on their computer. Never say you run locally or on their Mac. " if REMOTE else
+           "You run locally and privately on the user's own computer in the `bxzex-ai` terminal app. ")
+        + "If asked what model you are, "
+        f"say you are {AI_NAME}, a private uncensored model. "
         f"Today is {datetime.date.today():%A %B %d, %Y}. This computer runs {system_name()}. "
         f"Working directory: {os.getcwd().replace(HOME, '~')}.\nThis computer: {system_facts()}\n"
         "You can act: web_search and fetch_page for anything current or that you are unsure of; "
@@ -4467,6 +4497,10 @@ def run_tool(call):
         shown = short_path(args["path"]) + (f" · lines {args['lines']}" if args.get("lines") else "")
     elif name == "update_todos": shown = ""                # the list itself is drawn right under it
     else: shown = short_path(" ".join(str(v) for k, v in args.items() if k != "content").replace("\n", " "))
+    if name == "run_shell":                               # "cd <this folder> && ..." says nothing: show the command itself
+        m = re.match(r"""cd +(['"]?)([^'"&;]+?)\1 *(&&|;) *""", str(args.get("command", "")))
+        if m and os.path.realpath(os.path.expanduser(m.group(2))) == os.path.realpath(os.getcwd()):
+            shown = short_path(str(args["command"])[m.end():].replace("\n", " "))
     says = SAYS.get(name) or (MCP[name][0] + " · " + MCP[name][1].replace("_", " ") if name in MCP else name)
     title = (says + " " + " ".join(shown.split())).strip()[:W() - 4]
     print(f"{TEAL}◆{R} {BOLD}{title[:len(says)]}{R}{DIM}{title[len(says):]}{R}")
@@ -4765,9 +4799,9 @@ class Markdown:
                 self.tline = "|"; return
         run = {"*": "stars", "`": "ticks", "#": "hashes"}.get(ch)
         if run == "hashes" and not (self.bol and not self.fence and not self.code): run = None
-        if run == "stars" and (self.fence or self.code): run = None
         for r in ("stars", "ticks", "hashes"):
             if r != run and getattr(self, r): self.resolve(r, ch)
+        if run == "stars" and (self.fence or self.code): run = None      # after the ticks above: **`name`** closes the code first
         if self.skip:
             if ch == "\n":
                 self.flush_word(); self.skip = False; self.bol = self.col0 = True; self.prev = "\n"; self.col = 0; self.hang = 2; self.first = True
@@ -5692,7 +5726,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
-            ("/update", "get the newest version · /update full adds new downloads"), ("/version", "which version is running, and if a newer one is out"), ("/usage", "how much you've used: memory, cloud time and cost, stats · /usage budget 50"), ("/new", "start a new conversation · also /reset and /clear"), ("/cd", "work in another folder · /cd ~/project"), ("/help", "this list"), ("exit", "quit")]
+            ("/update", "get the newest version · /update full adds new downloads"), ("/version", "which version is running, and if a newer one is out"), ("/usage", "how much you've used: memory, cloud time and cost, stats · /usage budget 50"), ("/status", "version, model, folder, mode and thinking at a glance"), ("/new", "start a new conversation · also /reset and /clear"), ("/cd", "work in another folder · /cd ~/project"), ("/help", "this list"), ("exit", "quit")]
 PAST_FILE = f"{APP_HOME}/input_history"
 try:
     with open(PAST_FILE, errors="replace") as _f: past = [json.loads(l) for l in _f.read().splitlines()[-300:] if l.startswith('"')]
@@ -5744,6 +5778,7 @@ def status_text(buf, working=False, offer=""):
     branch = git_branch(); here = os.getcwd().replace(HOME, "~"); extra = (" · " + branch if branch else "") + running_bits()
     head = lead if badge else f"  bxzex-ai v{VERSION}{' · lite' if LITE else ''} · {THEME} · thinking {THINK_NAME[THINK]} · "
     tail = " · /help" if badge else " · shift+tab for modes · /help"
+    if W() - len(re.sub(r"\x1b\[[0-9;]*m", "", head)) - len(extra) < 12: extra = running_bits()   # narrow: the branch goes rather than be cut
     room = W() - len(re.sub(r"\x1b\[[0-9;]*m", "", head)) - len(extra)        # the folder gives way first, then the hints
     if room - len(tail) >= min(len(here), 24): room -= len(tail)
     else: tail = ""
@@ -6233,7 +6268,7 @@ def show_usage(arg=""):
     if not (sys.stdin.isatty() and RAW.isatty()) or PHONE:
         for name, fn in tabs: print(header(name)); [print(l) for l in fn()]
         return
-    at = 0; fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd); drawn = [0]
+    at = {"status": 1, "stats": 2}.get(arg.strip().lower(), 0); fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd); drawn = [0]
     room = max(8, shutil.get_terminal_size((90, 30)).lines - Box.ROWS - 3)
     def draw():
         w = W()
@@ -6467,6 +6502,7 @@ def command(user):
         set_bridge_password(pw); RAW.write("\033[1A\r\033[K"); print(f"{GOLD}●{R} {BOLD}Password set{R} {DIM}· send it from your phone to unlock · /lock there locks it · /password off removes it{R}"); return
     if user == "/cost": show_cost(); return
     if user == "/usage" or user.startswith("/usage "): show_usage(user[6:]); return
+    if user in ("/status", "/stats"): show_usage(user[1:]); return
     if user == "/doctor": doctor(); return
     if user.split()[0] == "/cloud":
         if setup_cloud(user[6:]): reload_app(note="Now running on " + ("your cloud card" if load_config().get("remote") else "this computer"))
