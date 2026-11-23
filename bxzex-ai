@@ -6,7 +6,7 @@
 Usage:  bxzex-ai            (interactive)
         bxzex-ai "prompt"    (one-shot)
         bxzex-ai -p "prompt" (for scripts and pipes: prints just the answer; piped text is added; --yes lets it act)
-Commands: /v speak instead of typing, /color pick a theme, /fast toggle reasoning,
+Commands: /v speak instead of typing, /color pick a theme, /fast auto, fast or deep thinking,
           /think show reasoning, /memory what it remembers, /skills list skills, /new a new chat, exit/quit.
 Files:  ~/.bxzex-ai/BXZEX.md is its guide (add your own instructions there),
         ~/.bxzex-ai/memory.md is what it has been asked to remember,
@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.17.4"
+VERSION = "1.18.0"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -263,7 +263,29 @@ def flying(el, cols, speed=70):
     return rows
 
 show_think = False
-fast = True   # skip the reasoning pass: answer starts right away instead of after minutes of thinking
+THINK = "auto"   # auto: thinks first on real work (code, fixes, builds, plans) and answers chat straight away; "off" never, "on" always
+turn_think_on = False   # what was decided for the reply being written now
+HARD = re.compile(r"\b(fix|bug|errors?|debug|build|make|create|add|implement|refactor|change|update|rewrite|write|deploy|install|set ?up|"
+                  r"migrat\w*|tests?|optimi[sz]e|why|plan|design|analy[sz]e|compare|research|code|script|app|site|page|function|api|"
+                  r"database|crash\w*|broken|not working|wrong|improve|convert|automate|scrape|figure out|work out|step)\b", re.I)
+
+THINK_NAME = {"auto": "auto", "off": "fast", "on": "deep"}
+
+def wants_thinking(history):
+    """Thinking first makes it much better at real work but slower, so in auto it thinks only when the request is work, not chat.
+    On a laptop it never thinks unless told to: at a few words a second the thinking alone would take minutes."""
+    if THINK != "auto": return THINK == "on"
+    if not REMOTE: return False
+    asked = next((m for m in reversed(history) if m["role"] == "user" and not str(m.get("content", "")).startswith(("By the way", SUMMARY_HEAD))), None)
+    if not asked: return False
+    c = asked.get("content") or ""
+    text = c if isinstance(c, str) else " ".join(p.get("text", "") for p in c if p.get("type") == "text")
+    if not isinstance(c, str) or len(text) > 220 or "```" in text or re.search(r"(^|\s)[@~/][\w./-]{2,}", text): return True
+    return bool(HARD.search(text))
+
+def sampling(think):
+    """The settings the model's makers give for each way of answering: a little looser while thinking, tighter when answering straight away."""
+    return {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0} if think else {"temperature": 0.6, "top_p": 0.8, "top_k": 20, "min_p": 0.0}
 history = []
 
 LOGO = [   # "bxzex" in the TheDraw font Bio Hazard: (characters, one hex color attribute pair per cell)
@@ -1441,8 +1463,8 @@ helper_stop = threading.Event()
 def ask_model(messages, tools):
     """One quiet model call that returns the whole reply at once. Nothing is drawn, so several can run side by side."""
     body = json.dumps({"model": MODEL_ID if awake() else loaded_model(), "messages": [{"role": "system", "content": SYSTEM}] + mend(messages),
-                       "tools": tools, "max_tokens": reply_room(), "temperature": 0.7, "stream": False,
-                       "chat_template_kwargs": {"enable_thinking": not fast}}).encode()
+                       "tools": tools, "max_tokens": reply_room(), "stream": False, **sampling(turn_think_on),
+                       "chat_template_kwargs": {"enable_thinking": turn_think_on}}).encode()
     req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=1800) as r: msg = json.load(r)["choices"][0]["message"]
     return (msg.get("content") or "").strip(), msg.get("tool_calls") or []
@@ -4091,8 +4113,8 @@ You are BXZEX AI, running inside the bxzex-ai terminal app on the user's own com
 ## What the user can type
 - /v: speak instead of typing. They press Enter when done and their words appear at the prompt.
 - /color: pick a color theme (blue, red, orange, gold, green, cyan, purple, pink, white).
-- /fast: toggle fast mode. On by default: you answer straight away. Off: you think first.
-- /think: show or hide your thinking when fast mode is off.
+- /fast: switch how you think: auto (the default: you think first on real work and answer chat straight away), fast (never think first) or deep (always think first).
+- /think: show or hide your thinking.
 - /memory: show what you remember. /memory clear wipes it.
 - /history: list earlier chats and continue one. /resume: continue the most recent.
 - /skills: list your skills.
@@ -4372,6 +4394,16 @@ def system_facts():
         pass
     FACTS.append(". ".join(bits) + "."); return FACTS[0]
 
+WORK_WAY = """How you work on real tasks (code, fixes, builds, files, research):
+- Look before you act. Read the files involved and search the code (search_files, list_files) before changing anything. Never edit a file you have not read in this chat. Never guess a path, a function name, a command flag or how an API works: look it up in the code, the docs or with --help.
+- Find the real cause. When something fails, read the whole error, find why it happens and fix that. Never retry the same thing unchanged, and never hide an error to make it go away.
+- Make the change that was asked, in the style the project already uses. Don't rewrite or "improve" things nobody asked about.
+- Check your work. After a change, run it: the tests, the build, the script, the page or the command that shows the result, and read the output. If it fails, fix it and check again. Never say it's done, fixed or working unless you saw it work. If you could not check, say exactly that.
+- Keep going until the whole task is done. Don't stop halfway to ask what to do next, unless the choice really is theirs or you are blocked.
+- Use as many tool calls as the task needs: looking is cheap, a wrong guess is expensive. Calls that don't depend on each other go in the same reply.
+- When you finish, say plainly what you changed (file paths), how you checked it and anything still open. Keep it short.
+"""
+
 def system_prompt():
     return (
         f"You are {AI_NAME}, an uncensored assistant made by bxzex (bxzex.com), running locally and "
@@ -4389,8 +4421,10 @@ def system_prompt():
         "(a popup in the way, the wrong window, still loading) and after two misses change approach (keyboard shortcut, menu, direct link, "
         "a command) or ask. Check the result with a screenshot before saying it's done. Load the computer-use skill for this kind of work and "
         "app-testing for building or testing phone, tablet and desktop apps.\n"
-        "Reading tool output is slow for you, so use as few calls as the task needs and rely on search "
-        "snippets before fetching whole pages. Keep answers short and plain.\n"
+        + (WORK_WAY if REMOTE else
+           "Reading tool output is slow for you, so use as few calls as the task needs and rely on search "
+           "snippets before fetching whole pages. Look at a file before you change it, and check your change worked. Keep answers short and plain.\n")
+        +
         "Never assume where the user lives, what their business is or any other personal detail in your work. "
         "Use such details only when they bring them up in this conversation or ask you to. What you remember "
         "about them is background, not a brief. You do not know their name unless they tell you"
@@ -5060,9 +5094,9 @@ def stream(messages, label="Reading"):
     if not model:
         print(f"{DIM}the model server isn't running. Relaunch bxzex-ai{R}"); return "", []
     body = json.dumps({"model": model, "messages": [{"role": "system", "content": SYSTEM}] + mend(messages),
-                       "tools": TOOLS, "max_tokens": reply_room(), "temperature": 0.7, "stream": True,
+                       "tools": TOOLS, "max_tokens": reply_room(), "stream": True, **sampling(turn_think_on),
                        "stream_options": {"include_usage": True},
-                       "chat_template_kwargs": {"enable_thinking": not fast}}).encode()
+                       "chat_template_kwargs": {"enable_thinking": turn_think_on}}).encode()
     req = urllib.request.Request(f"{HOST}/v1/chat/completions", body, {"Content-Type":"application/json"})
     sys.stdout.write("\033[?25l")  # hide cursor while generating
     wait = Waiting(label)
@@ -5165,7 +5199,8 @@ def run_turn(history):
     if not ensure_server(): return      # e.g. still reloading after an image
     typed.start()
     try:
-        global turn_tok, turn_think
+        global turn_tok, turn_think, turn_think_on
+        turn_think_on = wants_thinking(history)
         turn_tok = 0; turn_think = 0.0; began = time.time(); retried = made_room = False; recent = []
         label = "Reading"
         for _ in range(MAX_STEPS):
@@ -5642,7 +5677,7 @@ signal.signal(signal.SIGWINCH, _on_resize)
 COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"), ("/skills", "list skills"),
             ("/memory", "what it remembers · /memory clear"), ("/image", "make a picture · /image hd portrait a red fox"), ("/btw", "add a note, no reply"),
             ("/history", "past chats, pick one to continue"), ("/resume", "continue the last chat"),
-            ("/fast", "toggle answering without thinking first"), ("/think", "show or hide its thinking"),
+            ("/fast", "switch thinking: auto, fast or deep"), ("/think", "show or hide its thinking"),
             ("/device", "run on the graphics card or the processor · /device cpu"),
             ("/plan", "plan mode: it only looks and plans · also shift-tab"), ("/todos", "its to-do list"),
             ("/jobs", "commands running in the background"), ("/context", "how full the chat is"),
@@ -5707,7 +5742,7 @@ def status_text(buf, working=False, offer=""):
     if working: return lead + "esc to stop · type and press Enter to add a note" + running_bits()
 
     branch = git_branch(); here = os.getcwd().replace(HOME, "~"); extra = (" · " + branch if branch else "") + running_bits()
-    head = lead if badge else f"  bxzex-ai v{VERSION}{' · lite' if LITE else ''} · {THEME} · fast {'on' if fast else 'off'} · "
+    head = lead if badge else f"  bxzex-ai v{VERSION}{' · lite' if LITE else ''} · {THEME} · thinking {THINK_NAME[THINK]} · "
     tail = " · /help" if badge else " · shift+tab for modes · /help"
     room = W() - len(re.sub(r"\x1b\[[0-9;]*m", "", head)) - len(extra)        # the folder gives way first, then the hints
     if room - len(tail) >= min(len(here), 24): room -= len(tail)
@@ -6171,7 +6206,7 @@ def status_tab():
     disk = installed_version()
     rows = [("Version", f"v{VERSION}" + (f" · v{disk} installed, /update switches" if vtuple(disk) > vtuple(VERSION) else "")),
             ("Model", f"{AI_NAME} · {where}"), ("Folder", os.getcwd().replace(HOME, "~")),
-            ("Mode", "plan mode" if PLAN else "always allow" if allow_all else "asks first"), ("Thinking", "off (fast)" if fast else "on"),
+            ("Mode", "plan mode" if PLAN else "always allow" if allow_all else "asks first"), ("Thinking", THINK_NAME[THINK] + (" · on for this reply" if turn_think_on and THINK == "auto" else "")),
             ("Theme", THEME), ("Skills", f"{len(list_skills())} · /skills"), ("Apps", f"{len({v[0] for v in MCP.values()})} connected · /mcp"),
             ("Memory", f"{len([l for l in read_text(MEMORY, 10**6).splitlines() if l.strip()]) if os.path.exists(MEMORY) else 0} things · /memory"),
             ("Computer", system_facts()[:W() - 18])]
@@ -6301,7 +6336,7 @@ def reload_app(typed_text="", note=""):
         except termios.error: pass
     sys.stdout.flush()
     stop_jobs()
-    state = {"chat": chat_file or "", "fast": fast, "think": show_think, "allow": allow_all, "typed": typed_text, "plan": PLAN, "note": note}
+    state = {"chat": chat_file or "", "thinking": THINK, "think": show_think, "allow": allow_all, "typed": typed_text, "plan": PLAN, "note": note}
     try:
         os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)], dict(os.environ, BXZEX_RELOAD=json.dumps(state)))
     except OSError:
@@ -6384,7 +6419,7 @@ def own_command(cmd):
 def command(user):
     """One line from the keyboard or from the remote: a /command, a !shell line, or something to work on.
     Returns "quit" when it asks to leave."""
-    global fast, show_think, speak, allow_all, history, chat_file, PLAN, spoken
+    global THINK, show_think, speak, allow_all, history, chat_file, PLAN, spoken
     if not user: return
     if user in ("exit","quit"): return "quit"
     if user in ("/help", "/", "/?"): show_help(); return
@@ -6398,7 +6433,9 @@ def command(user):
     if user.startswith("/color"): choose_color(user[6:]); return
     if user.startswith("/device"): choose_device(user[7:]); return
     if user=="/fast":
-        fast=not fast; print(f"{DIM}fast mode {'on · no reasoning' if fast else 'off · reasons before answering'}{R}"); return
+        THINK = {"auto": "off", "off": "on", "on": "auto"}[THINK]
+        print(f"{DIM}" + {"auto": "thinking: auto · thinks first on real work, answers chat straight away",
+                          "off": "thinking: fast · never thinks first", "on": "thinking: deep · always thinks first"}[THINK] + f"{R}"); return
     if user=="/think":
         show_think=not show_think; print(f"{DIM}reasoning {'on' if show_think else 'off'}{R}"); return
     if user=="/undo": undo(); return
@@ -6615,7 +6652,8 @@ up = ensure_server(block=False)     # never waited for here: the model gets read
 if not up: sys.exit(1)
 if not RELOAD: intro()
 if RELOAD:
-    fast, show_think, allow_all, PLAN = bool(RELOAD.get("fast", fast)), bool(RELOAD.get("think")), bool(RELOAD.get("allow")), bool(RELOAD.get("plan"))
+    THINK = RELOAD.get("thinking") if RELOAD.get("thinking") in ("auto", "on", "off") else THINK
+    show_think, allow_all, PLAN = bool(RELOAD.get("think")), bool(RELOAD.get("allow")), bool(RELOAD.get("plan"))
     if RELOAD.get("note"): print(f"{GOLD}●{R} {BOLD}{RELOAD['note']}{R} {DIM}· carrying on where you were{R}")
     else:
         print(f"{GOLD}●{R} {BOLD}Updated to v{VERSION}{R} {DIM}· carrying on where you were{R}")
