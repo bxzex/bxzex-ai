@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.3"
+VERSION = "1.18.4"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -5306,6 +5306,7 @@ def run_turn(history):
             else:
                 history.append({"role": "assistant", "content": text})
             notes = typed.drain()
+            if notes: box.draw(typed.buf, len(typed.buf))    # the queue line clears: it has them now
             for n in [n for n in notes if re.fullmatch(r"/[a-z][a-z-]*( .*)?", n.strip())]:
                 notes.remove(n); LATER.append(n.strip())
                 print(f"{DIM}  {n.strip()} runs when this reply finishes{R}")
@@ -5802,7 +5803,15 @@ def status_text(buf, working=False, offer=""):
         if hits: return "  " + "   ".join(hits)
     if update_note: return f"  {R}{GOLD}{update_note}{R}{DIM}"
     badge = mode_badge(); lead = "  " + (badge + f"{DIM} · " if badge else "")
-    if working: return lead + "esc to stop · type and press Enter to add a note" + running_bits()
+    if working:
+        waiting = list(typed.notes) + list(LATER)                 # sent while it works: shown so nothing seems to vanish
+        if waiting:
+            first = " ".join(waiting[0].split())
+            more = f" (+{len(waiting) - 1} more)" if len(waiting) > 1 else ""
+            room = max(10, W() - 40 - len(more))
+            return (f"  {R}{GOLD}⏎ queued{more}:{R}{DIM} {first[:room] + ('…' if len(first) > room else '')}"
+                    " · it gets this at its next step · esc to stop")
+        return lead + "esc to stop · type and press Enter to add a note" + running_bits()
 
     branch = git_branch(); here = os.getcwd().replace(HOME, "~"); extra = (" · " + branch if branch else "") + running_bits()
     head = lead if badge else f"  bxzex-ai v{VERSION}{' · lite' if LITE else ''} · {THEME} · thinking {THINK_NAME[THINK]} · "
