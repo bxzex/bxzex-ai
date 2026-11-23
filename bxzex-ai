@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.17.3"
+VERSION = "1.17.4"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -5823,6 +5823,15 @@ def offers(text, pos):
     if len(hits) == 1 and hits[0][0] == word: return "", 0, []                    # already typed in full
     return "file", start, sorted(hits, key=lambda h: not h[0].endswith("/"))
 
+def accent_c(): return c(T[4] if T[4] != 231 else T[3])
+
+def lit_command(line):
+    """The first row of the box, with a /command at its start in your color once it names a real command or skill."""
+    m = re.match(r"/[a-z0-9:_-]+", line)
+    if not m or not any(m.group(0) == n for n, _ in COMMANDS) and m.group(0) not in custom_commands() and m.group(0) not in skill_commands():
+        return show_chips(line)
+    return f"{accent_c()}{m.group(0)}{R}" + show_chips(line[m.end():])
+
 class Box:
     """Keeps the input box on the last four rows. Everything else scrolls in the area above it,
     so the box stays put while a reply streams."""
@@ -5855,7 +5864,7 @@ class Box:
         start = max(0, pos - room)
         st = fit_ansi(status_text(text, working), w)
         rule = f"{DIM}{'─' * w}{R}"
-        s = (f"\033[{top};1H\033[J{rule}\033[{top + 1};1H{GOLD}❯{R} {show_chips(text[start:start + room]).replace(chr(10), f'{DIM}↵{R}')}"
+        s = (f"\033[{top};1H\033[J{rule}\033[{top + 1};1H{GOLD}❯{R} {(lit_command if start == 0 else show_chips)(text[start:start + room]).replace(chr(10), f'{DIM}↵{R}')}"
              f"\033[{top + 2};1H{rule}\033[{top + 3};1H{DIM}{st}{R}")
         return s, 3 + pos - start
     def draw(self, text="", pos=0, working=True):
@@ -5893,21 +5902,21 @@ class Box:
         def lit(s, base, find):
             """The typed letters stand out wherever they appear, the rest keeps the row's color."""
             at = s.lower().find(find) if len(find) >= 2 else -1
-            return s if at < 0 else f"{s[:at]}{BOLD}{c(231)}{s[at:at + len(find)]}{R}{base}{s[at + len(find):]}"
-        accent = c(T[4] if T[4] != 231 else T[3])
+            return s if at < 0 else f"{s[:at]}{BOLD}{s[at:at + len(find)]}{R}{base}{s[at + len(find):]}"
+        accent = accent_c()
         for k in range(listed):
             n, d = offer[a + k]; on = a + k == sel
             shown_n = n if len(n) <= name_w else n[:name_w - 1] + "…"
             room = max(0, w - name_w - 8)
             d = d if len(d) <= room else d[:max(0, room - 1)].rstrip() + "…"
-            if on: line = f"{accent}{BOLD}❯ {R}{accent}{BOLD}{lit(shown_n, accent + BOLD, q)}{' ' * (name_w - len(shown_n))}{R}    {accent}{lit(d, accent, q)}"
+            if on: line = f"{accent}❯ {lit(shown_n, accent, q)}{' ' * (name_w - len(shown_n))}    {lit(d, accent, q)}"
             else:  line = f"  {lit(shown_n, '', q)}{' ' * (name_w - len(shown_n))}    {DIM}{lit(d, DIM, q)}"
             out.append(f"\033[{base - listed + k};1H{fit_ansi(line, w)}{R}")
         rule = f"{DIM}{'─' * w}{R}"
         more = f"{DIM} {a + listed} of {len(offer)} {R}" if listed and len(offer) > listed else ""
         out.append(f"\033[{base};1H\033[J{rule}" + (f"\033[{base};{max(1, w - 14)}H{more}" if more else ""))
         for k, line in enumerate(shown):
-            out.append(f"\033[{base + 1 + k};1H" + (f"{GOLD}❯{R} " if self.first + k == 0 else "  ") + show_chips(line))
+            out.append(f"\033[{base + 1 + k};1H" + (f"{GOLD}❯{R} " + lit_command(line) if self.first + k == 0 else "  " + show_chips(line)))
         st = fit_ansi(status_text(text, False, {"command": "run", "file": "pick"}.get(kind, "") if listed else ""), w)
         out.append(f"\033[{top + 2};1H{rule}\033[{top + 3};1H{DIM}{st}{R}")
         RAW.write("".join(out) + f"\033[{base + 1 + row - self.first};{3 + col}H"); RAW.flush()
