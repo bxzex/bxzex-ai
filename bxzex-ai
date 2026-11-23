@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.2"
+VERSION = "1.18.3"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -267,7 +267,8 @@ THINK = "auto"   # auto: thinks first on real work (code, fixes, builds, plans) 
 turn_think_on = False   # what was decided for the reply being written now
 HARD = re.compile(r"\b(fix|bug|errors?|debug|build|make|create|add|implement|refactor|change|update|rewrite|write|deploy|install|set ?up|"
                   r"migrat\w*|tests?|optimi[sz]e|why|plan|design|analy[sz]e|compare|research|code|script|app|site|page|function|api|"
-                  r"database|crash\w*|broken|not working|wrong|improve|convert|automate|scrape|figure out|work out|step)\b", re.I)
+                  r"database|crash\w*|broken|not working|wrong|improve|convert|automate|scrape|figure out|work out)\b", re.I)
+CHAT_WRITING = re.compile(r"\b(story|poem|joke|song|lyrics|rap|haiku|caption|tweet|bio|toast|limerick|riddle|pick ?up line|roast)s?\b", re.I)
 
 THINK_NAME = {"auto": "auto", "off": "fast", "on": "deep"}
 
@@ -281,6 +282,7 @@ def wants_thinking(history):
     c = asked.get("content") or ""
     text = c if isinstance(c, str) else " ".join(p.get("text", "") for p in c if p.get("type") == "text")
     if not isinstance(c, str) or len(text) > 220 or "```" in text or re.search(r"(^|\s)[@~/][\w./-]{2,}", text): return True
+    if CHAT_WRITING.search(text) and not re.search(r"\b(code|script|file|bug|fix|app|site|function|test)\b", text, re.I): return False   # creative writing: answer straight away
     return bool(HARD.search(text))
 
 def sampling(think):
@@ -921,7 +923,7 @@ def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
 
 # Commands that only look at things. These run without asking, alone or chained with pipes, && and ;
 LOOKS = {"ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "find", "file", "stat", "du", "df", "which",
-         "whoami", "echo", "tree", "uname", "uniq", "cut", "diff", "basename", "dirname", "realpath", "nl", "sort", "column", "type"}
+         "whoami", "echo", "tree", "uname", "uniq", "cut", "diff", "basename", "dirname", "realpath", "nl", "sort", "column", "type", "cd", "sed"}
 GIT_LOOKS = {"status", "log", "diff", "show", "ls-files", "blame", "rev-parse", "shortlog"}
 
 def only_looks(command):
@@ -936,6 +938,7 @@ def only_looks(command):
         if name not in LOOKS and name != "git": return False
         if name == "git" and (len(words) < 2 or words[1] not in GIT_LOOKS): return False
         if any(w.startswith(("--output", "--pre", "--exec", "-exec", "-ok", "-delete", "-fprint", "-fls")) for w in words): return False
+        if name == "sed" and ("-n" not in words or any(w.startswith(("-i", "--in-place")) for w in words) or re.search(r"\bw\s", part)): return False
         if name in ("sort", "tree") and any(w == "-o" or w.startswith("-o") and name == "sort" for w in words[1:]): return False
     return True
 
@@ -1094,16 +1097,25 @@ def edit_file(path, old_text, new_text, replace_all="false"):
     return f"edited {path}: {n} change{'' if n == 1 else 's'}{note}" + check_file(path, new)
 
 def undo(arg=""):
-    """Put back the file the last write or edit changed."""
+    """Put back every file the last reply wrote or edited, so nothing is left half changed."""
     if not UNDO: print(f"{DIM}nothing to undo in this session{R}"); return
-    path, old = UNDO.pop()
-    try:
-        if old is None: os.remove(path); print(f"{GOLD}●{R} removed {path.replace(HOME, '~')} {DIM}· it didn't exist before{R}")
-        else:
-            with open(path, "w") as f: f.write(old)
-            print(f"{GOLD}●{R} put back {path.replace(HOME, '~')} {DIM}· as it was before the last change{R}")
-        history.append({"role": "user", "content": f"(I undid your last change to {path}. It is back to how it was before.)"})
-    except OSError as e: print(f"{DIM}couldn't undo: {e}{R}")
+    marks = [m.get("_undo") for m in history if m.get("role") == "user" and isinstance(m.get("_undo"), int) and m["_undo"] < len(UNDO)]
+    mark = max(marks) if marks else len(UNDO) - 1                       # where the last reply's changes start
+    done, paths = [], []
+    while len(UNDO) > mark:
+        path, old = UNDO.pop()
+        try:
+            if old is None:
+                if os.path.exists(path): os.remove(path)
+            else:
+                with open(path, "w") as f: f.write(old)
+            if path not in paths: paths.append(path)
+        except OSError as e: print(f"{DIM}couldn't put back {path.replace(HOME, '~')}: {e}{R}")
+    for path in paths:
+        print(f"{GOLD}●{R} put back {short_path(path)} {DIM}· {'removed, it did not exist before' if not os.path.exists(path) else 'as it was before your last message'}{R}")
+    if paths:
+        history.append({"role": "user", "content": "(I undid all your file changes from the last reply: " + ", ".join(paths)
+                        + " are back to how they were before it. Leave them like that: don't redo the change unless I ask.)"})
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".next", "dist", "build", ".cache", ".DS_Store"}
 
@@ -2957,10 +2969,22 @@ def osa(script, *args, timeout=30):
 
 SAFARI_TAB = '''on tabRef(w, t)
   tell application "Safari"
-    if w is 0 then return current tab of front window
+    if w is 0 then
+      repeat with x in windows -- the front one can be a hidden window with no tabs: the first real one
+        if visible of x and (count of tabs of x) > 0 then return current tab of x
+      end repeat
+      return current tab of front window
+    end if
     return tab t of window w
   end tell
 end tabRef'''
+
+SAFARI_WINDOW_ID = '''tell application "Safari"
+  repeat with x in windows
+    if visible of x and (count of tabs of x) > 0 then return id of x
+  end repeat
+  return id of front window
+end tell'''
 
 SAFARI_OPENED = set()     # pages it opened itself this session: JavaScript in any other tab always asks
 
@@ -3175,8 +3199,21 @@ end tell''') or "Safari has no open tabs"
             if not str(url).strip(): return "error: give the url to open"
             osa('''on run argv
   tell application "Safari"
-    if (count of windows) is 0 then make new document
-    tell front window to set current tab to (make new tab with properties {URL:item 1 of argv})
+    set target to missing value
+    repeat with w in windows -- the front one can be a hidden window with no tabs: use the first real one
+      if visible of w and (count of tabs of w) > 0 then
+        set target to w
+        exit repeat
+      end if
+    end repeat
+    if target is missing value then
+      make new document with properties {URL:item 1 of argv}
+    else
+      tell target
+        make new tab at end of tabs with properties {URL:item 1 of argv}
+        set current tab to last tab
+      end tell
+    end if
   end tell
 end run''', str(url).strip())
             SAFARI_OPENED.add(str(url).strip())
@@ -3187,7 +3224,7 @@ end run''', str(url).strip())
         if action == "read":
             return clip(safari_js("document.title + '\\n' + location.href + '\\n\\n' + document.body.innerText", w, t), PAGE_CHARS)
         if action == "screenshot":
-            wid = osa('tell application "Safari" to return id of front window')
+            wid = osa(SAFARI_WINDOW_ID)
             shot = os.path.join(tempfile.gettempdir(), f"bxzex-safari-{int(time.time() * 1000)}.png")
             r = subprocess.run(["screencapture", "-x", "-o", f"-l{wid}", shot], capture_output=True, text=True, timeout=20)
             if r.returncode != 0 or not os.path.exists(shot) or os.path.getsize(shot) < 1000:
@@ -4100,7 +4137,8 @@ TOOLS = [
          key="for key: the key or combination, default none", app="for open, focus or look: the app's name, default the front app",
          seconds="for wait, default 2"),
 ] + ([
-    tool("safari", "Use the user's own Safari on this Mac, signed in as them, like a person would. The loop: look (a numbered list of "
+    tool("safari", "Use the user's own Safari on this Mac, signed in as them, like a person would. Only when they ask for their browser or "
+         "the task needs their logged-in accounts: to read or work a public website use fetch_page, or the agent-browser skill. The loop: look (a numbered list of "
          "everything you can click or type in, an open popup listed first) > one action on an item by its number > read what changed, which "
          "every action reports. Never write your own osascript or JavaScript to click: use these. If an action changed nothing, do not repeat "
          "it: screenshot to see why, close what's in the way (key Escape), or use realclick/realkey. Dropdowns: select with the option's "
@@ -4138,33 +4176,10 @@ DEFAULT_GUIDE = """# BXZEX AI
 You are BXZEX AI, inside the bxzex-ai terminal app on the user's own computer. Your files, chats and memory stay on this computer.
 
 ## What the user can type
-- /v: speak instead of typing. They press Enter when done and their words appear at the prompt.
-- /color: pick a color theme (blue, red, orange, gold, green, cyan, purple, pink, white).
-- /fast: switch how you think: auto (the default: you think first on real work and answer chat straight away), fast (never think first) or deep (always think first).
-- /think: show or hide your thinking.
-- /memory: show what you remember. /memory clear wipes it.
-- /history: list earlier chats and continue one. /resume: continue the most recent.
-- /skills: list your skills.
-- /device: show whether you run on the graphics card (GPU) or the processor (CPU). /device cpu or /device gpu switches.
-- /update: get the newest version of the app. It also checks by itself each time it starts.
-- /image <description>: make a picture straight from their words, without you. If they ask you for a picture in conversation, use generate_image.
-- /plan or shift-tab: plan mode. You only look around and write a plan; changes are blocked until they turn it off.
-- /apps: browse the apps you can connect; /apps connected shows theirs.
-- /rewind or esc esc: go back to an earlier message and change it. ctrl-o: full tool output. ctrl-v: paste a screenshot.
-- /say: you read replies out loud.
-- /mcp: their connected tool servers, like Composio for their apps (Gmail, Calendar, Slack, GitHub...).
-- /todos: your to-do list. /jobs: commands you left running. /context: how full the chat is.
-- Their own commands: a prompt saved as ~/.bxzex-ai/commands/name.md runs with /name.
-- /undo: put back the last file you wrote or edited.
-- /compact: fold the conversation so far into a summary, to make room.
-- /init: you look around this folder and write a BXZEX.md about it, which you read in every later chat here.
-- /allow: turn "always allow" on or off for this conversation.
-- !<command>: they run a command themselves; you see its output.
-- @<file>: they attach a file; its text is in their message.
-- /new (also /reset or /clear): start a new conversation. /cd folder: work in another folder. exit: quit.
-- Dragging an image file into the window lets you see it.
-- Esc or Ctrl-C stops your reply.
-- They can type while you are working and press Enter; it reaches you as a "By the way" note. /btw <note> adds one without asking for a reply.
+Commands (tell them the right one when they ask how to do something; /help shows them all): /new /history /resume /rewind (or esc esc) /undo /compact /context /plan (or shift-tab) /allow /fast (thinking: auto, fast, deep) /think (show thinking) /memory /skills /todos /jobs /mcp /apps /usage /status /cd /color /v (voice) /say (read aloud) /image /device /cloud /update /init (writes BXZEX.md for this folder) /export /version.
+- !<command>: they run a command themselves and you see its output. @<file>: attaches a file. Dragging or pasting an image lets you see it.
+- Their own commands: ~/.bxzex-ai/commands/name.md runs with /name. Every skill also runs as /skill-name.
+- Esc or Ctrl-C stops you. Typing while you work and pressing Enter reaches you as a "By the way" note.
 
 ## What you can do
 - web_search and fetch_page: look things up online.
@@ -4228,7 +4243,9 @@ def learn(msgs):
                + "\n".join(talk) + "\n\nList NEW lasting facts about the user that this chat shows and that are not already known: "
                "who they are, their work, projects, goals, plans, people in their life, tools, likes and dislikes, how they want things done. "
                "Only facts about the user, stated or clearly shown by them, not guesses and not things about the topic. Skip temporary "
-               "situations and one-off events (a deadline today, a mood, something that happened once): keep what will still be true next month. One short sentence "
+               "situations and one-off events (a deadline today, a mood, something that happened once): keep what will still be true next month. "
+               "Never save how they used this app in this chat (its commands, undo, plan mode, helpers, what they asked it to do once): "
+               "that is the task, not who they are. One short sentence "
                "each, on its own line starting with '- '. At most 4. If there is nothing new and lasting, reply with NONE.")
         body = json.dumps({"model": MODEL_ID or loaded_model(), "messages": [{"role": "user", "content": ask}], "max_tokens": 250,
                            "temperature": 0.2, "chat_template_kwargs": {"enable_thinking": False}}).encode()
@@ -4369,8 +4386,7 @@ def refresh_system():
     skills = list_skills()
     if skills:
         parts.append("## Skills\nBefore starting a task that matches one of these, call use_skill with its name "
-                     "and follow what it says:\n" + ("\n".join(f"- {n}: {' '.join(d.split(':')[0].split()[:9])}" for n, d, _ in skills) if REMOTE
-                                                     else ", ".join(n for n, _, _ in skills)))   # on a laptop just the names: every prompt token costs load time
+                     "and follow what it says:\n" + ", ".join(n for n, _, _ in skills))   # just the names: each message also names the skills that fit it (skill_hint)
     me = read_text(ABOUT, 10**6)[:16000]           # the start of it matters most: who they are comes first
     if me: parts.append("## About the user (they wrote this for you: it is true, use it)\n" + me)
     notes = read_text(MEMORY, 8000 if REMOTE else 3000)
@@ -4427,6 +4443,8 @@ WORK_WAY = """How you work on real tasks (code, fixes, builds, files, research):
 - Make the change that was asked, in the style the project already uses. Don't rewrite or "improve" things nobody asked about.
 - Check your work. After a change, run it: the tests, the build, the script, the page or the command that shows the result, and read the output. If it fails, fix it and check again. Never say it's done, fixed or working unless you saw it work. If you could not check, say exactly that.
 - Keep going until the whole task is done. Don't stop halfway to ask what to do next, unless the choice really is theirs or you are blocked.
+- Install packages only into the project's own environment (its .venv, package.json, uv or requirements). Never install globally (sudo, pip outside a venv, npm -g, brew) unless they ask. If a tool is missing and the project has no environment, ask first.
+- Stay inside the project folder. Don't search their whole computer or home folder unless they ask; if something you expected is missing, say so and ask.
 - Use as many tool calls as the task needs: looking is cheap, a wrong guess is expensive. Calls that don't depend on each other go in the same reply.
 - When you finish, say plainly what you changed (file paths), how you checked it and anything still open. Keep it short.
 """
@@ -4445,7 +4463,11 @@ def system_prompt():
         "list_files, search_files and read_file to look around; edit_file to change part of a file and write_file only for "
         "new files or full rewrites; run_shell for everything else (background true for servers). For work with 3 or more steps, keep a "
         "list with update_todos and tick steps off as you go. Ask with ask_user only when a choice is really theirs. When a task needs action, do it "
-        "with the tools instead of telling them how. If no tool is needed, just answer.\n"
+        "with the tools instead of telling them how. If no tool is needed, just answer. Stories, emails, answers and other writing go "
+        "in the chat, not in a file, unless they ask for a file or it belongs to something you are building.\n"
+        "Websites: to read one use fetch_page; to click, fill forms or test one use the agent-browser skill, which runs its own separate "
+        "browser. Use their own Safari only when they ask for their browser or the task needs their logged-in accounts, and never touch tabs "
+        "you did not open unless they asked.\n"
         "Using the computer (any app, the screen, websites in their browser): see first (desktop look or screenshot, safari look), do one "
         "action, read what changed, which every action reports. If something changed nothing, never repeat it: screenshot to see why "
         "(a popup in the way, the wrong window, still loading) and after two misses change approach (keyboard shortcut, menu, direct link, "
@@ -4484,7 +4506,11 @@ def show_last():
 def short_path(text):
     """Paths on screen as you'd say them: inside this folder from here, elsewhere from ~. What the model sees is unchanged."""
     here = os.getcwd().rstrip(os.sep) + os.sep
-    return str(text).replace(here, "").replace(HOME, "~") if here != os.sep else str(text).replace(HOME, "~")
+    if here == os.sep: return str(text).replace(HOME, "~")
+    text = str(text)
+    for name in sorted({here, os.path.realpath(here) + os.sep, re.sub(r"^/private(?=/)", "", here)}, key=len, reverse=True):   # macOS: /tmp and /private/tmp are one folder; longest first
+        text = text.replace(name, "")
+    return text.replace(HOME, "~")
 
 def run_tool(call):
     fn = call["function"]; name = fn["name"]
@@ -4599,18 +4625,21 @@ not no do does without about over than then so very just also only each every li
 
 def skill_hint(text):
     """Name the skills whose description matches the request, so the right ones get loaded instead of skipped."""
-    words = {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in SKILL_STOP}
-    if len(words) < 3 or text.startswith(("(", "By the way")): return ""
-    skills = [(name, {w for w in re.findall(r"[a-z0-9]+", (name.replace("-", " ") + " " + desc).lower()) if len(w) > 2 and w not in SKILL_STOP})
-              for name, desc, _ in list_skills()]
+    stem = lambda w: w[:-1] if len(w) > 4 and w.endswith("s") and not w.endswith("ss") else w      # houses → house, apps → app
+    words = {stem(w) for w in re.findall(r"[a-z0-9]+", re.sub(r"\S+\.(com|org|net|io|dev|app|ai|co|site)\b\S*", " ", text.lower()))
+             if len(w) > 1 and w not in SKILL_STOP}                                               # web addresses aren't topics
+    if len(words) < 2 or text.startswith(("(", "By the way")): return ""
+    skills = [(name, {stem(w) for w in re.findall(r"[a-z0-9]+", (name.replace("-", " ") + " " + desc).lower()) if len(w) > 1 and w not in SKILL_STOP},
+               {stem(w) for w in name.split("-")}) for name, desc, _ in list_skills()]
     seen = {}
-    for _, keys in skills:
+    for _, keys, _ in skills:
         for w in keys: seen[w] = seen.get(w, 0) + 1
     scored = []
-    for name, keys in skills:          # a word few skills use (pwa, remotion, stripe) says more than a common one (web, app)
-        score = sum(2 if seen[w] <= 2 else 1 for w in words & keys) + 2 * len(words & set(name.split("-")))
-        if score >= 2: scored.append((score, name))
-    best = [n for _, n in sorted(scored, reverse=True)[:4]]
+    for name, keys, parts in skills:   # a word few skills use (pwa, remotion, stripe) says more than a common one (web, app)
+        score = sum(3 if seen[w] <= 2 else 2 if seen[w] <= 6 else 1 for w in words & keys) + 2 * len(words & parts)
+        if score >= 3: scored.append((score, name))
+    scored.sort(reverse=True)
+    best = [n for sc, n in scored[:4] if sc * 2 >= scored[0][0]]          # drop the ones far behind the best match
     return f"\n\n(Skills that may fit this: {', '.join(best)}. Load the ones that really do before you start.)" if best else ""
 
 def user_message(text):
@@ -5056,7 +5085,7 @@ def fold(history, force=False, everything=False):
     if estimate(history) <= budget: return False
     users = [i for i, m in enumerate(history) if m["role"] == "user"]
     cut = users[-1] if users else 0                   # the current request and everything after it always stays
-    for i in reversed(users[:-1]):                    # plus as many earlier exchanges as fit in a tenth of the room
+    for i in reversed(users[:-1] if not everything else []):   # plus as many earlier exchanges as fit in a tenth of the room (not for /compact)
         if chars_in(history[i:]) * tok_per_char > max(600, size // 10): break
         cut = i
     changed = False
@@ -5282,7 +5311,7 @@ def run_turn(history):
                 print(f"{DIM}  {n.strip()} runs when this reply finishes{R}")
             if notes:
                 print()
-                for n in notes: print(f"{GOLD}❯{R} {DIM}btw{R} {n}")
+                for n in notes: print(said(n, "btw"))
                 print()
                 history.append({"role": "user", "content": "By the way: " + " ".join(notes)})
                 label = "Reading"
@@ -5723,7 +5752,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
             ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"), ("/remote", "control it from a web page of your own"),
             ("/password", "a password your phone has to send before it can use it"), ("/cloud", "run the model on a graphics card in your own Modal account"), ("/cost", "what the cloud card has cost"), ("/doctor", "check the model, key, updates and errors"), ("/export", "save this chat as a document"),
-            ("/undo", "put back the last file it changed"), ("/compact", "fold the chat into a summary to make room"),
+            ("/undo", "put back every file its last reply changed"), ("/compact", "fold the chat into a summary to make room"),
             ("/init", "it writes a BXZEX.md about this folder"), ("/allow", "always allow on or off"),
             ("!", "run a command yourself · !git status"), ("@", "attach a file · explain @main.py"),
             ("/update", "get the newest version · /update full adds new downloads"), ("/version", "which version is running, and if a newer one is out"), ("/usage", "how much you've used: memory, cloud time and cost, stats · /usage budget 50"), ("/status", "version, model, folder, mode and thinking at a glance"), ("/new", "start a new conversation · also /reset and /clear"), ("/cd", "work in another folder · /cd ~/project"), ("/help", "this list"), ("exit", "quit")]
@@ -6179,8 +6208,15 @@ def ask(prefill=""):
             try:
                 with open(PAST_FILE, "a") as f: f.write(json.dumps(text) + "\n")
             except OSError: pass
-        print(f"{GOLD}❯{R} {BOLD}" + show_chips(shown, BOLD).replace("\n", f"{R}\n  {BOLD}") + R)
+        print(said(shown))
     return text
+
+def said(text, tag=""):
+    """What they sent, as it stays in the chat: wrapped at whole words to the window, lined up after the ❯."""
+    rows, _ = box_rows(text, max(10, W() - 3 - (len(tag) + 1 if tag else 0)))
+    lead = f"{GOLD}❯{R} " + (f"{DIM}{tag}{R} " if tag else "")
+    return "\n".join((lead if i == 0 else " " * (2 + (len(tag) + 1 if tag else 0))) + BOLD * (not tag) + show_chips(r, BOLD * (not tag)) + R
+                     for i, r in enumerate(rows))
 
 def toggle_plan(quiet=False, busy=False):
     global PLAN
@@ -6737,7 +6773,7 @@ spoken = RELOAD.get("typed", ""); last_break = 0
 
 while True:
     try:
-        if LATER and not spoken and not typed.leftover: user = LATER.pop(0); print(f"{GOLD}❯{R} {BOLD}{user}{R}")
+        if LATER and not spoken and not typed.leftover: user = LATER.pop(0); print(said(user))
         else: user = ask(spoken or typed.leftover); spoken = typed.leftover = ""
     except EOFError:
         break
