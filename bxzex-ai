@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.4"
+VERSION = "1.18.5"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -627,6 +627,12 @@ SHELL_SECONDS = 600 if REMOTE else 120
 MAX_STEPS  = 10**6 if REMOTE else 12   # tool calls per message: no limit on a cloud card (esc or ctrl-c stops it), 12 on a laptop
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".bmp", ".tiff")
 allow_all = False
+last_human = time.time()   # when a person last sent, answered or picked something; the cloud card stops working for no one
+def away_limit():
+    """Seconds with nobody at the keyboard before a cloud reply pauses so the card can sleep (config away_stop minutes, 0 = never)."""
+    try: return max(0, float(load_config().get("away_stop", 15))) * 60
+    except (TypeError, ValueError): return 900
+def human(): global last_human; last_human = time.time()
 
 def clip(s, n):
     return s if len(s) <= n else s[:n] + f"\n[...cut, {len(s)-n} more chars]"
@@ -865,6 +871,7 @@ def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
     if PHONE:
         more = CHANNEL == "web" and not always_ask           # the page has room for a third button
         pick = phone_choose(f"Allow: {what}?", ["Yes", "No"] + (["Always, this chat"] if more else []), detail)
+        if pick is not None: human()
         if more and pick == 2: allow_all = True; return True
         return pick == 0
     if not sys.stdin.isatty(): return False
@@ -914,6 +921,7 @@ def confirm(what, detail, always_ask=False, diff=False, rule="", rule_label=""):
                 elif ch in "\x7f\b": typed.buf = typed.buf[:-1]
                 elif ch >= " ": typed.buf += ch
     print(a if a in "ynaf" else "")
+    human()
     if a == "f" and rule:
         allow_here(rule); print(f"  {DIM}saved: {rule_label} is always allowed in {os.getcwd().replace(HOME, '~')} · /allow clear to undo{R}")
         a = "y"
@@ -1425,6 +1433,7 @@ def ask_user(question, options=""):
     picks = split_options(options)
     if PHONE and picks:
         at = phone_choose(question, picks)
+        if at is not None: human()
         return f"The user picked: {picks[at]}" if at is not None else "The user didn't answer. Use your best judgment and say what you chose."
     if not sys.stdin.isatty(): return "The user isn't at the keyboard. Pick the most sensible option and say which."
     busy = typed.th is not None
@@ -1434,6 +1443,7 @@ def ask_user(question, options=""):
         print(f"{GOLD}?{R} {BOLD}{question}{R}")
         rows = [(o, "") for o in picks] + [("Type my own answer", "")]
         at = menu(rows, hint="↑↓ to move · enter to pick · esc to skip")
+        human()
         if at is None: print(f"  {DIM}skipped{R}"); return "The user skipped the question. Use your best judgment and say what you chose."
         if at < len(picks): print(f"  {GOLD}❯{R} {picks[at]}"); return f"The user picked: {picks[at]}"
         own = line_input(f"  {GOLD}❯{R} ").strip()
@@ -2002,6 +2012,18 @@ def show_schedules(arg=""):
     else:
         items.remove(it); print(f"  {DIM}removed{R}")
     save_schedules(items); ticker()
+
+def away_stop(arg=""):
+    """/away 15 pauses a cloud reply after 15 min with nobody typing or answering, /away off never pauses."""
+    arg = arg.strip().lower()
+    if not arg:
+        m = round(away_limit() / 60)
+        print(f"{DIM}{'cloud work pauses after ' + str(m) + ' min with nobody at the keyboard' if m else 'cloud work never pauses on its own'} · /away 15 · /away off{R}"); return
+    if arg in ("off", "0", "never"): save_config(away_stop=0); print(f"{DIM}cloud work won't pause on its own · the card bills every second it works{R}"); return
+    try: m = float(arg.rstrip("m"))
+    except ValueError: print(f"{DIM}give minutes, like /away 15, or /away off{R}"); return
+    if m <= 0: save_config(away_stop=0); return
+    save_config(away_stop=m); print(f"{DIM}cloud work pauses after {m:g} min with nobody at the keyboard{R}")
 
 def keep_warm(arg=""):
     """/warm 9-18 keeps the cloud card awake in those hours (weekdays too: /warm weekdays 9-18), /warm off stops it."""
@@ -5260,6 +5282,7 @@ def run_turn(history):
     """Agent loop: keep calling the model until it answers without asking for a tool.
     Anything typed and sent while it works is passed to it as a "by the way" note."""
     if not ensure_server(): return      # e.g. still reloading after an image
+    human()                             # they just sent this message
     typed.start()
     try:
         global turn_tok, turn_think, turn_think_on
@@ -5267,6 +5290,12 @@ def run_turn(history):
         turn_tok = 0; turn_think = 0.0; began = time.time(); retried = made_room = False; recent = []
         label = "Reading"
         for _ in range(MAX_STEPS):
+            limit = away_limit()
+            if REMOTE and limit and time.time() - last_human > limit:
+                mins = round(limit / 60)
+                print(f"\n{DIM}paused: nobody typed or answered for {mins} min, so the cloud card can sleep instead of billing · type continue to keep going · /away to change{R}")
+                ping_if_away(f"paused after {mins} min with nobody at the keyboard, so the cloud card can sleep")
+                return
             if fold(history): label = "Reading"
             text, calls = stream(history, label)
             if stream_error and not text and not calls:
@@ -5312,6 +5341,7 @@ def run_turn(history):
                 print(f"{DIM}  {n.strip()} runs when this reply finishes{R}")
             if notes:
                 print()
+                human()
                 for n in notes: print(said(n, "btw"))
                 print()
                 history.append({"role": "user", "content": "By the way: " + " ".join(notes)})
@@ -5751,6 +5781,7 @@ COMMANDS = [("/v", "speak instead of typing"), ("/color", "pick a color theme"),
             ("/commit", "commit your changes with a message it writes"), ("/review", "review your changes for bugs before you push"),
             ("/hooks", "your own commands before or after its tools"), ("/check", "check a site on phone, tablet and desktop · /check localhost:5173"), ("/notify", "notifications when it finishes in the background"),
             ("/warm", "keep the cloud card awake during your hours · /warm 9-18"),
+            ("/away", "pause cloud work after N min with nobody at the keyboard · /away 15, /away off"),
             ("/phone", "use it from your phone through Telegram"), ("/imessage", "use it from your phone by texting yourself"), ("/remote", "control it from a web page of your own"),
             ("/password", "a password your phone has to send before it can use it"), ("/cloud", "run the model on a graphics card in your own Modal account"), ("/cost", "what the cloud card has cost"), ("/doctor", "check the model, key, updates and errors"), ("/export", "save this chat as a document"),
             ("/undo", "put back every file its last reply changed"), ("/compact", "fold the chat into a summary to make room"),
@@ -6537,6 +6568,7 @@ def command(user):
     if user.startswith("/schedule"): show_schedules(user[9:]); return
     if user.startswith("/hooks"): show_hooks(user[6:]); return
     if user.startswith("/warm"): keep_warm(user[5:]); return
+    if user.startswith("/away"): away_stop(user[5:]); return
     if user.startswith("/phone"): setup_phone(user[6:]); return
     if user.startswith("/imessage"): setup_imessage(user[9:]); return
     if user.startswith("/remote"): setup_web(user[7:]); return
