@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.6"
+VERSION = "1.18.7"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2879,7 +2879,11 @@ def setup_cloud(arg=""):
         print(header("Cloud card"))
         where = f"{cloud['card']} in your Modal account {cloud.get('workspace', '')}".strip() if cloud.get("card") else REMOTE
         print(f"  {DIM}the model runs on {where} · it sleeps after 5 minutes idle and Modal only bills while it's awake")
-        print(f"  /cost what it has cost · /warm keeps it awake in your hours · /cloud again sets it up from the start · /cloud off runs it here{R}"); return False
+        print(f"  /cost what it has cost · /warm keeps it awake in your hours · /cloud off runs it here{R}")
+        at = menu([("Log in to a Modal account", "opens Modal's login in your browser, then moves the card there"),
+                   ("Set it up again", "same Modal account, pick the card again"), ("Keep it as it is", "")], 0)
+        if at in (None, 2): return False
+        arg = "login" if at == 0 else "again"
 
     print(header("Your own cloud card"))
     print(f"  {DIM}The model runs on a graphics card in your own Modal account (modal.com) and answers in seconds. Your chats, memory")
@@ -2909,6 +2913,8 @@ def setup_cloud(arg=""):
         pick = profiles[at]
     workspace = pick.get("workspace") or pick["name"]
     print(f"  {GOLD}✓{R} Modal account {BOLD}{workspace}{R}")
+    if not card and arg == "login" and cloud.get("card"):
+        card = cloud["card"]                 # a new account gets the same card and the same model as before
     if not card:
         print(f"  {DIM}Which graphics card? You can change it later with /cloud again.{R}")
         at = menu(CLOUD_CARDS, next((i for i, (n, _) in enumerate(CLOUD_CARDS) if n == cloud.get("card")), 0))

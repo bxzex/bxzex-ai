@@ -72,8 +72,9 @@ srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H); threading.Thread(tar
 conf["remote"] = f"http://127.0.0.1:{srv.server_port}"
 with open(os.path.join(home, "config.json"), "w") as f: json.dump(conf, f)
 env["BXZEX_NO_UPDATE"] = "1"
-plain = drive([], env, [(4, b"/cloud\r"), (1, b"/cloud off\r"), (1, b"/cloud nonsense\r"), (1, b"exit\r")])
+plain = drive([], env, [(4, b"/cloud\r"), (1, b"\x1b"), (1, b"/cloud off\r"), (1, b"/cloud nonsense\r"), (1, b"exit\r")])
 print("status shows the card:", "A100-80GB in your Modal account neo" in plain)
+print("menu offers login:", "Log in to a Modal account" in plain)
 print("off refused on cloud-only:", "no model of its own" in plain)
 print("unknown word explained:", "/cloud login uses another Modal account" in plain)
 print("tracebacks:", "Traceback" in plain)
