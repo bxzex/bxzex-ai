@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.7"
+VERSION = "1.18.8"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -6358,18 +6358,16 @@ def show_usage(arg=""):
     if not (sys.stdin.isatty() and RAW.isatty()) or PHONE:
         for name, fn in tabs: print(header(name)); [print(l) for l in fn()]
         return
-    at = {"status": 1, "stats": 2}.get(arg.strip().lower(), 0); fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd); drawn = [0]
-    room = max(8, shutil.get_terminal_size((90, 30)).lines - Box.ROWS - 3)
+    at = {"status": 1, "stats": 2}.get(arg.strip().lower(), 0); fd = sys.stdin.fileno(); saved = termios.tcgetattr(fd)
+    room = max(8, shutil.get_terminal_size((90, 30)).lines - 1)     # drawn on its own screen, so closing leaves no gap
     def draw():
         w = W()
         bar = "  ".join(f"\033[7m{c(T[3])} {n} {R}" if i == at else f"{DIM}{n}{R}" for i, (n, _) in enumerate(tabs))
         lines = [bar, ""] + [fit_ansi(l, w - 1) + R for l in tabs[at][1]()]
         lines = lines[:room - 1] + [f"{DIM}← → tabs · esc to go back{R}"]
-        out = (f"\033[{drawn[0]}A" if drawn[0] else "") + "".join(f"\r\033[2K{l}\n" for l in lines)
-        if drawn[0] > len(lines): out += "\r\033[2K\n" * (drawn[0] - len(lines)) + f"\033[{drawn[0] - len(lines)}A"
-        RAW.write(out); RAW.flush(); drawn[0] = max(drawn[0], len(lines)) if drawn[0] > len(lines) else len(lines)
+        RAW.write("\033[H\033[2J" + "\r\n".join(lines)); RAW.flush()
     try:
-        tty.setcbreak(fd, termios.TCSANOW); RAW.write("\033[?25l"); draw()
+        tty.setcbreak(fd, termios.TCSANOW); RAW.write("\033[?1049h\033[r\033[?25l"); draw()
         while True:
             buf = finish_escapes(fd, os.read(fd, 64).decode("utf-8", "ignore"))
             while buf:
@@ -6380,7 +6378,8 @@ def show_usage(arg=""):
             draw()
     except KeyboardInterrupt: return
     finally:
-        RAW.write(f"\033[{drawn[0]}A" + "\r\033[2K\n" * drawn[0] + f"\033[{drawn[0]}A\033[?25h"); RAW.flush()
+        h = shutil.get_terminal_size((90, 30)).lines
+        RAW.write(f"\033[2J\033[?1049l\0337\033[1;{max(2, h - Box.ROWS)}r\0338\033[?25h"); RAW.flush()   # back to the chat exactly as it was
         try: box.draw("", 0, working=True)
         except Exception: pass
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
