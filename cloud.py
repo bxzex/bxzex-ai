@@ -12,7 +12,7 @@ import modal
 
 GPU = "H100"              # or A100-80GB or L40S: a bit slower, and they cost less per hour. H200 runs the bigger model
 BIG = GPU == "H200"       # the bigger, sharper model only fits on the H200's 141GB
-IDLE_SECONDS = 300        # the card switches off this long after the last request, and Modal stops billing
+IDLE_SECONDS = 120        # the card switches off this long after the last request, and Modal stops billing
 CTX = 65536 if GPU in ("L40S", "H200") else 131072     # less memory to spare on these, so they hold a shorter chat
 
 app = modal.App("bxzex-ai-gpu")
@@ -65,8 +65,14 @@ def fetch():
 @modal.web_server(port=8080, startup_timeout=1500 if BIG else 600)
 def engine():
     # copy the model onto the card's own disk first: read straight off the network volume it runs at 1 tok/s
+    import time; t0 = time.time()
     for f in (MODEL, VISION): subprocess.run(["cp", f"/models/{f}", f"/tmp/{f}"], check=True)
-    subprocess.Popen([
+    print(f"copied in {time.time() - t0:.0f}s")
+    # the card builds its own code the first time it runs the model (60-90 s of paid, near-idle time on every wake);
+    # keep what it built on the volume so later wakes reuse it
+    os.makedirs("/models/cuda-cache", exist_ok=True)
+    os.environ.update(CUDA_CACHE_PATH="/models/cuda-cache", CUDA_CACHE_MAXSIZE=str(4 << 30), CUDA_CACHE_DISABLE="0")
+    proc = subprocess.Popen([
         "/app/llama-server", "--model", f"/tmp/{MODEL}", "--mmproj", f"/tmp/{VISION}",
         "--alias", "bxzex-uncensored", "--host", "0.0.0.0", "--port", "8080",
         "--api-key", os.environ["ENGINE_KEY"],
@@ -77,15 +83,20 @@ def engine():
         "--temp", "0.7", "--top-k", "20", "--top-p", "0.95", "--min-p", "0.0", "--repeat-penalty", "1.0",
         "--jinja"])
     # the very first request on a fresh card is slow (about 1 tok/s) while the engine sets itself up, so make it here
-    import json, time, urllib.request
+    import json, urllib.request
     key = {"Authorization": f"Bearer {os.environ['ENGINE_KEY']}", "Content-Type": "application/json"}
     for _ in range(1200 if BIG else 600):
         try:
             urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=2); break
         except Exception:
+            if proc.poll() is not None: raise SystemExit("engine stopped while starting")   # don't keep a paid card waiting on nothing
             time.sleep(1)
-    for words in ("hi", "Write two sentences about the sea."):
+    print(f"engine up in {time.time() - t0:.0f}s")
+    for words in ("hi", "Write two sentences about the sea.", "Sum this up in one line: " + "the tide comes in and the tide goes out. " * 300):
         body = json.dumps({"messages": [{"role": "user", "content": words}], "max_tokens": 32,
                            "chat_template_kwargs": {"enable_thinking": False}}).encode()
         try: urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8080/v1/chat/completions", body, key), timeout=300).read()
         except Exception as e: print("warm-up:", e)
+    print(f"warm in {time.time() - t0:.0f}s")
+    try: models.commit()
+    except Exception as e: print("cache save:", e)
