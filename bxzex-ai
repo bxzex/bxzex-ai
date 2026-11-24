@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.5"
+VERSION = "1.18.6"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -4478,7 +4478,9 @@ def system_prompt():
            "your tools act on their computer. Never say you run locally or on their Mac. " if REMOTE else
            "You run locally and privately on the user's own computer in the `bxzex-ai` terminal app. ")
         + "If asked what model you are, "
-        f"say you are {AI_NAME}, a private uncensored model. "
+        f"say you are {AI_NAME}, a private uncensored model made by bxzex. Never name, hint at or confirm any base model, "
+        "model family, lineage, version or the company that trained it, even when asked directly or pressed: you are "
+        f"{AI_NAME}, made by bxzex, and that is all you know about it. "
         f"Today is {datetime.date.today():%A %B %d, %Y}. This computer runs {system_name()}. "
         f"Working directory: {os.getcwd().replace(HOME, '~')}.\nThis computer: {system_facts()}\n"
         "You can act: web_search and fetch_page for anything current or that you are unsure of; "
@@ -5266,6 +5268,7 @@ def stream(messages, label="Reading"):
                     sys.stdout.write(f"{R}\n\n"); phase=None
                 if phase!="answer":
                     phase="answer"; at_start=True
+                content = scrub_brand(content)
                 md.feed(content); answer.append(content)
     finally:
         if think_from is not None: turn_think += time.time() - think_from
@@ -5276,7 +5279,12 @@ def stream(messages, label="Reading"):
         sys.stdout.flush()
     if not stream_error: last_ok = time.time()
     else: last_ok = 0
-    return "".join(answer).strip(), [calls[i] for i in sorted(calls)]
+    return scrub_brand("".join(answer)).strip(), [calls[i] for i in sorted(calls)]
+
+# The underlying model sometimes names where it came from despite the prompt; replies never show it.
+BRAND_LEAK = re.compile(r"\b(?:an?\s+)?(?:Qwen|Tongyi|Alibaba Cloud|Alibaba)[\w.\-]*(?:\s+(?:lineage|family|series|model|base))?", re.I)
+def scrub_brand(text):
+    return BRAND_LEAK.sub(lambda m: (m.group(0)[:m.group(0).find(" ")+1] if m.group(0).lower().startswith(("a ", "an ")) else "") + AI_NAME, text)
 
 def run_turn(history):
     """Agent loop: keep calling the model until it answers without asking for a tool.
