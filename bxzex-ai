@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.18"
+VERSION = "1.18.19"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -5826,6 +5826,33 @@ def start_menu():
     elif pick == 2: open_chat()
     else: print(f"{GOLD}●{R} {BOLD}New chat{R} {DIM}· /history has the earlier ones{R}")
 
+def chat_recap(msgs, title=""):
+    """A few lines on what an old chat was about, read from the chat itself (no model call, so it's instant and free):
+    what it started with, the files it worked on, how far it got."""
+    lines = []
+    said = lambda m: m["content"] if isinstance(m.get("content"), str) else " ".join(p.get("text", "") for p in m.get("content") or [] if isinstance(p, dict))
+    folded = next((said(m) for m in msgs if m["role"] == "user" and said(m).startswith(SUMMARY_HEAD)), "")
+    asks = [said(m) for m in msgs if m["role"] == "user" and said(m).strip()
+            and not said(m).startswith((SUMMARY_HEAD, "By the way", "(Before you finish", "(Screenshots from"))]
+    if folded:                                   # an earlier part was already summed up: its opening lines say it best
+        body = re.sub(r"^\s*\([^)]*\)\s*:?", "", folded[len(SUMMARY_HEAD):])         # "(the older messages were folded…):"
+        body = re.sub(r"\*\*[^*]{0,30}summary\*\*", "", body, flags=re.I)              # its own "**Conversation summary**" heading
+        body = re.sub(r"\*\*([^*]+)\*\*", r"\1", body)
+        body = " ".join(re.sub(r"(^|\s)[-•]\s", " ", body).split())
+        lines.append(("So far", body))
+    elif asks: lines.append(("Started with", " ".join(asks[0].split())))
+    files = []
+    for m in msgs:
+        for call in m.get("tool_calls") or []:
+            if call["function"]["name"] in ("write_file", "edit_file"):
+                try: path = json.loads(call["function"].get("arguments") or "{}").get("path", "")
+                except ValueError: path = ""
+                if path: files.append(os.path.basename(str(path)))
+    files = list(dict.fromkeys(reversed(files)))[:6]
+    if files: lines.append(("Worked on", ", ".join(files) + (" and more" if len(set(files)) >= 6 else "")))
+    if len(asks) > 1: lines.append(("You asked", f"{len(asks)} things · last: " + " ".join(asks[-1].split())))
+    return lines
+
 def open_chat(pick=None):
     """Continue an earlier conversation. pick=0 takes the most recent without asking."""
     global history, chat_file
@@ -5844,6 +5871,11 @@ def open_chat(pick=None):
     try: saved = time.strftime("%b %d at %-I:%M %p", time.localtime(os.path.getmtime(path)))
     except OSError: saved = when
     print(f"{GOLD}●{R} {BOLD}Continuing from last save{R} {DIM}{saved} · {len(msgs)} messages{R}")
+    if title and not title.startswith(SUMMARY_HEAD): print(f"  {BOLD}{title}{R}")
+    room = W() * 2 - 20
+    for label, text in chat_recap(msgs, title):
+        print(f"  {DIM}{label:<13}{R}{text[:room]}{'…' if len(text) > room else ''}")
+    if chat_recap(msgs, title): print(f"  {DIM}{'─' * 13} the last of it:{R}")
     for m in [m for m in msgs if m["role"] in ("user", "assistant") and m.get("content")][-2:]:
         mark = f"{GOLD}❯{R}" if m["role"] == "user" else f"{GOLD}●{R}"
         text = " ".join(m["content"].split())

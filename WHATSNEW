@@ -1,1 +1,1 @@
-1.18.18: after it builds or changes a page or game, it can't call it done until it has checked it with test_page (Chrome and Safari engines): if it tries, it's sent back to test it, start the game, confirm it plays, and fix what fails
+1.18.19: continuing a chat shows a short recap first: what it was about so far, the files it worked on and what you asked last
