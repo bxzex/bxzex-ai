@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.10"
+VERSION = "1.18.11"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -486,7 +486,7 @@ def loaded_model():
             took = time.time() - wake_began if wake_began else 0
             if took > 30:                                                   # it really was asleep: learn how long a start takes
                 old = load_config().get("wake_secs") or took
-                save_config(wake_secs=int(min(420, max(60, (old + took) / 2))))
+                save_config(wake_secs=int(min(420, max(15, (old + took) / 2))))
             wake_began = 0.0
         return MODEL_ID or None
     except Exception:
@@ -566,14 +566,14 @@ def wake_remote(block=True):
     if not block:
         threading.Thread(target=loaded_model, daemon=True).start(); return True
     sys.stdout.write("\033[?25l")
-    mins = 4 if (load_config().get("cloud") or {}).get("card") == "H200" else 2          # the bigger model takes longer to load
+    mins = 2 if (load_config().get("cloud") or {}).get("card") == "H200" else 0.5        # the bigger model takes longer to load
     size = shutil.get_terminal_size((90, 30))
     if RAW.isatty() and size.columns >= len(LOGO[0][0]) + 4 and size.lines >= len(LOGO) + 10:
         usual = int(load_config().get("wake_secs") or mins * 60)          # learned from the last starts
         wait = LogoFade(max(10, usual - (time.time() - wake_began)), over="cloud is busy · still waiting")      # estimated time left, from when it started waking                    # the bxzex logo slowly fades in where the reply will go
     else:
-        wait = Waiting(f"Waking the cloud GPU · it sleeps after 5 min idle and takes about {mins} min to start")
-    if CHANNEL == "web" and PHONE: web_push("note", f"Waking the cloud card. It sleeps after 5 minutes idle and takes about {mins} minutes to start.")
+        wait = Waiting(f"Waking the cloud GPU · it sleeps after 2 min idle and takes about {mins:g} min to start")
+    if CHANNEL == "web" and PHONE: web_push("note", f"Waking the cloud card. It sleeps after 2 minutes idle and takes about {mins:g} minutes to start.")
     try:
         if loaded_model(): return True
     except KeyboardInterrupt:
@@ -2878,7 +2878,7 @@ def setup_cloud(arg=""):
     if REMOTE and not arg:
         print(header("Cloud card"))
         where = f"{cloud['card']} in your Modal account {cloud.get('workspace', '')}".strip() if cloud.get("card") else REMOTE
-        print(f"  {DIM}the model runs on {where} · it sleeps after 5 minutes idle and Modal only bills while it's awake")
+        print(f"  {DIM}the model runs on {where} · it sleeps after 2 minutes idle and Modal only bills while it's awake")
         print(f"  /cost what it has cost · /warm keeps it awake in your hours · /cloud off runs it here{R}")
         at = menu([("Log in to a Modal account", "opens Modal's login in your browser, then moves the card there"),
                    ("Set it up again", "same Modal account, pick the card again"), ("Keep it as it is", "")], 0)
@@ -2887,7 +2887,7 @@ def setup_cloud(arg=""):
 
     print(header("Your own cloud card"))
     print(f"  {DIM}The model runs on a graphics card in your own Modal account (modal.com) and answers in seconds. Your chats, memory")
-    print(f"  and files stay on this computer. Modal bills your account by the second while the card is awake; it sleeps after 5 minutes idle.{R}")
+    print(f"  and files stay on this computer. Modal bills your account by the second while the card is awake; it sleeps after 2 minutes idle.{R}")
     modal = modal_bin()
     if not modal:
         uv = shutil.which("uv") or f"{HOME}/.local/bin/uv"
@@ -6326,7 +6326,7 @@ def usage_tab():
 
 def status_tab():
     where = (f"cloud card ({(load_config().get('cloud') or {}).get('card') or 'H100'}) · "
-             + ("awake" if awake() else "asleep, wakes on your next message") + " · sleeps after 5 min idle") if REMOTE else \
+             + ("awake" if awake() else "asleep, wakes on your next message") + " · sleeps after 2 min idle") if REMOTE else \
             ("this computer · " + ("lite build" if LITE else "full build") + " · " + ("graphics chip" if graphics() and os.environ.get("BXZEX_DEVICE", load_config().get("device", "gpu")) != "cpu" else "processor"))
     disk = installed_version()
     rows = [("Version", f"v{VERSION}" + (f" · v{disk} installed, /update switches" if vtuple(disk) > vtuple(VERSION) else "")),
