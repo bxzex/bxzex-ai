@@ -25,12 +25,12 @@ if BIG:
     VISION = "Qwen3.8-Flash-Next-Uncensored.mmproj-f16.gguf"
     FAST_DRAFT = []                                         # this build has no draft layers to speed it up, and doesn't need them
 else:
-    # Qwopus 3.8 27B Flash V2, uncensored: sharpest 27B for code and agent work, thinks less than the plain 27B
-    WEIGHTS = "mradermacher/Qwopus3.8-27B-Flash-V2-abliterated-GGUF"
-    MODEL = "Qwopus3.8-27B-Flash-V2-abliterated.Q6_K.gguf"
+    # Swift 1.5 (Qwen3.8 27B), uncensored: the best 27B at code, thinks less than the plain 27B, and keeps its draft layers
+    WEIGHTS = "mradermacher/Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
+    MODEL = "Swift-1.5-Qwen3.8-27B-Uncensored-MTP.Q6_K.gguf"
     PARTS = []
-    VISION = "Qwopus3.8-27B-Flash-V2-abliterated.mmproj-f16.gguf"
-    FAST_DRAFT = []                                         # this build has no draft layers (the engine exits if asked to use them)
+    VISION = "Swift-1.5-Qwen3.8-27B-Uncensored-MTP.mmproj-f16.gguf"
+    FAST_DRAFT = ["--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "--spec-draft-p-min", "0.4"]   # writes a few words per step
 
 # pinned: newer engine builds read prompts far slower on these cards
 image = modal.Image.from_registry("ghcr.io/ggml-org/llama.cpp:server-cuda-b11382", add_python="3.12").entrypoint([])

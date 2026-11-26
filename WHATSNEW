@@ -1,1 +1,1 @@
-1.18.13: the cloud card switches off 1 minute after your last message instead of 2, since it now wakes in about 25 seconds
+1.18.14: the cloud card now runs Swift 1.5 (Qwen3.8 27B) uncensored, the best 27B at code, with draft layers so it writes about 80 words a second instead of 56; thinking uses the makers' recommended temperature
