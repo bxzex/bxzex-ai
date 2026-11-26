@@ -5501,10 +5501,26 @@ def newer(a, b):
     num = lambda v: [int(x) for x in re.findall(r"\d+", v)][:3]
     return num(a) > num(b)
 
+update_base_cache = [0.0, ""]
+
+def update_base():
+    """GitHub serves raw files on main from a cache up to 5 minutes old. The files of one exact commit never change,
+    so read the newest commit first and download from that commit: /update sees a new version the moment it's out."""
+    m = re.fullmatch(r"https://raw\.githubusercontent\.com/([\w.-]+/[\w.-]+)/main", UPDATE_URL)
+    if not m: return UPDATE_URL
+    if time.time() - update_base_cache[0] < 60 and update_base_cache[1]: return update_base_cache[1]
+    try:
+        p = subprocess.run(["curl", "-sL", "--max-time", "10", "-H", "Accept: application/vnd.github.sha", "-A", UA["User-Agent"],
+                            f"https://api.github.com/repos/{m.group(1)}/commits/main"], capture_output=True, text=True)
+        sha = p.stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            update_base_cache[:] = [time.time(), f"https://raw.githubusercontent.com/{m.group(1)}/{sha}"]
+            return update_base_cache[1]
+    except Exception: pass
+    return UPDATE_URL
+
 def fetch(path):
-    # GitHub keeps each file cached for about 5 minutes per request type: a fresh query string skips that,
-    # so /update sees a new version the moment it's pushed
-    return http_get(f"{UPDATE_URL}/{path}?t={int(time.time())}")
+    return http_get(f"{update_base()}/{path}")
 
 update_lock = threading.Lock()   # the check at startup and /update never download at the same time
 
