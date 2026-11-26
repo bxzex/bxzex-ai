@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.15"
+VERSION = "1.18.16"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -5976,6 +5976,56 @@ def unchip(text):
     """The message as the model gets it: each chip back to its file path."""
     return "".join((shlex.quote(CHIPS[ch]) if " " in CHIPS[ch] else CHIPS[ch]) if ch in CHIPS else ch for ch in text)
 
+THUMBS = {}
+
+def thumb(path, w=8, h=4):
+    """A tiny full-color picture of an image, w cells wide and h/2 rows tall, for the strip above the box."""
+    key = (path, w, h)
+    if key in THUMBS: return THUMBS[key]
+    rows = []
+    tmp = tempfile.NamedTemporaryFile(suffix=".bmp", delete=False).name
+    try:
+        if shutil.which("sips") and not subprocess.run(["sips", "-s", "format", "bmp", "-z", str(h), str(w), path, "--out", tmp],
+                                                       capture_output=True).returncode:
+            with open(tmp, "rb") as f: d = f.read()
+            off = int.from_bytes(d[10:14], "little"); bw = int.from_bytes(d[18:22], "little", signed=True)
+            bh = int.from_bytes(d[22:26], "little", signed=True); bpp = int.from_bytes(d[28:30], "little") // 8
+            stride = (bw * bpp + 3) // 4 * 4
+            def px(x, y):
+                i = off + ((abs(bh) - 1 - y) if bh > 0 else y) * stride + x * bpp
+                return d[i + 2], d[i + 1], d[i]
+            rows = ["".join(cell(px(x, y), px(x, y + 1)) for x in range(bw)) + R for y in range(0, abs(bh) - 1, 2)]
+    except Exception: rows = []
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+    if not rows: rows = [f"{DIM}{'▒' * w}{R}"] * (h // 2)
+    THUMBS[key] = rows
+    return rows
+
+def image_strip(text, w):
+    """The images in the box, side by side above it: a small picture, its name and size, and an ✕ to take it out.
+    Returns (two screen rows, [(row 0 or 1, first column, last column, chip)] where each ✕ is)."""
+    chips = list(dict.fromkeys(ch for ch in text if ch in CHIPS))
+    if not chips: return [], []
+    top, bottom, spots, col = "", "", [], 1
+    for ch in chips:
+        path = CHIPS[ch]; name = os.path.basename(path)
+        name = name if len(name) <= 22 else name[:10] + "…" + name[-11:]
+        try:
+            kb = os.path.getsize(path) / 1024
+            size = f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{kb:.0f} KB"
+        except OSError: size = ""
+        t = thumb(path)
+        label = f" {TEAL}{chip_label(ch)}{R} {name}"
+        label_w = 1 + len(chip_label(ch)) + 1 + len(name)
+        x_col = col + 8 + label_w + 2                       # the ✕ sits after the name, with a little room
+        if x_col + 2 > w: break                             # no room for another: the [Image #N] in the line still shows it
+        top += f"{t[0]}{label}  {GOLD}✕{R}   "
+        bottom += f"{t[1] if len(t) > 1 else ' ' * 8} {DIM}{size}{R}" + " " * max(0, label_w + 5 - 1 - len(size))
+        spots.append((0, x_col - 1, x_col + 1, ch))         # a click a column either side still counts
+        col = x_col + 4
+    return [top, bottom], spots
+
 def char_w(ch):
     """Columns a character takes: two for wide ones (most emoji, Chinese, Japanese, Korean), none for marks that sit on another letter."""
     if ch in CHIPS: return len(chip_label(ch))
@@ -6037,7 +6087,7 @@ class Box:
     """Keeps the input box on the last four rows. Everything else scrolls in the area above it,
     so the box stays put while a reply streams."""
     ROWS = 4
-    def __init__(self): self.on = False; self.h = 0; self.size = None; self.free = 0; self.first = 0
+    def __init__(self): self.on = False; self.h = 0; self.size = None; self.free = 0; self.first = 0; self.xs = []
     def pin(self):
         if self.on or not (RAW.isatty() and sys.stdin.isatty()): return
         size = shutil.get_terminal_size((90, 30)); self.h = size.lines
@@ -6093,10 +6143,15 @@ class Box:
         tall = max(1, min(8, (self.h - self.ROWS) // 3))                      # long text scrolls inside the box past this
         self.first = max(0, min(self.first, row, len(rows) - tall)) if row < self.first + tall else row - tall + 1
         shown = rows[self.first:self.first + tall]; grow = len(shown) - 1
-        listed = min(len(offer), 7, max(0, self.h - self.ROWS - grow - 3))
-        self.reserve(grow + listed)
+        strip, spots = image_strip(text, w) if self.h - self.ROWS - grow > 8 else ([], [])
+        listed = min(len(offer), 7, max(0, self.h - self.ROWS - grow - len(strip) - 3))
+        self.reserve(grow + listed + len(strip))
         out = [f"\033[{r};1H\033[2K" for r in range(max(1, top - self.free), top)]
         base = top - grow; a = max(0, min(sel - listed // 2, len(offer) - listed))
+        for k, line in enumerate(strip):                                   # the attached images sit right above the box
+            out.append(f"\033[{base - len(strip) + k};1H\033[2K{line}")
+        self.xs = [(base - len(strip) + r, c1, c2, ch) for r, c1, c2, ch in spots]
+        base_list = base - len(strip)
         name_w = min(32, max([len(n) for n, _ in offer[a:a + listed]] + [0]))
         typed_word = text.split()[-1] if text.split() else ""
         q = typed_word.lstrip("/@").lower()
@@ -6112,7 +6167,7 @@ class Box:
             d = d if len(d) <= room else d[:max(0, room - 1)].rstrip() + "…"
             if on: line = f"{accent}❯ {lit(shown_n, accent, q)}{' ' * (name_w - len(shown_n))}    {lit(d, accent, q)}"
             else:  line = f"  {lit(shown_n, '', q)}{' ' * (name_w - len(shown_n))}    {DIM}{lit(d, DIM, q)}"
-            out.append(f"\033[{base - listed + k};1H{fit_ansi(line, w)}{R}")
+            out.append(f"\033[{base_list - listed + k};1H{fit_ansi(line, w)}{R}")
         rule = f"{DIM}{'─' * w}{R}"
         more = f"{DIM} {a + listed} of {len(offer)} {R}" if listed and len(offer) > listed else ""
         out.append(f"\033[{base};1H\033[J{rule}" + (f"\033[{base};{max(1, w - 14)}H{more}" if more else ""))
@@ -6153,9 +6208,16 @@ def ask(prefill=""):
     tty.setcbreak(fd, termios.TCSANOW)
     RAW.write("\0337\033[?2004h\033[?25h")   # remember where the conversation left off; bracketed paste on
 
+    clicks = [False]
+    def mouse(on):
+        """Clicks only while an image is in the box (for its ✕): the rest of the time the mouse selects and scrolls as usual."""
+        if on != clicks[0]:
+            RAW.write("\033[?1000h\033[?1006h" if on else "\033[?1000l\033[?1006l"); RAW.flush(); clicks[0] = on
+
     def leave():
         global FIND_NOTE
         FIND_NOTE = ""
+        mouse(False); box.xs = []
         box.wipe()
         RAW.write("\033[?2004l\0338"); RAW.flush()      # back to where the conversation left off
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
@@ -6236,6 +6298,18 @@ def ask(prefill=""):
                             buf = []; pos = 0; last_esc = time.time()
                         i += 1; continue
                     key = m.group(0); i += len(key)
+                    click = re.fullmatch(r"\x1b\[<(\d+);(\d+);(\d+)M", key)
+                    if click:                                                   # a click on an image's ✕ takes it out
+                        b_, x_, y_ = map(int, click.groups())
+                        hit = next((ch for r, c1, c2, ch in box.xs if b_ == 0 and y_ == r and c1 <= x_ <= c2), None)
+                        if hit:
+                            for j in [j for j, c in enumerate(buf) if c == hit][::-1]:
+                                del buf[j]
+                                if j < pos: pos -= 1
+                                if j < len(buf) and buf[j] == " " and (j == 0 or buf[j - 1] == " "): del buf[j]
+                            pos = min(pos, len(buf))
+                        continue
+                    if key.startswith("\x1b[<"): continue                     # other clicks and scrolling: nothing to do
                     if key in ("\x1bb", "\x1b[1;3D", "\x1b[1;5D", "\x1b[1;9D"):      # a word left
                         while pos and buf[pos - 1] == " ": pos -= 1
                         while pos and buf[pos - 1] != " ": pos -= 1
@@ -6299,7 +6373,7 @@ def ask(prefill=""):
                 elif ch >= " ": buf.insert(pos, ch); pos += 1
             if done: break
             if not pasting: buf, pos = chipify(buf, pos)        # a dragged or pasted image becomes [Image #N]
-            show()
+            show(); mouse(any(c in CHIPS for c in buf))
     except BaseException:
         leave(); raise
     leave()
