@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.14"
+VERSION = "1.18.15"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -1221,6 +1221,34 @@ def png_pixels(path):
         rows.append(line); prev = line
     return w, h, bpp, rows
 
+TRUECOLOR = os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") or os.environ.get("TERM_PROGRAM") in ("iTerm.app", "ghostty", "WezTerm")
+INLINE_IMAGES = "iterm" if os.environ.get("TERM_PROGRAM") in ("iTerm.app", "WezTerm") else \
+                "kitty" if os.environ.get("TERM_PROGRAM") == "ghostty" or "kitty" in os.environ.get("TERM", "") else ""
+
+def cell(top, bottom):
+    """One ▀ cell: the top pixel as its color, the bottom pixel as its background. Full color where the terminal has it."""
+    if TRUECOLOR: return f"\033[38;2;{top[0]};{top[1]};{top[2]};48;2;{bottom[0]};{bottom[1]};{bottom[2]}m▀"
+    q = lambda c: 16 + 36 * round(c[0] / 51) + 6 * round(c[1] / 51) + round(c[2] / 51)
+    return f"\033[38;5;{q(top)};48;5;{q(bottom)}m▀"
+
+def inline_image(path, cols):
+    """The real picture, sharp, for terminals that can show images (iTerm2, WezTerm, Ghostty, kitty)."""
+    try:
+        if INLINE_IMAGES == "kitty" and not path.lower().endswith(".png"):
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+            if not shutil.which("sips") or subprocess.run(["sips", "-s", "format", "png", path, "--out", tmp], capture_output=True).returncode: return []
+            path = tmp
+        with open(path, "rb") as f: data = base64.b64encode(f.read()).decode()
+        w = min(cols, W() - 4)
+        if INLINE_IMAGES == "iterm":
+            return [f"\033]1337;File=inline=1;width={w};preserveAspectRatio=1:{data}\a"]
+        parts = [data[i:i + 4096] for i in range(0, len(data), 4096)]
+        out = "".join((f"\033_Ga=T,f=100,c={w},q=2,m={int(i < len(parts) - 1)};" if i == 0 else f"\033_Gm={int(i < len(parts) - 1)};") + chunk + "\033\\"
+                      for i, chunk in enumerate(parts))
+        return [out]
+    except Exception:
+        return []
+
 def preview_png(path, cols):
     """The same half-block picture, for systems without the Mac image tool."""
     try:
@@ -1228,14 +1256,17 @@ def preview_png(path, cols):
         w = min(cols, W() - 4); h = max(2, round(w * ih / iw) // 2 * 2)
         def px(x, y):
             line = rows[min(ih - 1, int((y + 0.5) * ih / h))]; i = min(iw - 1, int((x + 0.5) * iw / w)) * bpp
-            r, g, b = (line[i], line[i + 1], line[i + 2]) if bpp >= 3 else (line[i],) * 3
-            return 16 + 36 * round(r / 51) + 6 * round(g / 51) + round(b / 51)
-        return ["".join(f"\033[38;5;{px(x, y)};48;5;{px(x, y + 1)}m▀" for x in range(w)) + R for y in range(0, h - 1, 2)]
+            return (line[i], line[i + 1], line[i + 2]) if bpp >= 3 else (line[i],) * 3
+        return ["".join(cell(px(x, y), px(x, y + 1)) for x in range(w)) + R for y in range(0, h - 1, 2)]
     except Exception:
         return []
 
 def preview(path, cols=44):
-    """A small picture of the image drawn with half-block characters, so it shows up right in the chat."""
+    """A small picture of the image drawn with half-block characters, so it shows up right in the chat
+    (or the real picture, in terminals that can show images)."""
+    if INLINE_IMAGES and not PHONE:
+        shown = inline_image(path, cols)
+        if shown: return shown
     if not shutil.which("sips"): return preview_png(path, cols)
     tmp = tempfile.NamedTemporaryFile(suffix=".bmp", delete=False).name
     try:
@@ -1251,9 +1282,8 @@ def preview(path, cols=44):
         def px(x, y):
             row = (abs(bh) - 1 - y) if bh > 0 else y            # most bitmaps are stored bottom row first
             i = off + row * stride + x * bpp
-            b, g, r = d[i], d[i + 1], d[i + 2]
-            return 16 + 36 * round(r / 51) + 6 * round(g / 51) + round(b / 51)
-        return ["".join(f"\033[38;5;{px(x, y)};48;5;{px(x, y + 1)}m▀" for x in range(bw)) + R for y in range(0, abs(bh) - 1, 2)]
+            return d[i + 2], d[i + 1], d[i]
+        return ["".join(cell(px(x, y), px(x, y + 1)) for x in range(bw)) + R for y in range(0, abs(bh) - 1, 2)]
     except Exception:
         return []
     finally:
@@ -4597,7 +4627,7 @@ def run_tool(call):
     print(f"  {DIM}└{R} {tone}{first[:W()-len(more)-6]}{more}{R}" + ("" if SHOW_SHOTS else "\n"))
     for shot in SHOW_SHOTS:                          # what it saw, small, so the user can follow along
         try:
-            for row in preview(shot, min(56, W() - 8)): print("    " + row)
+            for row in preview(shot, min(72, W() - 8)): print("    " + row)
         except Exception: pass
         print(f"    {DIM}{shot.replace(HOME, '~')}{R}\n")
     SHOW_SHOTS.clear()

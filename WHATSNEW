@@ -1,1 +1,1 @@
-1.18.14: the cloud card now runs Swift 1.5 (Qwen3.8 27B) uncensored, the best 27B at code, with draft layers so it writes about 80 words a second instead of 56; thinking uses the makers' recommended temperature
+1.18.15: screenshots and pictures in the chat show in full color instead of 256 colors, a bit bigger, and as the real sharp image in iTerm2, Ghostty, WezTerm and kitty
