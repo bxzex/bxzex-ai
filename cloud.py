@@ -12,7 +12,7 @@ import modal
 
 GPU = "H100"              # or A100-80GB or L40S: a bit slower, and they cost less per hour. H200 runs the bigger model
 BIG = GPU == "H200"       # the bigger, sharper model only fits on the H200's 141GB
-IDLE_SECONDS = 120        # the card switches off this long after the last request, and Modal stops billing
+IDLE_SECONDS = 60         # the card switches off this long after the last request, and Modal stops billing
 CTX = 65536 if GPU in ("L40S", "H200") else 131072     # less memory to spare on these, so they hold a shorter chat
 
 app = modal.App("bxzex-ai-gpu")
