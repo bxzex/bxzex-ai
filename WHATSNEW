@@ -1,1 +1,1 @@
-1.18.17: page checks can read a page's real state (eval), so games are proven to start, move and restart before it says they work; the game skills got a crash checklist for Phaser and Three.js
+1.18.18: after it builds or changes a page or game, it can't call it done until it has checked it with test_page (Chrome and Safari engines): if it tries, it's sent back to test it, start the game, confirm it plays, and fix what fails

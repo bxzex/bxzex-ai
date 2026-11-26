@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.17"
+VERSION = "1.18.18"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -4509,6 +4509,7 @@ WORK_WAY = """How you work on real tasks (code, fixes, builds, files, research):
 - Find the real cause. When something fails, read the whole error, find why it happens and fix that. Never retry the same thing unchanged, and never hide an error to make it go away.
 - Make the change that was asked, in the style the project already uses. Don't rewrite or "improve" things nobody asked about.
 - Check your work. After a change, run it: the tests, the build, the script, the page or the command that shows the result, and read the output. If it fails, fix it and check again. Never say it's done, fixed or working unless you saw it work. If you could not check, say exactly that.
+- Pages, sites and games you build or change: prove them with test_page before you say they work (not Safari or desktop screenshots, which are slower and blurrier). Zero console errors, the screenshots look right, and for a game: start it, use eval to confirm it's really playing, that the player moves on input and that restart works. A game that crashes on start is never "done".
 - Keep going until the whole task is done. Don't stop halfway to ask what to do next, unless the choice really is theirs or you are blocked.
 - Install packages only into the project's own environment (its .venv, package.json, uv or requirements). Never install globally (sudo, pip outside a venv, npm -g, brew) unless they ask. If a tool is missing and the project has no environment, ask first.
 - Stay inside the project folder. Don't search their whole computer or home folder unless they ask; if something you expected is missing, say so and ask.
@@ -5341,6 +5342,7 @@ def run_turn(history):
         global turn_tok, turn_think, turn_think_on
         turn_think_on = wants_thinking(history)
         turn_tok = 0; turn_think = 0.0; began = time.time(); retried = made_room = False; recent = []
+        web_changed = []; proved = True; pushed = 0     # pages or games changed this turn, and whether test_page checked them after
         label = "Reading"
         for _ in range(MAX_STEPS):
             limit = away_limit()
@@ -5373,6 +5375,13 @@ def run_turn(history):
                     if call["id"] in helped:
                         history.append({"role": "tool", "tool_call_id": call["id"], "content": helped[call["id"]]}); continue
                     recent.append((call["function"]["name"], call["function"].get("arguments")))
+                    fname = call["function"]["name"]
+                    if fname in ("write_file", "edit_file"):
+                        try: path = str(json.loads(call["function"].get("arguments") or "{}").get("path", ""))
+                        except ValueError: path = ""
+                        if re.search(r"\.(html?|jsx?|tsx?|mjs|vue|svelte|css)$", path, re.I) and "/node_modules/" not in path:
+                            web_changed.append(path); proved = False
+                    elif fname == "test_page": proved = True
                     if circling(recent):                   # the same call, or the same few, a third time in a row
                         history.append({"role": "tool", "tool_call_id": call["id"], "content": REPEAT})
                         print(f"  {DIM}└ skipped: the same call a third time{R}"); continue
@@ -5399,6 +5408,16 @@ def run_turn(history):
                 print()
                 history.append({"role": "user", "content": "By the way: " + " ".join(notes)})
                 label = "Reading"
+            elif not calls and web_changed and not proved and pushed < 2:
+                # it changed a page or game and is about to say it's done without having looked: send it back to prove it first
+                pushed += 1
+                print(f"\n  {DIM}└ checking it before calling it done{R}")
+                history.append({"role": "user", "content":
+                    "(Before you finish: you changed " + ", ".join(dict.fromkeys(os.path.basename(x) for x in web_changed))[:300]
+                    + " but haven't proven it works since. Run test_page on it now (start the dev server first if it needs one). "
+                    "For a game: click or press to start, wait, then use eval to confirm the play scene or state is running, the player moves "
+                    "on input, and restart works; zero console errors. Fix anything that fails and check again. Then tell me what you checked.)"})
+                label = "Checking"
             elif not calls:
                 if speak and text: say_aloud(text)
                 took = time.time() - began
