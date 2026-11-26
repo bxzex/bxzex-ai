@@ -1,1 +1,1 @@
-1.18.16: an image you drag or paste into the box shows above it with a small picture, its name and size, and an ✕ you can click to take it out
+1.18.17: page checks can read a page's real state (eval), so games are proven to start, move and restart before it says they work; the game skills got a crash checklist for Phaser and Three.js

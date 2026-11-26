@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.16"
+VERSION = "1.18.17"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2338,6 +2338,10 @@ def step(page, line):
     elif verb == "wait": page.wait_for_timeout(min(int(rest or 1000), 15000))
     elif verb in ("go", "open"): page.goto(rest, wait_until="load", timeout=45000)
     elif verb == "press": page.keyboard.press(rest)
+    elif verb == "eval":                          # read the app's real state: which scene runs, where the player is, the score
+        val = page.evaluate("(() => { try { const v = (0, eval)(%s); return typeof v === 'object' ? JSON.stringify(v) : String(v); } "
+                            "catch (e) { return 'eval error: ' + e.message; } })()" % json.dumps(rest))
+        return f"{rest[:80]} => {str(val)[:300]}"
     page.wait_for_timeout(700)
 with sync_playwright() as p:
     for dev, (profile, engine) in job["devices"].items():
@@ -2356,7 +2360,9 @@ with sync_playwright() as p:
             except Exception: pass
             got["status"] = res.status if res else None; got["load_seconds"] = round(time.time() - t, 1)
             for line in job["steps"]:
-                try: step(page, line)
+                try:
+                    said = step(page, line)
+                    if said: got.setdefault("evals", []).append(said)
                 except Exception as e: got.setdefault("step_errors", []).append(f"{line}: {str(e).splitlines()[0][:160]}")
             got.update(page.evaluate(LOOK))
             page.screenshot(path=job["shots"] + f"-{dev}.png")
@@ -2436,6 +2442,7 @@ def test_page(url, devices="phone,tablet,desktop", steps="", see="true"):
         if g.get("step_errors"): problems.append("steps that failed: " + " | ".join(g["step_errors"]))
         report.append(f"{head}\n\"{g['title']}\" · {g['width']}x{g['height']} screen · page {g['page_height']}px tall · loaded in {g['load_seconds']}s\n"
                       + ("\n".join(f"- {p_}" for p_ in problems) if problems else "- no layout problems found")
+                      + ("\nwhat eval read:\n" + "\n".join(f"  {e}" for e in g["evals"]) if g.get("evals") else "")
                       + f"\nscreenshot: {g['shot']} · whole page: {g['full_shot']}")
         put_line(f"  {DIM}{link(file_link(g['full_shot']), g['device'] + ' screenshot')}{R}")
         if str(see).lower() != "false": PENDING_SHOTS.append((g["device"], g["shot"]))
@@ -4180,7 +4187,9 @@ TOOLS = [
          url="the page: https://site.com, localhost:5173, or an .html file or folder",
          devices="any of phone, small, big, android, tablet, ipad-mini, tablet-landscape, phone-landscape, desktop; default phone,tablet,desktop",
          steps="optional actions before checking, one per line: click Menu · click #signup · click 200,340 · tap 180,600 · type #email me@x.com · "
-               "press Space · hold ArrowRight 1500 · drag 100,500 300,500 · scroll 1200 · wait 1000",
+               "press Space · hold ArrowRight 1500 · drag 100,500 300,500 · scroll 1200 · wait 1000 · "
+               "eval <js> to read the page's real state (for games: the running scene, the player's position, the score), e.g. "
+               "eval window.game.scene.getScenes(true).map(s => s.scene.key)",
          see="false to skip the screenshots, default true"),
     tool("desktop", "Use any app on this computer the way a person does: see the screen, click, type, press keys and shortcuts, use menus, "
          "switch and open apps. The loop: look (the front window's buttons and fields, numbered) or screenshot (see it, saved so the user can "
