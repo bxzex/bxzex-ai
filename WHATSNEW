@@ -1,4 +1,1 @@
-1.18.11: the wake countdown learns how fast your card really starts (down to 15 seconds) instead of never guessing under a minute, and every screen says the card sleeps after 2 minutes idle
-1.18.10: the cloud card now runs Qwopus 3.8 27B uncensored, sharper at code and agent work and thinks less before answering; the model is copied onto the card 32 pieces at a time, so it wakes in about 20 seconds instead of minutes; /cloud login on a new Modal account sets up this same model
-1.18.9: the cloud card sleeps after 2 minutes idle instead of 5, keeps the graphics code it builds between wakes so later starts are quicker, and switches off at once if the engine fails to start instead of waiting and billing
-1.18.8: /usage opens on its own screen, so closing it leaves no blank gap in the chat
+1.18.12: /update sees a new version as soon as it's out, instead of up to 5 minutes later

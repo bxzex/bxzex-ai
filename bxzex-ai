@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.11"
+VERSION = "1.18.12"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -5502,7 +5502,9 @@ def newer(a, b):
     return num(a) > num(b)
 
 def fetch(path):
-    return http_get(f"{UPDATE_URL}/{path}")
+    # GitHub keeps each file cached for about 5 minutes per request type: a fresh query string skips that,
+    # so /update sees a new version the moment it's pushed
+    return http_get(f"{UPDATE_URL}/{path}?t={int(time.time())}")
 
 update_lock = threading.Lock()   # the check at startup and /update never download at the same time
 
