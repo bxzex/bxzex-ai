@@ -1,1 +1,1 @@
-1.18.19: continuing a chat shows a short recap first: what it was about so far, the files it worked on and what you asked last
+1.18.20: page checks can test in Mac Safari (devices safari), click inside a game by its own coordinates (click canvas 480,400) and run an audit that finds layout bugs: text spilling out of boxes, overlapping or off-screen text, a HUD that scrolls away, art at the wrong size, visible collision blocks; games must pass it before they're called done

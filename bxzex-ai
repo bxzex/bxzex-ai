@@ -67,7 +67,7 @@ if REMOTE:
     if not _ctx.get_ca_certs() and os.path.exists("/etc/ssl/cert.pem"): _ctx.load_verify_locations("/etc/ssl/cert.pem")   # python.org builds on a Mac ship without certificates
     urllib.request.install_opener(urllib.request.build_opener(_RemoteKey, urllib.request.HTTPSHandler(context=_ctx)))
 AI_NAME = "BXZEX AI"
-VERSION = "1.18.19"
+VERSION = "1.18.20"
 
 MAC = sys.platform == "darwin"
 WSL = not MAC and "microsoft" in os.uname().release.lower()      # Linux running inside Windows
@@ -2280,7 +2280,8 @@ def plan_block():
 DEVICES = {"phone": ("iPhone 15", "webkit"), "iphone": ("iPhone 15", "webkit"), "small": ("iPhone SE (3rd gen)", "webkit"),
            "big": ("iPhone 15 Pro Max", "webkit"), "android": ("Pixel 7", "chromium"), "tablet": ("iPad Pro 11", "webkit"),
            "ipad": ("iPad Pro 11", "webkit"), "ipad-mini": ("iPad Mini", "webkit"), "tablet-landscape": ("iPad Pro 11 landscape", "webkit"),
-           "phone-landscape": ("iPhone 15 landscape", "webkit"), "desktop": ("", "chromium"), "laptop": ("", "chromium")}
+           "phone-landscape": ("iPhone 15 landscape", "webkit"), "desktop": ("", "chromium"), "laptop": ("", "chromium"),
+           "safari": ("", "webkit"), "desktop-safari": ("", "webkit")}     # a Mac's Safari at desktop size: what most Mac users play in
 BROWSER_HOME = f"{APP_HOME}/browser"     # its own copy of the page checker, when this Python doesn't have one
 PENDING_SHOTS = []                      # screenshots the model should see, added after the tool results
 
@@ -2314,9 +2315,56 @@ LOOK = """() => {
           small_taps: taps.length, small_tap_examples: taps.slice(0, 5).map(e => name(e) + ' ' + Math.round(e.getBoundingClientRect().width) + 'x' + Math.round(e.getBoundingClientRect().height)),
           tiny_text: tiny.length, tiny_examples: tiny.slice(0, 3).map(e => name(e) + ' ' + getComputedStyle(e).fontSize)};
 }"""
+AUDIT = """() => {
+  const out = [], hit = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  const box = r => ({x: r.x, y: r.y, w: r.width, h: r.height});
+  const g = window.game;
+  if (g && g.scene && g.scene.getScenes) {                     // a Phaser game: look inside its scenes
+    for (const sc of g.scene.getScenes(true)) {
+      const cam = sc.cameras.main, W = cam.width, H = cam.height, key = sc.scene.key;
+      const objs = sc.children.list.filter(o => o.visible && o.alpha > 0.05 && o.getBounds);
+      const scr = o => { const b = box(o.getBounds()); if (o.scrollFactorX !== 0) { b.x -= cam.scrollX; b.y -= cam.scrollY; } return b; };
+      const texts = objs.filter(o => o.type === 'Text' && String(o.text).trim());
+      for (const t of texts.filter(t => t.scrollFactorX === 0 || (cam.scrollX < 2 && cam.scrollY < 2))) { const b = scr(t); if (b.x < 0 || b.y < 0 || b.x + b.w > W || b.y + b.h > H) out.push(`${key}: text off the screen: "${String(t.text).slice(0, 40)}"`); }   // world text scrolling past is fine
+      for (let i = 0; i < texts.length; i++) for (let j = i + 1; j < texts.length; j++)
+        if (hit(scr(texts[i]), scr(texts[j]))) out.push(`${key}: texts overlap: "${String(texts[i].text).slice(0, 25)}" and "${String(texts[j].text).slice(0, 25)}"`);
+      for (const r of objs.filter(o => o.type === 'Rectangle' && o.width >= 80 && o.height >= 30 && !(o.displayWidth >= W * 0.9 && o.displayHeight >= H * 0.9))) {   // not full-screen backgrounds
+        const a = scr(r);
+        for (const t of texts) { const b = scr(t);
+          const inside = b.x >= a.x - 2 && b.y >= a.y - 2 && b.x + b.w <= a.x + a.w + 2 && b.y + b.h <= a.y + a.h + 2;
+          if (hit(a, b) && b.w < a.w * 1.5 && !inside) out.push(`${key}: text spills out of its box: "${String(t.text).slice(0, 30)}"`);
+          else if (inside && t.depth > r.depth && (b.y - a.y < 6 || a.y + a.h - b.y - b.h < 6) && b.h > 30) out.push(`${key}: text touches the edge of its box (add padding): "${String(t.text).slice(0, 30)}"`); }
+      }
+      if (cam.scrollX > 5 || cam.scrollY > 5) for (const t of texts.filter(t => t.depth >= 50 && t.scrollFactorX !== 0))
+        out.push(`${key}: HUD text scrolls away with the level (needs setScrollFactor(0)): "${String(t.text).slice(0, 30)}"`);
+      for (const o of objs.filter(o => o.body && o.body.enable !== false && o.frame && o.frame.realWidth)) {
+        if (o.body.width < o.displayWidth * 0.25 || o.body.height < o.displayHeight * 0.25) out.push(`${key}: '${o.texture.key}' is drawn ${Math.round(o.displayWidth)}px but its body is ${Math.round(o.body.width)}x${Math.round(o.body.height)}: art size and body don't match (scale the art or size the body to it)`);
+      }
+      const big = objs.filter(o => (o.type === 'Image' || o.type === 'Sprite') && o.displayWidth > W * 0.6 && o.depth >= 0 && o.texture && !/bg|back|sky|hill/i.test(o.texture.key));
+      for (const o of big.slice(0, 3)) out.push(`${key}: '${o.texture.key}' is stretched to ${Math.round(o.displayWidth)}x${Math.round(o.displayHeight)} and drawn: if it's only for collision, setVisible(false)`);
+    }
+  }
+  const els = [...document.querySelectorAll('body *')].filter(e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e); return r.width && r.height && s.visibility != 'hidden' && s.display != 'none'; });
+  for (const e of els) if (e.scrollWidth > e.clientWidth + 2 && getComputedStyle(e).overflowX == 'hidden' && e.innerText && e.innerText.trim()) out.push(`page: text cut off in ${e.tagName.toLowerCase()} "${e.innerText.trim().slice(0, 30)}"`);
+  return [...new Set(out)].slice(0, 25);
+}"""
+
 def step(page, line):
     verb, _, rest = line.strip().partition(" ")
     verb = verb.lower(); rest = rest.strip()
+    gm = re.fullmatch(r"canvas\s+(\d+)\s*,\s*(\d+)", rest)
+    if verb in ("click", "tap") and gm:          # a spot in the game's own coordinates (Phaser, Pixi, plain canvas), at any window size
+        r = page.evaluate("""() => { const c = [...document.querySelectorAll('canvas')].sort((a, b) => b.width * b.height - a.width * a.height)[0];
+                                     if (!c) return null; const r = c.getBoundingClientRect();
+                                     return {x: r.left, y: r.top, sx: r.width / c.width, sy: r.height / c.height}; }""")
+        if not r: raise RuntimeError("no canvas on the page")
+        gx, gy = int(gm.group(1)), int(gm.group(2))
+        x, y = r["x"] + gx * r["sx"], r["y"] + gy * r["sy"]
+        try:
+            if verb != "tap": raise ValueError
+            page.touchscreen.tap(x, y)
+        except Exception: page.mouse.click(x, y)
+        page.wait_for_timeout(700); return f"clicked the game at {gx},{gy} (screen {round(x)},{round(y)})"
     xy = re.fullmatch(r"(\d+)\s*,\s*(\d+)", rest)
     if verb in ("click", "tap") and xy:
         x, y = int(xy.group(1)), int(xy.group(2))
@@ -2338,6 +2386,9 @@ def step(page, line):
     elif verb == "wait": page.wait_for_timeout(min(int(rest or 1000), 15000))
     elif verb in ("go", "open"): page.goto(rest, wait_until="load", timeout=45000)
     elif verb == "press": page.keyboard.press(rest)
+    elif verb == "audit":                         # look for layout bugs: text spilling out of boxes, overlaps, off-screen, HUD that scrolls, art vs body size
+        found = page.evaluate(AUDIT)
+        return "audit: " + ("no layout problems found" if not found else " | ".join(found))
     elif verb == "eval":                          # read the app's real state: which scene runs, where the player is, the score
         val = page.evaluate("(() => { try { const v = (0, eval)(%s); return typeof v === 'object' ? JSON.stringify(v) : String(v); } "
                             "catch (e) { return 'eval error: ' + e.message; } })()" % json.dumps(rest))
@@ -4185,9 +4236,14 @@ TOOLS = [
          "and check it: sideways scrolling, things too wide, buttons too small to tap, tiny text, broken images, console errors, failed requests. "
          "You also get screenshots to look at. Use it to check anything you build or change, and again after fixing.",
          url="the page: https://site.com, localhost:5173, or an .html file or folder",
-         devices="any of phone, small, big, android, tablet, ipad-mini, tablet-landscape, phone-landscape, desktop; default phone,tablet,desktop",
+         devices="any of phone, small, big, android, tablet, ipad-mini, tablet-landscape, phone-landscape, desktop (Chrome engine), "
+                 "safari (Mac Safari at desktop size); default phone,tablet,desktop. For games and sites on a Mac, include safari",
          steps="optional actions before checking, one per line: click Menu · click #signup · click 200,340 · tap 180,600 · type #email me@x.com · "
                "press Space · hold ArrowRight 1500 · drag 100,500 300,500 · scroll 1200 · wait 1000 · "
+               "audit finds layout bugs on that screen (text spilling out of boxes or off screen, overlapping text, HUD that scrolls away, "
+               "art drawn at the wrong size for its body, collision blocks left visible): run it on every screen of a game · "
+               "click canvas 480,400 clicks a spot inside a game in the game's own coordinates (the numbers from its code, like a button at 480,400), "
+               "the same at any window size · "
                "eval <js> to read the page's real state (for games: the running scene, the player's position, the score), e.g. "
                "eval window.game.scene.getScenes(true).map(s => s.scene.key)",
          see="false to skip the screenshots, default true"),
@@ -4509,7 +4565,7 @@ WORK_WAY = """How you work on real tasks (code, fixes, builds, files, research):
 - Find the real cause. When something fails, read the whole error, find why it happens and fix that. Never retry the same thing unchanged, and never hide an error to make it go away.
 - Make the change that was asked, in the style the project already uses. Don't rewrite or "improve" things nobody asked about.
 - Check your work. After a change, run it: the tests, the build, the script, the page or the command that shows the result, and read the output. If it fails, fix it and check again. Never say it's done, fixed or working unless you saw it work. If you could not check, say exactly that.
-- Pages, sites and games you build or change: prove them with test_page before you say they work (not Safari or desktop screenshots, which are slower and blurrier). Zero console errors, the screenshots look right, and for a game: start it, use eval to confirm it's really playing, that the player moves on input and that restart works. A game that crashes on start is never "done".
+- Pages, sites and games you build or change: prove them with test_page before you say they work (not Safari or desktop screenshots, which are slower and blurrier), on desktop, safari and a phone. Zero console errors, `audit` finds nothing, the screenshots look right, and for a game: start it, use eval to confirm it's really playing, that the player moves on input, that every jump can be made and that restart works. A game that crashes on start or can't be finished is never "done".
 - Keep going until the whole task is done. Don't stop halfway to ask what to do next, unless the choice really is theirs or you are blocked.
 - Install packages only into the project's own environment (its .venv, package.json, uv or requirements). Never install globally (sudo, pip outside a venv, npm -g, brew) unless they ask. If a tool is missing and the project has no environment, ask first.
 - Stay inside the project folder. Don't search their whole computer or home folder unless they ask; if something you expected is missing, say so and ask.
@@ -5415,8 +5471,9 @@ def run_turn(history):
                 history.append({"role": "user", "content":
                     "(Before you finish: you changed " + ", ".join(dict.fromkeys(os.path.basename(x) for x in web_changed))[:300]
                     + " but haven't proven it works since. Run test_page on it now (start the dev server first if it needs one). "
-                    "For a game: click or press to start, wait, then use eval to confirm the play scene or state is running, the player moves "
-                    "on input, and restart works; zero console errors. Fix anything that fails and check again. Then tell me what you checked.)"})
+                    "Use devices desktop, safari and phone-landscape. For a game: start it (click canvas x,y with the button's game coordinates, or press Enter), "
+                    "wait, then use eval to confirm it's really playing, the player moves on input, every platform can be reached and restart works; "
+                    "run audit on every screen; zero console errors. Fix anything that fails and check again. Then tell me what you checked.)"})
                 label = "Checking"
             elif not calls:
                 if speak and text: say_aloud(text)
