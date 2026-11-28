@@ -93,7 +93,7 @@ Your computer too small, or just want it faster? Type `/cloud` and it runs the s
 1. It installs Modal's command line tool if you don't have it.
 2. It opens Modal's login page in your browser. New to Modal? The same page makes you an account. Add a card in Modal's billing settings so it keeps running once any free credit runs out.
 3. You pick the graphics card. The H100 is the fastest. The A100 and L40S cost less per hour and are a bit slower. The H200 runs a bigger, sharper model that is better at code and long jobs. It costs a little more per hour and its first copy is about 120GB, so that first setup takes 20 to 30 minutes.
-4. It makes a private key only your computer has, copies the model into your Modal account (about 23GB, only the first time, it goes from Modal's side so your internet doesn't matter), puts it online and starts it once to check it works.
+4. It makes a private key only your computer has, copies the model into your Modal account (about 30GB, only the first time, it goes from Modal's side so your internet doesn't matter), puts it online and starts it once to check it works.
 
 That takes about five minutes. After that you use it exactly as before.
 
